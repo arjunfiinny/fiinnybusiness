@@ -185,6 +185,7 @@ jobs:
             sed -i '' "s/PROVISIONING_PROFILE_SPECIFIER = [^;]*;/PROVISIONING_PROFILE_SPECIFIER = ${PROFILE_NAME};/g" "$PBX" || true
           fi
 
+<<<<<<< HEAD
       - name: Disable Swift module interfaces (fix bridging-header error)
         shell: bash
         run: |
@@ -223,6 +224,12 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+=======
+      - name: Bump build number in pubspec.yaml (safe replace)
+        shell: bash
+        run: |
+          set -euxo pipefail
+>>>>>>> 6bf26a5 (🧹 Clean pubspec.yaml version duplication bug New)
           # Read base version (left of '+')
           base_version="$(grep -m1 '^version:' pubspec.yaml | cut -d ':' -f2 | xargs | cut -d '+' -f1)"
           # Replace the FIRST occurrence of version: ... in-place (no duplicates)
