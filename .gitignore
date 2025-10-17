@@ -43,4 +43,10 @@ android/.idea/
 **/io/flutter/plugins/GeneratedPluginRegistrant.java
 **/io/flutter/plugins/GeneratedPluginRegistrant.kt
 **/io/flutter/plugins/
+<<<<<<< HEAD
 # Firebase iOS config (provided via CI secrets)
+=======
+server/ai_proxy/.env
+server/ai_proxy/node_modules/
+>>>>>>> 289d72e (wip: resolve after stash pop)
+server/ai_proxy/.env

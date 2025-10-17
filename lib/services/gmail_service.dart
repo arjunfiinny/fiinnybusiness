@@ -10,6 +10,10 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import '../models/expense_item.dart';
 import '../models/income_item.dart';
 
+// 🔗 NEW: AI config + extractor (LLM fallback)
+import 'package:lifemap/config/app_config.dart';
+import './ai/tx_extractor.dart';
+
 import './ingest_index_service.dart';
 import './tx_key.dart';
 import './ingest_state_service.dart';
@@ -24,13 +28,13 @@ import './recurring/recurring_engine.dart';
 // Merge policy: OFF (for testing), ENRICH (recommended), SILENT (current behavior)
 enum ReconcilePolicy { off, mergeEnrich, mergeSilent }
 
-
 class GmailService {
   // ── Behavior toggles ────────────────────────────────────────────────────────
   static const bool AUTO_POST_TXNS = true;      // create expenses/incomes immediately
   static const bool USE_SERVICE_WRITES = false; // write via Firestore set(merge)
   static const int DEFAULT_OVERLAP_HOURS = 24;
   static const ReconcilePolicy RECONCILE_POLICY = ReconcilePolicy.mergeEnrich;
+
   bool _looksLikeCardBillPayment(String text, {String? bank, String? last4}) {
     final u = text.toUpperCase();
     final payCue = RegExp(r'(CARD\s*PAYMENT|PAYMENT\s*RECEIVED|THANK YOU.*PAYING|BILL\s*PAYMENT)').hasMatch(u);
@@ -39,6 +43,7 @@ class GmailService {
     final bankHit  = (bank != null) && u.contains((bank).toUpperCase());
     return payCue && (last4Hit || bankHit || ccCue);
   }
+
   String _maskSensitive(String s) {
     var t = s;
     // mask long digit runs (cards/accounts), keep last4
@@ -50,9 +55,6 @@ class GmailService {
     t = t.replaceAll(RegExp(r'\b(OTP|ONE[-\s]?TIME\s*PASSWORD)\b[^\n]*', caseSensitive: false), '[REDACTED OTP]');
     return t;
   }
-
-
-
 
   // Testing backfill like SMS
   static const bool TEST_MODE = true;
@@ -68,6 +70,7 @@ class GmailService {
   GoogleSignInAccount? _currentUser;
 
   final IngestIndexService _index = IngestIndexService();
+
   // lib/services/gmail_service.dart  (inside class GmailService)
   static const bool WRITE_BILL_AS_EXPENSE = false; // ← turn OFF to avoid double-count
 
@@ -89,7 +92,6 @@ class GmailService {
     if (days <= 3) return 'due_soon';
     return 'upcoming';
   }
-
 
   // Deterministic id from txKey (djb2) — keeps SMS/Gmail parity
   String _docIdFromKey(String key) {
@@ -216,6 +218,7 @@ class GmailService {
     await _googleSignIn.signOut();
     _currentUser = null;
   }
+
   Future<void> _maybeAttachToCardBillPayment({
     required String userId,
     required double amount,
@@ -270,9 +273,6 @@ class GmailService {
     }, SetOptions(merge: true));
   }
 
-
-
-
   // ── Legacy compat: keep old entry point alive ──────────────────────────────
   Future<void> fetchAndStoreTransactionsFromGmail(
       String userId, {
@@ -298,7 +298,6 @@ class GmailService {
   }
 
   // ── New entry points ───────────────────────────────────────────────────────
-
   Future<void> initialBackfill({
     required String userId,
     int newerThanDays = 1000,
@@ -357,8 +356,6 @@ class GmailService {
         '(bank OR card OR transaction OR credited OR debited OR purchase OR spent OR withdrawn OR payment OR UPI OR refund OR salary OR invoice OR receipt OR statement OR bill) '
         'newer_than:${newerDays}d -in:spam -in:trash -category:promotions';
 
-
-
     String? pageToken;
     DateTime? newestTouched;
 
@@ -370,7 +367,6 @@ class GmailService {
         pageToken: pageToken,
         labelIds: ['INBOX'],
       ));
-
 
       final msgs = list.messages ?? [];
       if (msgs.isEmpty) break;
@@ -409,6 +405,39 @@ class GmailService {
     }
   }
 
+  // 🔗 LLM fallback helper (rules-first, LLM-last)
+  Future<_LlmResult?> _llmLabelIfNeeded({
+    required String combinedPreview,
+    required double amount,
+    required String initialMerchantNorm,
+    required DateTime date,
+    required double rulesConfidence,
+  }) async {
+    if (!AiConfig.llmOn) return null;
+    if (rulesConfidence >= AiConfig.confThresh) return null;
+
+    try {
+      final labels = await TxExtractor.labelUnknown([
+        TxRaw(
+          amount: amount,
+          merchant: initialMerchantNorm.isNotEmpty ? initialMerchantNorm : 'MERCHANT',
+          desc: combinedPreview, // short preview, redacted upstream
+          date: date.toIso8601String(),
+        ),
+      ]);
+      if (labels.isEmpty) return null;
+      final l = labels.first;
+      return _LlmResult(
+        category: l.category,
+        confidence: l.confidence,
+        merchantNorm: l.merchantNorm,
+      );
+    } catch (e) {
+      _log('LLM fallback error: $e');
+      return null;
+    }
+  }
+
   // returns message DateTime if ingested, else null
   Future<DateTime?> _handleMessage({
     required String userId,
@@ -424,13 +453,12 @@ class GmailService {
     if (combined.isEmpty) return null;
 
     // ── Early skips & special routing (safe) ─────────────────────────────────
-// Peek first for direction+amount so we don't drop real txns by mistake.
     final _peekFx = _extractFx(combined);
     final _peekAmt = _peekFx == null ? _extractAnyInr(combined) : (_peekFx['amount'] as double?);
     final _peekDir = _inferDirection(combined); // 'debit'|'credit'|null
     final _looksTxn = (_peekDir != null && (_peekAmt != null && _peekAmt > 0));
 
-// Drop newsletters/promos ONLY if they do NOT look like a transaction.
+    // Drop newsletters/promos ONLY if they do NOT look like a transaction.
     if (filt.isLikelyNewsletter(listId, fromHdr) && !_looksTxn) {
       if (_DEBUG) _log('drop: newsletter without txn signals');
       return null;
@@ -440,20 +468,18 @@ class GmailService {
       return null;
     }
 
-// Balance alerts often include legit credits ("credited ... Avl bal ...").
-// So ONLY drop balance alerts when there is NO clear txn signal.
+    // Balance alerts: drop only when no txn signal.
     if (filt.isLikelyBalanceAlert(combined) && !_looksTxn) {
       if (_DEBUG) _log('drop: balance alert without txn signals');
       return null;
     }
 
-// Card bill logic: allow card-bill notices; drop other statements/bills.
+    // Card bill logic: allow card-bill notices; drop other statements/bills.
     final cardBillCue = filt.isLikelyCardBillNotice(combined);
     if (!cardBillCue && filt.isStatementOrBillNotice(combined) && !_looksTxn) {
       if (_DEBUG) _log('drop: statement/bill without txn signals');
       return null;
     }
-
 
     // Extract common signals
     final msgDate = DateTime.fromMillisecondsSinceEpoch(
@@ -516,7 +542,7 @@ class GmailService {
         'merchantKey': (bank ?? 'CREDIT CARD').toUpperCase(),
       }, SetOptions(merge: true));
 
-      // Optional: legacy expense write (hidden from spend) to keep UI working
+      // Optional legacy write to expenses is guarded by flag
       if (WRITE_BILL_AS_EXPENSE) {
         final key = buildTxKey(
           bank: bank, amount: total, time: msgDate, type: 'debit', last4: last4,
@@ -557,7 +583,6 @@ class GmailService {
       return msgDate;
     }
 
-
     // Otherwise, proceed with normal debit/credit
     final direction = _inferDirection(combined); // 'debit' | 'credit' | null
     if (direction == null) return null;
@@ -566,15 +591,58 @@ class GmailService {
     // Merchant extraction & normalization (smarter)
     final merchantRaw = _guessMerchantSmart(combined) ?? upiSender;
 
-    final merchantNorm = MerchantAlias.normalizeFromContext(
+    // allow mutation after LLM
+    var merchantNorm = MerchantAlias.normalizeFromContext(
       raw: merchantRaw,
       upiVpa: upiVpa,
       emailDomain: emailDomain,
     );
-    final merchantKey = (merchantNorm.isNotEmpty
+    var merchantKey = (merchantNorm.isNotEmpty
         ? merchantNorm
         : (emailDomain ?? last4 ?? bank ?? 'UNKNOWN'))
         .toUpperCase();
+
+    // Rules category first
+    String rulesCategory = 'Other';
+    String rulesSubcategory = '';
+    double rulesConfidence = 0.0;
+    List<String> rulesTags = const [];
+
+    try {
+      final cat = CategoryRules.categorizeMerchant(combined, merchantKey);
+      rulesCategory = cat.category;
+      rulesSubcategory = cat.subcategory;
+      rulesConfidence = cat.confidence;
+      rulesTags = cat.tags;
+    } catch (_) {}
+
+    // LLM fallback (only if low confidence)
+    final preview = _preview(_maskSensitive(combined));
+    String finalCategory = rulesCategory;
+    String finalSubcategory = rulesSubcategory;
+    double finalConfidence = rulesConfidence;
+    String categorySource = 'rules';
+
+    if (AiConfig.llmOn && rulesConfidence < AiConfig.confThresh) {
+      final llm = await _llmLabelIfNeeded(
+        combinedPreview: preview,
+        amount: amount,
+        initialMerchantNorm: merchantNorm,
+        date: msgDate,
+        rulesConfidence: rulesConfidence,
+      );
+      if (llm != null) {
+        if ((llm.category).isNotEmpty) {
+          finalCategory = llm.category;
+          finalConfidence = llm.confidence;
+          categorySource = 'llm';
+        }
+        if (llm.merchantNorm.isNotEmpty) {
+          merchantNorm = llm.merchantNorm;
+          merchantKey = merchantNorm.toUpperCase();
+        }
+      }
+    }
 
     // txKey + claim for idempotency
     final key = buildTxKey(
@@ -594,7 +662,7 @@ class GmailService {
       'threadId': msg.threadId,
       'internalDateMs': int.tryParse(msg.internalDate ?? '0'),
       'raw': _maskSensitive(combined),
-      'rawPreview': _preview(combined),
+      'rawPreview': preview,
       'emailDomain': emailDomain,
       'when': Timestamp.fromDate(DateTime.now()),
       'txKey': key,
@@ -608,61 +676,58 @@ class GmailService {
       'instrument': instrument,
     };
 
-  String? existingDocId;
-  if (RECONCILE_POLICY != ReconcilePolicy.off) {
-  existingDocId = await CrossSourceReconcile.maybeMerge(
-  userId: userId,
-  direction: direction,
-  amount: amount,
-  timestamp: msgDate,
-  cardLast4: last4,
-  merchantKey: merchantKey,
-  txKey: key,
-  upiVpa: upiVpa,
-  issuerBank: bank,
-  instrument: instrument,
-  network: network,
-    amountTolerancePct: (amountFx != null || isIntl) ? 2.0 : 0.5,
-    newSourceMeta: sourceMeta,
-  );
-  }
+    String? existingDocId;
+    if (RECONCILE_POLICY != ReconcilePolicy.off) {
+      existingDocId = await CrossSourceReconcile.maybeMerge(
+        userId: userId,
+        direction: direction,
+        amount: amount,
+        timestamp: msgDate,
+        cardLast4: last4,
+        merchantKey: merchantKey,
+        txKey: key,
+        upiVpa: upiVpa,
+        issuerBank: bank,
+        instrument: instrument,
+        network: network,
+        amountTolerancePct: (amountFx != null || isIntl) ? 2.0 : 0.5,
+        newSourceMeta: sourceMeta,
+      );
+    }
 
-  if (existingDocId != null) {
-  if (RECONCILE_POLICY == ReconcilePolicy.mergeEnrich) {
-  final col = (direction == 'debit') ? 'expenses' : 'incomes';
-  final ref = FirebaseFirestore.instance
-      .collection('users').doc(userId)
-      .collection(col).doc(existingDocId);
+    if (existingDocId != null) {
+      if (RECONCILE_POLICY == ReconcilePolicy.mergeEnrich) {
+        final col = (direction == 'debit') ? 'expenses' : 'incomes';
+        final ref = FirebaseFirestore.instance
+            .collection('users').doc(userId)
+            .collection(col).doc(existingDocId);
 
-  await ref.set({
-  // mark that both SMS and Gmail contributed
-  'ingestSources': FieldValue.arrayUnion(['gmail']),
+        await ref.set({
+          // mark that both SMS and Gmail contributed
+          'ingestSources': FieldValue.arrayUnion(['gmail']),
+          // add/refresh a lightweight gmail record
+          'sourceRecord.gmail': {
+            'gmailId': msg.id,
+            'threadId': msg.threadId,
+            'internalDateMs': int.tryParse(msg.internalDate ?? '0'),
+            'rawPreview': preview,
+            'emailDomain': emailDomain,
+            'txKey': key,
+            'when': Timestamp.fromDate(DateTime.now()),
+          },
+          // optional breadcrumbs
+          'mergeHints': {
+            'gmailMatched': true,
+            'gmailTxKey': key,
+          },
+        }, SetOptions(merge: true));
+      }
 
-  // add/refresh a lightweight gmail record
-  'sourceRecord.gmail': {
-  'gmailId': msg.id,
-  'threadId': msg.threadId,
-  'internalDateMs': int.tryParse(msg.internalDate ?? '0'),
-  'rawPreview': _preview(combined),
-  'emailDomain': emailDomain,
-  'txKey': key,
-  'when': Timestamp.fromDate(DateTime.now()),
-  },
+      _log('merge(${direction}) -> ${existingDocId} [policy: $RECONCILE_POLICY]');
+      return msgDate;
+    }
 
-  // optional breadcrumbs
-  'mergeHints': {
-  'gmailMatched': true,
-  'gmailTxKey': key,
-  },
-  }, SetOptions(merge: true));
-  }
-
-  _log('merge(${direction}) -> ${existingDocId} [policy: $RECONCILE_POLICY]');
-  return msgDate;
-  }
-
-
-  final note = _cleanNoteSimple(combined);
+    final note = _cleanNoteSimple(combined);
     final currency = (amountFx?['currency'] as String?) ?? 'INR';
     final isIntlResolved = isIntl || (amountFx != null && currency.toUpperCase() != 'INR');
     final counterparty = _deriveCounterparty(
@@ -719,22 +784,16 @@ class GmailService {
         'txKey': key,
       }, SetOptions(merge: true));
 
+      // ✅ write category (rules or LLM)
+      await expRef.set({
+        'category': finalCategory,
+        'subcategory': finalSubcategory,
+        'categoryConfidence': finalConfidence,
+        'categorySource': categorySource, // "rules" | "llm"
+        'tags': [...(e.tags ?? const []), ...rulesTags],
+      }, SetOptions(merge: true));
+
       try {
-        final cat = CategoryRules.categorizeMerchant(combined, merchantKey);
-        await expRef.set({
-          'category': cat.category,
-          'subcategory': cat.subcategory,
-          'categoryConfidence': cat.confidence,
-          'tags': [...(e.tags ?? const []), ...cat.tags],
-        }, SetOptions(merge: true));
-      } catch (_) {}
-
-        await expRef.set({
-        'ingestSources': FieldValue.arrayUnion(['gmail']),
-        }, SetOptions(merge: true));
-
-
-  try {
         await RecurringEngine.maybeAttachToSubscription(userId, expRef.id);
         await RecurringEngine.maybeAttachToLoan(userId, expRef.id);
         await RecurringEngine.markPaidIfInWindow(userId, expRef.id);
@@ -756,6 +815,7 @@ class GmailService {
           enabled: true,
         );
       } catch (_) {}
+
       if (_looksLikeCardBillPayment(combined, bank: bank, last4: last4)) {
         await _maybeAttachToCardBillPayment(
           userId: userId,
@@ -767,8 +827,6 @@ class GmailService {
           sourceMeta: sourceMeta,
         );
       }
-
-
     } else {
       final incRef = FirebaseFirestore.instance
           .collection('users').doc(userId)
@@ -800,12 +858,17 @@ class GmailService {
         if (merchantNorm.isNotEmpty) 'merchant': merchantNorm,
         'txKey': key,
       }, SetOptions(merge: true));
+
+      // ✅ write category (rules or LLM)
       await incRef.set({
-      'ingestSources': FieldValue.arrayUnion(['gmail']),
+        'category': finalCategory,
+        'subcategory': finalSubcategory,
+        'categoryConfidence': finalConfidence,
+        'categorySource': categorySource, // "rules" | "llm"
+        'tags': [...(i.tags ?? const []), ...rulesTags],
       }, SetOptions(merge: true));
 
-
-  try {
+      try {
         await IngestJobQueue.enqueue(
           userId: userId,
           txKey: key,
@@ -823,11 +886,9 @@ class GmailService {
       } catch (_) {}
     }
 
-    _log('WRITE email type=$direction amt=$amount key=$key domain=${emailDomain ?? "-"}');
+    _log('WRITE email type=$direction amt=$amount key=$key domain=${emailDomain ?? "-"} src=$categorySource');
     return msgDate;
   }
-
-
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -842,7 +903,6 @@ class GmailService {
         final jitter = math.Random().nextInt(250);
         final backoffMs = ((math.pow(2, attempt) as num).toInt() * 300) + jitter;
         await Future.delayed(Duration(milliseconds: backoffMs));
-
       }
     }
   }
@@ -969,8 +1029,7 @@ class GmailService {
   String? _fromDomain(List<gmail.MessagePartHeader>? headers) {
     if (headers == null) return null;
     final from = _getHeader(headers, 'from') ?? '';
-    final m = RegExp(r'[<\s]([A-Za-z0-9._%+-]+)@([A-Za-z0-9.-]+\.[A-Za-z]{2,})[>\s]?',
-        caseSensitive: false)
+    final m = RegExp(r'[<\s]([A-Za-z0-9._%+-]+)@([A-Za-z0-9.-]+\.[A-Za-z]{2,})[>\s]?', caseSensitive: false)
         .firstMatch(from);
     if (m != null) return (m.group(2) ?? '').toLowerCase();
     final reply =
@@ -990,8 +1049,7 @@ class GmailService {
 
   double? _extractAnyInr(String text) {
     final rxs = <RegExp>[
-      RegExp(r'(?:₹|\bINR\b|(?<![A-Z])Rs\.?|\bRs\b)\s*([0-9][\d,]*(?:\.\d{1,2})?)',
-          caseSensitive: false),
+      RegExp(r'(?:₹|\bINR\b|(?<![A-Z])Rs\.?|\bRs\b)\s*([0-9][\d,]*(?:\.\d{1,2})?)', caseSensitive: false),
       RegExp(r'\bamount\s+of\s+([0-9][\d,]*(?:\.\d{1,2})?)', caseSensitive: false),
     ];
     for (final rx in rxs) {
@@ -1030,10 +1088,8 @@ class GmailService {
     return null;
   }
 
-  // infer debit/credit from common cues — ignores "credit card/debit card" noise & treats autopay as debit.
   // infer debit/credit from common cues (ignore "credit card"/"debit card" noise, treat autopay as debit)
   String? _inferDirection(String body) {
-    // strip card type tokens so "credit" inside "credit card" doesn't influence direction
     final cleaned = body
         .replaceAll(RegExp(r'\bcredit\s+card\b', caseSensitive: false), '')
         .replaceAll(RegExp(r'\bdebit\s+card\b', caseSensitive: false), '')
@@ -1073,7 +1129,6 @@ class GmailService {
     if (dIdx >= 0 && cIdx >= 0) return dIdx < cIdx ? 'debit' : 'credit';
     return null;
   }
-
 
   // Merchant extraction with "Merchant Name:" / "for ..." / known brands
   String? _guessMerchantSmart(String text) {
@@ -1304,7 +1359,7 @@ class _GoogleAuthClient extends http.BaseClient {
   }
 }
 
-// ── Small value class for card bill meta ──────────────────────────────────────
+// ── Small value classes ──────────────────────────────────────────────────────
 class _BillInfo {
   final double? totalDue;
   final double? minDue;
@@ -1318,4 +1373,11 @@ class _BillInfo {
     this.statementStart,
     this.statementEnd,
   });
+}
+
+class _LlmResult {
+  final String category;
+  final double confidence;
+  final String merchantNorm;
+  _LlmResult({required this.category, required this.confidence, required this.merchantNorm});
 }
