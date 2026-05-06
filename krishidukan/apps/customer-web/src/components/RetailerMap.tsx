@@ -1,10 +1,17 @@
 import { useEffect, useRef } from 'react';
 import type { Map, Marker } from 'leaflet';
-import type { Retailer, StockResult } from '../demoData';
+import type { Retailer } from '../demoData';
 import { formatDistance } from '../demoData';
 
+export interface MapStockResult {
+  retailer: Retailer;
+  stock: { price: number; mrp: number; inStock: boolean; quantity: number };
+  distanceM: number;
+  type?: string;
+}
+
 interface Props {
-  results: StockResult[];
+  results: MapStockResult[];
   userLat: number;
   userLng: number;
   onSelect: (retailer: Retailer) => void;
@@ -79,7 +86,7 @@ export function RetailerMap({ results, userLat, userLng, onSelect, selected }: P
     });
   }, [results, selected]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  function renderMarkers(L: typeof import('leaflet'), map: Map, data: StockResult[], cb: (r: Retailer) => void) {
+  function renderMarkers(L: typeof import('leaflet'), map: Map, data: MapStockResult[], cb: (r: Retailer) => void) {
     data.forEach(({ retailer, stock, distanceM: d }) => {
       const isInStock = stock.inStock;
       const icon = L.divIcon({

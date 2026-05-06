@@ -6,6 +6,8 @@ import { DashboardPage } from './pages/DashboardPage';
 import { ShopsPage } from './pages/ShopsPage';
 import { ShopDetailPage } from './pages/ShopDetailPage';
 import { AnalyticsPage } from './pages/AnalyticsPage';
+import { SalesPage } from './pages/SalesPage';
+import { RetailersPage } from './pages/RetailersPage';
 
 function Layout() {
   return (
@@ -14,6 +16,8 @@ function Layout() {
       <main style={{ flex: 1, overflowY: 'auto' }}>
         <Routes>
           <Route path="/" element={<DashboardPage />} />
+          <Route path="/sales" element={<SalesPage />} />
+          <Route path="/retailers" element={<RetailersPage />} />
           <Route path="/shops" element={<ShopsPage />} />
           <Route path="/shops/:id" element={<ShopDetailPage />} />
           <Route path="/analytics" element={<AnalyticsPage />} />

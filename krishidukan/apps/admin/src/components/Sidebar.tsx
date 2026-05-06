@@ -1,10 +1,12 @@
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, Store, BarChart3, LogOut } from 'lucide-react';
+import { LayoutDashboard, Store, BarChart3, LogOut, ShoppingCart, MapPin } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 
 const NAV = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
-  { to: '/shops', label: 'Shops', icon: Store },
+  { to: '/sales', label: 'Record Sale', icon: ShoppingCart },
+  { to: '/retailers', label: 'Retailers', icon: MapPin },
+  { to: '/shops', label: 'Pending Shops', icon: Store },
   { to: '/analytics', label: 'Analytics', icon: BarChart3 },
 ];
 
@@ -23,8 +25,8 @@ export function Sidebar() {
   return (
     <aside style={s['sidebar']}>
       <div style={s['logo']}>
-        <div style={s['logoText']}>KrishiDukan</div>
-        <div style={s['subText']}>Admin Panel</div>
+        <div style={s['logoText']}>⚡ KrishiDukan</div>
+        <div style={s['subText']}>KaranArjun Dealer Panel</div>
       </div>
       <nav style={s['nav']}>
         {NAV.map(({ to, label, icon: Icon }) => (
