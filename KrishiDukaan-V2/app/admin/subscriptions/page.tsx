@@ -7,11 +7,12 @@ import {
   UserPlus, Trash2, Ban,
 } from "lucide-react";
 import {
-  fetchAllSubscriptions, fetchAllUsers, fetchAllPlans, auth,
+  auth,
   adminRevokeSubscription, adminExtendSubscription, adminSetSubscriptionExpiry, adminManualActivate,
   adminUpdateSubscriptionSeats, fetchFailedPayments
 } from "../../firebase";
 import { SearchableDropdown } from "../_components/searchable-dropdown";
+import { getSubscriptions, getUsers, getPlans, invalidateUsers, invalidateSubscriptions } from "../_lib/admin-data";
 import { PLAN_FEATURE_CATALOG, featureLabel } from "../_lib/plan-features";
 
 // Thin wrapper around the new server-validated admin routes (plan CRUD,
@@ -88,6 +89,7 @@ export default function AdminSubscriptionsPage() {
   const [activeTab, setActiveTab] = useState<'subscriptions' | 'plans' | 'failedPayments'>('subscriptions');
   const [loading, setLoading] = useState(true);
   const [failedPaymentsError, setFailedPaymentsError] = useState<string | null>(null);
+  const [failedPaymentsSearch, setFailedPaymentsSearch] = useState("");
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
 
@@ -157,11 +159,19 @@ export default function AdminSubscriptionsPage() {
     };
   }, [anyModalOpen]);
 
-  const load = async () => {
+  /**
+   * `force` bypasses the shared admin cache — used by the Refresh buttons and after
+   * every write on this tab. A plain mount reuses the cached users/subscriptions
+   * snapshot the other admin tabs may already have paid for.
+   */
+  const load = async (force = false) => {
+    if (force) { invalidateUsers(); invalidateSubscriptions(); }
     setLoading(true);
     setFailedPaymentsError(null);
     try {
-      const [subsData, usersData, plansData] = await Promise.all([fetchAllSubscriptions(), fetchAllUsers(), fetchAllPlans()]);
+      const [subsData, usersData, plansData] = await Promise.all([
+        getSubscriptions({ force }), getUsers({ force }), getPlans({ force }),
+      ]);
       setSubs(subsData);
       setUsers(usersData);
       setPlans(plansData);
@@ -181,6 +191,29 @@ export default function AdminSubscriptionsPage() {
     const user = users.find(u => u.id === phone || u.uid === phone);
     return user?.name || user?.email || phone || "—";
   };
+
+  const resolveFailedPaymentUserName = (fp: any): string | null => {
+    const phone = fp.userPhone;
+    // fp.userUid was added later; fp.userId may be UID or phone depending on when it was written
+    const u = users.find(u =>
+      (phone && (u.id === phone || u.phone === phone)) ||
+      u.uid === fp.userUid ||
+      u.uid === fp.userId ||
+      u.id === fp.userId
+    );
+    return u?.name || u?.email || null;
+  };
+
+  const filteredFailedPayments = failedPayments.filter((fp) => {
+    const q = failedPaymentsSearch.trim().toLowerCase();
+    if (!q) return true;
+    const userName = resolveFailedPaymentUserName(fp);
+    const paymentId = fp.error?.metadata?.payment_id || fp.error?.metadata?.paymentId;
+    const orderId = fp.orderId || fp.error?.metadata?.order_id;
+    return [userName, fp.userPhone, fp.userId, fp.userUid, paymentId, orderId]
+      .filter(Boolean)
+      .some((v) => String(v).toLowerCase().includes(q));
+  });
 
   const filtered = subs
     .filter(s => {
@@ -233,7 +266,7 @@ export default function AdminSubscriptionsPage() {
     }
     // Refresh after the loading state is cleared so setLoading(true) inside load()
     // doesn't remount the list while revoking is still set, causing a stuck spinner.
-    void load();
+    void load(true);
   };
 
   const handleExtend = async (sub: any) => {
@@ -248,7 +281,7 @@ export default function AdminSubscriptionsPage() {
     } finally {
       setConfirming(null);   // always clears the button state
     }
-    void load();
+    void load(true);
   };
 
   const handleSetExpiry = async (sub: any) => {
@@ -267,7 +300,7 @@ export default function AdminSubscriptionsPage() {
     } finally {
       setConfirming(null);
     }
-    void load();
+    void load(true);
   };
 
   const filteredUsers = users.filter(u =>
@@ -289,7 +322,7 @@ export default function AdminSubscriptionsPage() {
     } finally {
       setSavingSeats(false);
     }
-    void load();
+    void load(true);
   };
 
   const handleManualActivate = async (e: React.FormEvent) => {
@@ -311,7 +344,7 @@ export default function AdminSubscriptionsPage() {
       setManualSuccess(true);
       setManualForm(EMPTY_MANUAL);
       setUserSearch("");
-      await load();
+      await load(true);
     } catch (e) {
       setManualError(e instanceof Error ? e.message : "Activation failed.");
     } finally {
@@ -365,7 +398,7 @@ export default function AdminSubscriptionsPage() {
         await callAdminApi("/api/admin/plans", "POST", body);
       }
       setShowPlanModal(false);
-      await load();
+      await load(true);
     } catch (e) {
       setPlanError(e instanceof Error ? e.message : "Failed to save plan.");
     } finally {
@@ -377,7 +410,7 @@ export default function AdminSubscriptionsPage() {
     setPlanActionError(null);
     try {
       await callAdminApi(`/api/admin/plans/${plan.id}`, "PATCH", { status });
-      await load();
+      await load(true);
     } catch (e) {
       setPlanActionError(e instanceof Error ? e.message : "Failed to update plan status.");
     }
@@ -389,7 +422,7 @@ export default function AdminSubscriptionsPage() {
     setPlanActionError(null);
     try {
       await callAdminApi(`/api/admin/plans/${plan.id}`, "DELETE");
-      await load();
+      await load(true);
     } catch (e) {
       setPlanActionError(e instanceof Error ? e.message : "Failed to delete plan.");
     } finally {
@@ -441,7 +474,7 @@ export default function AdminSubscriptionsPage() {
         notes: assignForm.notes.trim() || undefined,
       });
       setAssignSuccess(true);
-      await load();
+      await load(true);
     } catch (e) {
       setAssignError(e instanceof Error ? e.message : "Failed to assign subscription.");
     } finally {
@@ -477,7 +510,7 @@ export default function AdminSubscriptionsPage() {
         notes: editSubForm.notes.trim() || null,
       });
       setEditingSub(null);
-      await load();
+      await load(true);
     } catch (e) {
       setEditSubError(e instanceof Error ? e.message : "Failed to update subscription.");
     } finally {
@@ -491,7 +524,7 @@ export default function AdminSubscriptionsPage() {
     setActionError(null);
     try {
       await callAdminApi(`/api/admin/subscriptions/${sub.id}`, "PATCH", { action: "cancel" });
-      await load();
+      await load(true);
     } catch (e) {
       setActionError(e instanceof Error ? e.message : "Failed to cancel subscription.");
     } finally {
@@ -584,7 +617,7 @@ export default function AdminSubscriptionsPage() {
           <p className="text-xs sm:text-sm text-on-surface-variant ml-7 sm:ml-9">Manage subscriptions — extend, revoke, or activate.</p>
         </div>
         <div className="grid grid-cols-3 gap-2 shrink-0 sm:flex">
-          <button onClick={() => load()} className="flex items-center justify-center gap-1.5 border border-outline-variant/40 text-xs sm:text-sm font-medium px-2.5 sm:px-3 py-2 rounded-xl hover:bg-surface-container transition-colors">
+          <button onClick={() => load(true)} className="flex items-center justify-center gap-1.5 border border-outline-variant/40 text-xs sm:text-sm font-medium px-2.5 sm:px-3 py-2 rounded-xl hover:bg-surface-container transition-colors">
             <RefreshCw className="h-3.5 w-3.5 sm:h-4 sm:w-4" /> Refresh
           </button>
           <button onClick={() => openAssign()}
@@ -1010,7 +1043,7 @@ export default function AdminSubscriptionsPage() {
               </h2>
               <p className="text-xs text-on-surface-variant mt-0.5">All payment attempts that were declined or cancelled.</p>
             </div>
-            <button onClick={() => load()} className="flex items-center gap-1.5 border border-outline-variant/40 text-xs font-medium px-3 py-2 rounded-xl hover:bg-surface-container transition-colors">
+            <button onClick={() => load(true)} className="flex items-center gap-1.5 border border-outline-variant/40 text-xs font-medium px-3 py-2 rounded-xl hover:bg-surface-container transition-colors">
               <RefreshCw className="h-3.5 w-3.5" /> Refresh
             </button>
           </div>
@@ -1021,24 +1054,36 @@ export default function AdminSubscriptionsPage() {
             </div>
           )}
 
+          {!failedPaymentsError && failedPayments.length > 0 && (
+            <div className="flex items-center gap-3 bg-surface-container-low border border-outline-variant rounded-2xl px-4 py-2.5">
+              <Search className="h-4 w-4 text-outline shrink-0" />
+              <input
+                type="text"
+                placeholder="Search by user name, phone, or payment/order ID…"
+                value={failedPaymentsSearch}
+                onChange={e => setFailedPaymentsSearch(e.target.value)}
+                className="flex-1 bg-transparent border-none focus:ring-0 text-sm text-on-surface placeholder-on-surface-variant"
+              />
+              {failedPaymentsSearch && (
+                <button type="button" onClick={() => setFailedPaymentsSearch("")} className="text-outline hover:text-on-surface">
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+          )}
+
           {!failedPaymentsError && failedPayments.length === 0 ? (
             <div className="rounded-2xl border border-outline-variant/30 bg-surface-container-lowest p-10 text-center text-sm text-on-surface-variant">
               No failed payments recorded yet.
             </div>
+          ) : filteredFailedPayments.length === 0 ? (
+            <div className="rounded-2xl border border-outline-variant/30 bg-surface-container-lowest p-10 text-center text-sm text-on-surface-variant">
+              No failed payments match &ldquo;{failedPaymentsSearch}&rdquo;.
+            </div>
           ) : (
             <div className="space-y-3">
-              {failedPayments.map((fp) => {
-                const userName = (() => {
-                  const phone = fp.userPhone;
-                  // fp.userUid was added later; fp.userId may be UID or phone depending on when it was written
-                  const u = users.find(u =>
-                    (phone && (u.id === phone || u.phone === phone)) ||
-                    u.uid === fp.userUid ||
-                    u.uid === fp.userId ||
-                    u.id === fp.userId
-                  );
-                  return u?.name || u?.email || null;
-                })();
+              {filteredFailedPayments.map((fp) => {
+                const userName = resolveFailedPaymentUserName(fp);
                 const paymentId = fp.error?.metadata?.payment_id || fp.error?.metadata?.paymentId;
                 const orderId = fp.orderId || fp.error?.metadata?.order_id;
                 const errorReason = fp.error?.reason || fp.error?.description || fp.error?.code || 'Unknown error';
