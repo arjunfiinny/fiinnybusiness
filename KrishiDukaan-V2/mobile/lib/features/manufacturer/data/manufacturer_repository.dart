@@ -250,6 +250,18 @@ class ManufacturerRepository {
     return code;
   }
 
+  /// Updates an existing network retailer.
+  ///
+  /// [phone] is the retailer's EXISTING phone and is never changed — it is the
+  /// id every seat listing and assigned product copy references as
+  /// `retailerDocId`, so rewriting it orphaned all of them (assigned products
+  /// vanished from Assign Products on both platforms). Web's edit modal makes
+  /// it immutable for exactly this reason; the parameter is kept only so the
+  /// value can be written back unchanged.
+  ///
+  /// Writes the address to `retailers/{phone}` as well as the invite doc —
+  /// the address lives on the retailer entity, and this method used to update
+  /// only `manufacturerRetailers`, so an edited address was silently dropped.
   Future<void> updateNetworkRetailer({
     required String inviteDocId,
     required String retailerDocId,
@@ -258,30 +270,53 @@ class ManufacturerRepository {
     required String phone,
     required String email,
     required String manufacturerPhone,
+    String? line1,
+    String? city,
+    String? state,
+    String? pincode,
   }) async {
     final now = FieldValue.serverTimestamp();
-    final newPhone = PhoneUtils.normalize(phone);
+    final normalizedPhone = PhoneUtils.normalize(phone);
+
+    final address = {
+      'line1': line1?.trim() ?? '',
+      'city': city?.trim() ?? '',
+      'state': state?.trim() ?? '',
+      'pincode': pincode?.trim() ?? '',
+    };
+    final hasAddress = address.values.any((v) => v.isNotEmpty);
 
     await _db.collection('manufacturerRetailers').doc(inviteDocId).update({
       'shopName': shopName.trim(),
       'ownerName': ownerName.trim(),
-      'retailerPhone': newPhone,
-      'retailerDocId': newPhone,
+      'retailerPhone': normalizedPhone,
+      'retailerDocId': normalizedPhone,
       'retailerEmail': email.trim().toLowerCase(),
+      if (hasAddress) 'address': address,
       'updatedAt': now,
     });
 
+    // The retailer entity is the doc the storefront, store locator and the
+    // web dashboard all read for name/address.
+    try {
+      await _db.collection('retailers').doc(normalizedPhone).set({
+        'shopName': shopName.trim(),
+        'ownerName': ownerName.trim(),
+        'email': email.trim().toLowerCase(),
+        if (hasAddress) 'address': address,
+        'updatedAt': now,
+      }, SetOptions(merge: true));
+    } catch (_) {
+      // Best-effort: the invite doc above is the manufacturer's own record and
+      // has already been updated.
+    }
+
     if (manufacturerPhone.isNotEmpty) {
-      final oldMirrorRef = _db.doc('manufacturers/$manufacturerPhone/retailers/$retailerDocId');
-      final newMirrorRef = _db.doc('manufacturers/$manufacturerPhone/retailers/$newPhone');
-
-      if (retailerDocId != newPhone) {
-        await oldMirrorRef.delete();
-      }
-
-      await newMirrorRef.set({
-        'retailerDocId': newPhone,
-        'retailerPhone': newPhone,
+      await _db
+          .doc('manufacturers/$manufacturerPhone/retailers/$normalizedPhone')
+          .set({
+        'retailerDocId': normalizedPhone,
+        'retailerPhone': normalizedPhone,
         'manufacturerPhone': manufacturerPhone,
         'shopName': shopName.trim(),
         'ownerName': ownerName.trim(),

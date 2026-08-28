@@ -5,7 +5,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:go_router/go_router.dart';
+import '../../dashboard/providers/dashboard_provider.dart';
 import '../../../core/utils/web_links.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/app_config.dart';
@@ -62,10 +64,81 @@ class _NetworkBodyState extends ConsumerState<_NetworkBody> {
   static const _kPageSize = 20;
   int _revealCount = _kPageSize;
 
+  /// Retailer phones picked for a bulk action. Empty means normal browsing —
+  /// selection mode only appears once something is selected, so the ordinary
+  /// tap-to-open flow is unchanged.
+  final Set<String> _selected = {};
+  bool _bulkRunning = false;
+
   @override
   void dispose() {
     _searchCtrl.dispose();
     super.dispose();
+  }
+
+  /// Runs [action] over every selected retailer, then refreshes.
+  ///
+  /// Failures are counted rather than aborting the run: with 20 retailers
+  /// selected, one bad row must not silently leave the rest unprocessed with
+  /// no indication of how far it got.
+  Future<void> _runBulk(
+    List<NetworkRetailerModel> all,
+    String label,
+    Future<void> Function(NetworkRetailerModel) action,
+  ) async {
+    final targets =
+        all.where((r) => _selected.contains(r.phone)).toList(growable: false);
+    if (targets.isEmpty) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('$label ${targets.length} retailer'
+            '${targets.length == 1 ? '' : 's'}?'),
+        content: Text(
+          '$label will be applied to the selected retailer'
+          '${targets.length == 1 ? '' : 's'}.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(label),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _bulkRunning = true);
+    var ok = 0;
+    var failed = 0;
+    for (final r in targets) {
+      try {
+        await action(r);
+        ok++;
+      } catch (_) {
+        failed++;
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _bulkRunning = false;
+      _selected.clear();
+    });
+    ref.invalidate(retailerNetworkProvider(widget.manufacturerPhone));
+    ref.invalidate(seatStatsProvider(widget.manufacturerPhone));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(failed == 0
+            ? '$label applied to $ok retailer${ok == 1 ? '' : 's'}.'
+            : '$label applied to $ok, failed for $failed.'),
+        backgroundColor: failed == 0 ? AppColors.primary : AppColors.error,
+      ),
+    );
   }
 
   @override
@@ -116,6 +189,76 @@ class _NetworkBodyState extends ConsumerState<_NetworkBody> {
 
           return Column(
             children: [
+              // Seat awareness — web's retailers page shows "N of M seats
+              // remaining" here because every assignment consumes one, and
+              // running out is the most common reason an assign silently
+              // fails. The app showed nothing at all.
+              Consumer(
+                builder: (context, ref, _) {
+                  final stats =
+                      ref.watch(seatStatsProvider(widget.manufacturerPhone));
+                  return stats.maybeWhen(
+                    data: (s) {
+                      final none = s.available <= 0;
+                      return Container(
+                        width: double.infinity,
+                        margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: (none ? Colors.orange : AppColors.primary)
+                              .withValues(alpha: 0.10),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: (none ? Colors.orange : AppColors.primary)
+                                .withValues(alpha: 0.35),
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              none
+                                  ? Icons.error_outline
+                                  : Icons.event_seat_outlined,
+                              size: 18,
+                              color: none
+                                  ? Colors.orange.shade800
+                                  : AppColors.primary,
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                none
+                                    ? 'No seats remaining — buy more to assign products.'
+                                    : '${s.available} of ${s.totalPurchased} seats remaining',
+                                style: AppTextStyles.bodySmall.copyWith(
+                                  color: none
+                                      ? Colors.orange.shade900
+                                      : AppColors.onSurface,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                            TextButton(
+                              onPressed: () =>
+                                  context.push('/dashboard/subscription'),
+                              style: TextButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 8),
+                                minimumSize: const Size(0, 30),
+                                tapTargetSize:
+                                    MaterialTapTargetSize.shrinkWrap,
+                              ),
+                              child: Text(none ? 'Buy seats' : 'Manage'),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                    orElse: () => const SizedBox.shrink(),
+                  );
+                },
+              ),
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
                 child: TextField(
@@ -163,6 +306,71 @@ class _NetworkBodyState extends ConsumerState<_NetworkBody> {
                   ),
                 ),
               ),
+              if (_selected.isNotEmpty)
+                Container(
+                  margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: AppColors.primaryContainer.withValues(alpha: 0.35),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    children: [
+                      Text(
+                        '${_selected.length} selected',
+                        style: AppTextStyles.bodySmall
+                            .copyWith(fontWeight: FontWeight.w700),
+                      ),
+                      const Spacer(),
+                      if (_bulkRunning)
+                        const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      else ...[
+                        TextButton(
+                          onPressed: () => _runBulk(
+                            retailers,
+                            'Deactivate',
+                            (r) => ManufacturerRepository()
+                                .deactivateNetworkRetailer(
+                              inviteDocId: r.id,
+                              retailerDocId: r.retailerDocId.isNotEmpty
+                                  ? r.retailerDocId
+                                  : r.phone,
+                              manufacturerId:
+                                  FirebaseAuth.instance.currentUser?.uid ?? '',
+                              manufacturerPhone: widget.manufacturerPhone,
+                            ),
+                          ),
+                          child: const Text('Deactivate'),
+                        ),
+                        TextButton(
+                          onPressed: () => _runBulk(
+                            retailers,
+                            'Reactivate',
+                            (r) => ManufacturerRepository()
+                                .reactivateNetworkRetailer(
+                              inviteDocId: r.id,
+                              retailerDocId: r.retailerDocId.isNotEmpty
+                                  ? r.retailerDocId
+                                  : r.phone,
+                              manufacturerPhone: widget.manufacturerPhone,
+                            ),
+                          ),
+                          child: const Text('Reactivate'),
+                        ),
+                        IconButton(
+                          tooltip: 'Clear selection',
+                          icon: const Icon(Icons.close, size: 18),
+                          onPressed: () => setState(_selected.clear),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
               Expanded(
                 child: visible.isEmpty
                     ? Center(
@@ -189,9 +397,22 @@ class _NetworkBodyState extends ConsumerState<_NetworkBody> {
                               ),
                             );
                           }
+                          final r = visible[i];
+                          final selected = _selected.contains(r.phone);
                           return _RetailerTile(
-                            retailer: visible[i],
+                            retailer: r,
                             manufacturerPhone: widget.manufacturerPhone,
+                            selected: selected,
+                            // Selection mode is entered by long-pressing, so
+                            // the ordinary tap-to-open flow is untouched.
+                            selectionMode: _selected.isNotEmpty,
+                            onToggleSelected: () => setState(() {
+                              if (selected) {
+                                _selected.remove(r.phone);
+                              } else {
+                                _selected.add(r.phone);
+                              }
+                            }),
                           );
                         },
                       ),
@@ -226,8 +447,16 @@ class _NetworkBodyState extends ConsumerState<_NetworkBody> {
 class _RetailerTile extends ConsumerWidget {
   final NetworkRetailerModel retailer;
   final String manufacturerPhone;
-  const _RetailerTile(
-      {required this.retailer, required this.manufacturerPhone});
+  final bool selected;
+  final bool selectionMode;
+  final VoidCallback? onToggleSelected;
+  const _RetailerTile({
+    required this.retailer,
+    required this.manufacturerPhone,
+    this.selected = false,
+    this.selectionMode = false,
+    this.onToggleSelected,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -243,15 +472,39 @@ class _RetailerTile extends ConsumerWidget {
 
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: selected
+            ? const BorderSide(color: AppColors.primary, width: 2)
+            : BorderSide.none,
+      ),
       elevation: 2,
-      child: Padding(
+      // Long-press enters selection mode; once in it, a tap toggles. Keeping
+      // plain tap free preserves the existing open-details behaviour.
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onLongPress: onToggleSelected,
+        onTap: selectionMode ? onToggleSelected : null,
+        child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
+                if (selectionMode)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 10),
+                    child: Icon(
+                      selected
+                          ? Icons.check_circle
+                          : Icons.radio_button_unchecked,
+                      color: selected
+                          ? AppColors.primary
+                          : AppColors.onSurfaceVariant,
+                      size: 20,
+                    ),
+                  ),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -487,6 +740,7 @@ class _RetailerTile extends ConsumerWidget {
           ],
         ),
       ),
+      ),
     );
   }
 
@@ -708,6 +962,12 @@ class _EditRetailerSheetState extends State<_EditRetailerSheet> {
   late final _ownerNameCtrl = TextEditingController(text: widget.retailer.ownerName);
   late final _phoneCtrl = TextEditingController(text: PhoneUtils.toDisplay(widget.retailer.phone));
   late final _emailCtrl = TextEditingController(text: widget.retailer.email ?? '');
+  // Address was editable on web's modal but had no fields here at all, so a
+  // retailer added from the app could never have their address corrected.
+  late final _cityCtrl = TextEditingController(text: widget.retailer.city ?? '');
+  late final _stateCtrl = TextEditingController(text: widget.retailer.state ?? '');
+  late final _pincodeCtrl =
+      TextEditingController(text: widget.retailer.pincode ?? '');
   bool _saving = false;
 
   @override
@@ -716,6 +976,9 @@ class _EditRetailerSheetState extends State<_EditRetailerSheet> {
     _ownerNameCtrl.dispose();
     _phoneCtrl.dispose();
     _emailCtrl.dispose();
+    _cityCtrl.dispose();
+    _stateCtrl.dispose();
+    _pincodeCtrl.dispose();
     super.dispose();
   }
 
@@ -774,6 +1037,47 @@ class _EditRetailerSheetState extends State<_EditRetailerSheet> {
               border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
             ),
           ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _cityCtrl,
+            textCapitalization: TextCapitalization.words,
+            decoration: InputDecoration(
+              labelText: 'City',
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _stateCtrl,
+                  textCapitalization: TextCapitalization.words,
+                  decoration: InputDecoration(
+                    labelText: 'State',
+                    border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12)),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: TextField(
+                  controller: _pincodeCtrl,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.digitsOnly,
+                    LengthLimitingTextInputFormatter(6),
+                  ],
+                  decoration: InputDecoration(
+                    labelText: 'Pincode',
+                    border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12)),
+                  ),
+                ),
+              ),
+            ],
+          ),
           const SizedBox(height: 20),
           SizedBox(
             width: double.infinity,
@@ -830,6 +1134,9 @@ class _EditRetailerSheetState extends State<_EditRetailerSheet> {
         phone: phone,
         email: _emailCtrl.text.trim(),
         manufacturerPhone: widget.manufacturerPhone,
+        city: _cityCtrl.text,
+        state: _stateCtrl.text,
+        pincode: _pincodeCtrl.text,
       );
       widget.onUpdated();
       if (mounted) Navigator.pop(context);
