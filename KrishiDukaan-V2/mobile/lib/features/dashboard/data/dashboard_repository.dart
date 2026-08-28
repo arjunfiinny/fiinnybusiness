@@ -338,23 +338,42 @@ class DashboardRepository {
   /// `discountStartDate`, `discountEndDate`, `effectiveDiscountPct`), then
   /// mirrors the effective percentage into the marketplace `availability[]`
   /// entry so the product page and web show the same value.
+  /// Saves a seller's discount.
+  ///
+  /// [discountType] is `'percentage'` or `'fixed_amount'`, matching web's
+  /// discount-panel. It used to be hardcoded to `'percentage'` here, which
+  /// silently CORRUPTED a fixed-amount discount set on web: web reads its
+  /// discount state back from the `inventory` doc, so any mobile save flipped
+  /// the type to percentage and left a stale `discountFixedAmt` behind — the
+  /// rupee discount simply disappeared for buyers.
+  ///
+  /// [bulkEnabled]/[bulkTiers] are carried through untouched for the same
+  /// reason: they're web-only fields today, and omitting them from a mobile
+  /// save would wipe a seller's tier table.
   Future<void> setDiscount(
     String listingId, {
     required bool isActive,
     required double percentage,
+    String discountType = 'percentage',
+    double fixedAmount = 0,
     DateTime? startDate,
     DateTime? endDate,
+    bool? bulkEnabled,
+    List<Map<String, dynamic>>? bulkTiers,
   }) async {
     final effective = _effectivePct(isActive, percentage, startDate, endDate);
     await _db.collection('products').doc(listingId).update({
       'discountEnabled': isActive,
-      'discountType': 'percentage',
+      'discountType': discountType,
       'discountPct': percentage,
+      'discountFixedAmt': fixedAmount,
       'discountStartDate': startDate != null
           ? Timestamp.fromDate(startDate)
           : null,
       'discountEndDate': endDate != null ? Timestamp.fromDate(endDate) : null,
       'effectiveDiscountPct': effective,
+      if (bulkEnabled != null) 'bulkDiscountEnabled': bulkEnabled,
+      if (bulkTiers != null) 'bulkDiscountTiers': bulkTiers,
       'updatedAt': FieldValue.serverTimestamp(),
     });
     // Mirror the RAW percentage + validity fields (not the pre-collapsed
@@ -373,9 +392,13 @@ class DashboardRepository {
       listingId,
       discountEnabled: isActive,
       discountPct: percentage,
+      discountType: discountType,
+      discountFixedAmt: fixedAmount,
       effectiveDiscountPct: effective,
       startDate: startDate,
       endDate: endDate,
+      bulkEnabled: bulkEnabled,
+      bulkTiers: bulkTiers,
     );
   }
 
@@ -491,9 +514,15 @@ class DashboardRepository {
     bool? isProductActive,
     bool? discountEnabled,
     double? discountPct,
+    /// 'percentage' | 'fixed_amount'. Null means "leave whatever is stored" —
+    /// see the note in the discount block below for why that matters.
+    String? discountType,
+    double? discountFixedAmt,
     double? effectiveDiscountPct,
     DateTime? startDate,
     DateTime? endDate,
+    bool? bulkEnabled,
+    List<Map<String, dynamic>>? bulkTiers,
   }) async {
     try {
       final snap = await _db
@@ -515,9 +544,24 @@ class DashboardRepository {
       }
       if (discountEnabled != null) {
         data['discountEnabled'] = discountEnabled;
-        data['discountType'] = 'percentage';
         data['discountPct'] = discountPct ?? 0;
         data['effectiveDiscountPct'] = effectiveDiscountPct ?? 0;
+        // `discountType` was hardcoded to 'percentage' here. The web dashboard
+        // reads a product's discount state back OUT of this inventory doc, so
+        // that hardcode silently converted a seller's fixed-amount (₹)
+        // discount into a percentage one on any mobile save — including an
+        // unrelated price/stock edit that happens to pass discountEnabled —
+        // leaving a stale discountFixedAmt behind and making the ₹ discount
+        // vanish for buyers. Only write the type when the caller actually
+        // knows it; otherwise leave whatever is stored untouched.
+        if (discountType != null) data['discountType'] = discountType;
+        if (discountFixedAmt != null) {
+          data['discountFixedAmt'] = discountFixedAmt;
+        }
+        // Same reasoning for bulk tiers: they're web-only fields today, so a
+        // mobile save must carry them through rather than clear them.
+        if (bulkEnabled != null) data['bulkDiscountEnabled'] = bulkEnabled;
+        if (bulkTiers != null) data['bulkDiscountTiers'] = bulkTiers;
         data['discountStartDate'] = startDate != null
             ? Timestamp.fromDate(startDate)
             : null;

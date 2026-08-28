@@ -2239,8 +2239,16 @@ class _EditListingSheetState extends State<_EditListingSheet> {
         if (imageUrls.isNotEmpty) 'imageUrl': imageUrls.first,
         'variants': variants.map((v) => v.toMap()).toList(),
         // Canonical FLAT discount schema (shared with web).
+        //
+        // `discountType` is deliberately NOT written here. This sheet edits
+        // price/stock/percentage and has no type or fixed-amount control, so
+        // hardcoding 'percentage' — as it used to — silently converted a
+        // seller's fixed-amount (₹) discount set on web into a percentage one
+        // every time they edited anything else about the product, leaving a
+        // stale discountFixedAmt behind and making the ₹ discount vanish for
+        // buyers. Omitting the key leaves whatever type is stored intact; the
+        // Discount sheet is where the type is actually chosen.
         'discountEnabled': _discountActive,
-        'discountType': 'percentage',
         'discountPct': _discountPct,
         'effectiveDiscountPct': effectiveDiscountPct,
         'sellMode': _sellMode,
@@ -2331,6 +2339,12 @@ class _DiscountSheet extends StatefulWidget {
 class _DiscountSheetState extends State<_DiscountSheet> {
   late bool _isActive;
   late double _percentage;
+  /// 'percentage' | 'fixed_amount' — matches web's discount-panel type
+  /// selector. The app previously offered percentage only, and its save path
+  /// hardcoded the type, which silently converted a seller's ₹ discount set
+  /// on web into a percentage one.
+  late String _type;
+  late final TextEditingController _fixedCtrl;
   DateTime? _startDate;
   DateTime? _endDate;
   bool _saving = false;
@@ -2338,10 +2352,57 @@ class _DiscountSheetState extends State<_DiscountSheet> {
   @override
   void initState() {
     super.initState();
-    _isActive = widget.listing.discount?.isActive ?? false;
-    _percentage = widget.listing.discount?.percentage ?? 10;
-    _startDate = widget.listing.discount?.startDate;
-    _endDate = widget.listing.discount?.endDate;
+    final d = widget.listing.discount;
+    _isActive = d?.isActive ?? false;
+    _percentage = d?.percentage ?? 10;
+    _type = d?.type ?? 'percentage';
+    _fixedCtrl = TextEditingController(
+      text: (d?.fixedAmount ?? 0) > 0
+          ? (d!.fixedAmount % 1 == 0
+              ? d.fixedAmount.toInt().toString()
+              : d.fixedAmount.toString())
+          : '',
+    );
+    _startDate = d?.startDate;
+    _endDate = d?.endDate;
+  }
+
+  @override
+  void dispose() {
+    _fixedCtrl.dispose();
+    super.dispose();
+  }
+
+  double get _fixedAmount => double.tryParse(_fixedCtrl.text.trim()) ?? 0;
+
+  /// Live preview of what a buyer pays — the same feedback web's panel gives.
+  double get _previewPrice {
+    final base = widget.listing.price;
+    if (!_isActive) return base;
+    final off = _type == 'fixed_amount'
+        ? _fixedAmount.clamp(0, base)
+        : base * _percentage / 100;
+    return (base - off).clamp(0, base);
+  }
+
+  /// Mirrors web's validation so the app can't save a discount web rejects.
+  String? get _validationError {
+    if (!_isActive) return null;
+    if (_type == 'fixed_amount') {
+      final amt = _fixedAmount;
+      if (amt <= 0) return 'Enter a discount amount greater than 0.';
+      if (amt >= widget.listing.price) {
+        return 'Discount must be less than the price '
+            '(₹${widget.listing.price.toStringAsFixed(0)}).';
+      }
+    } else if (_percentage < 1 || _percentage > 99) {
+      return 'Percentage must be between 1 and 99.';
+    }
+    if (_startDate != null && _endDate != null &&
+        !_endDate!.isAfter(_startDate!)) {
+      return 'End date must be after the start date.';
+    }
+    return null;
   }
 
   @override
@@ -2369,25 +2430,92 @@ class _DiscountSheetState extends State<_DiscountSheet> {
           ),
           const SizedBox(height: 12),
 
-          Row(
-            children: [
-              Text(
-                'Discount: ${_percentage.toInt()}%',
-                style: AppTextStyles.bodyMedium,
-              ),
-              Expanded(
-                child: Slider(
-                  value: _percentage,
-                  min: 1,
-                  max: 80,
-                  divisions: 79,
-                  activeColor: AppColors.primary,
-                  onChanged: _isActive
-                      ? (v) => setState(() => _percentage = v)
-                      : null,
+          // Type selector — web offers percentage OR a flat rupee amount.
+          SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(value: 'percentage', label: Text('Percentage')),
+              ButtonSegment(value: 'fixed_amount', label: Text('Fixed ₹')),
+            ],
+            selected: {_type},
+            onSelectionChanged: _isActive
+                ? (sel) => setState(() => _type = sel.first)
+                : null,
+            showSelectedIcon: false,
+          ),
+          const SizedBox(height: 12),
+
+          if (_type == 'percentage')
+            Row(
+              children: [
+                Text(
+                  'Discount: ${_percentage.toInt()}%',
+                  style: AppTextStyles.bodyMedium,
+                ),
+                Expanded(
+                  child: Slider(
+                    value: _percentage.clamp(1, 99),
+                    min: 1,
+                    // Web validates 1–99; the app's old 80 cap silently
+                    // refused discounts web allows.
+                    max: 99,
+                    divisions: 98,
+                    activeColor: AppColors.primary,
+                    onChanged: _isActive
+                        ? (v) => setState(() => _percentage = v)
+                        : null,
+                  ),
+                ),
+              ],
+            )
+          else
+            TextField(
+              controller: _fixedCtrl,
+              enabled: _isActive,
+              keyboardType:
+                  const TextInputType.numberWithOptions(decimal: true),
+              onChanged: (_) => setState(() {}),
+              decoration: InputDecoration(
+                labelText: 'Discount amount (₹)',
+                prefixText: '₹ ',
+                isDense: true,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
                 ),
               ),
-            ],
+            ),
+          const SizedBox(height: 12),
+
+          // Live price preview, same as web's panel.
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: AppColors.surfaceVariant,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Row(
+              children: [
+                Text('Buyer pays', style: AppTextStyles.bodySmall),
+                const Spacer(),
+                if (_isActive && _previewPrice < widget.listing.price) ...[
+                  Text(
+                    '₹${widget.listing.price.toStringAsFixed(0)}',
+                    style: AppTextStyles.bodySmall.copyWith(
+                      color: AppColors.onSurfaceVariant,
+                      decoration: TextDecoration.lineThrough,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                ],
+                Text(
+                  '₹${_previewPrice.toStringAsFixed(0)}',
+                  style: AppTextStyles.bodyMedium.copyWith(
+                    color: AppColors.primary,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
           ),
           const SizedBox(height: 8),
 
@@ -2437,16 +2565,37 @@ class _DiscountSheetState extends State<_DiscountSheet> {
   }
 
   Future<void> _save() async {
+    // Same rules web's panel enforces, so a discount saved here can't be one
+    // web would have rejected.
+    final error = _validationError;
+    if (error != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(error), backgroundColor: AppColors.error),
+      );
+      return;
+    }
+
     setState(() => _saving = true);
     try {
       await DashboardRepository().setDiscount(
         widget.listing.id,
         isActive: _isActive,
         percentage: _percentage,
+        discountType: _type,
+        fixedAmount: _fixedAmount,
         startDate: _startDate,
         endDate: _endDate,
       );
       if (mounted) Navigator.pop(context);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Could not save discount: $e'),
+            backgroundColor: AppColors.error,
+          ),
+        );
+      }
     } finally {
       if (mounted) setState(() => _saving = false);
     }
