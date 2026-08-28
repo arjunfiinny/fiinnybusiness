@@ -750,11 +750,17 @@ class _EditRetailerSheetState extends State<_EditRetailerSheet> {
             ),
           ),
           const SizedBox(height: 16),
+          // Read-only: the phone identifies this retailer across seat
+          // listings and every assigned product copy. Web's edit modal makes
+          // it immutable for the same reason; showing it enabled here implied
+          // an edit that silently broke those references.
           TextField(
             controller: _phoneCtrl,
+            enabled: false,
             keyboardType: TextInputType.phone,
             decoration: InputDecoration(
-              labelText: 'Phone Number *',
+              labelText: 'Phone Number',
+              helperText: "Phone can't be changed after the retailer is added",
               border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
               prefixText: '+91 ',
             ),
@@ -793,16 +799,26 @@ class _EditRetailerSheetState extends State<_EditRetailerSheet> {
   Future<void> _save() async {
     final shop = _shopNameCtrl.text.trim();
     final owner = _ownerNameCtrl.text.trim();
-    final rawPhone = _phoneCtrl.text.trim();
-    if (shop.isEmpty || owner.isEmpty || rawPhone.isEmpty) return;
-
-    final phone = PhoneUtils.normalize(rawPhone);
-    if (!PhoneUtils.isValid(phone)) {
+    if (shop.isEmpty || owner.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Invalid phone number')),
+        const SnackBar(content: Text('Shop name and owner name are required.')),
       );
       return;
     }
+
+    // The phone is NOT editable here, matching web's edit-retailer modal.
+    //
+    // It identifies the retailer everywhere: retailerSeatListings and every
+    // assigned product copy carry it as retailerDocId. Changing it rewrote
+    // the retailer doc but left those references pointing at the old value,
+    // so a retailer's assigned products silently vanished from the Assign
+    // Products view on BOTH platforms. Keeping it immutable removes the
+    // failure mode rather than papering over it with a migration.
+    //
+    // (This also used to call PhoneUtils.normalize BEFORE isValid and outside
+    // the try — normalize throws on bad input, so typing a short number threw
+    // an uncaught FormatException instead of showing the friendly message.)
+    final phone = widget.retailer.phone;
 
     setState(() => _saving = true);
     try {
@@ -1158,13 +1174,18 @@ class _NewRetailerFormState extends State<_NewRetailerForm> {
       );
       return;
     }
-    final phone = PhoneUtils.normalize(rawPhone);
-    if (!PhoneUtils.isValid(phone)) {
+    // isValid FIRST: PhoneUtils.normalize throws a FormatException on bad
+    // input, and it used to be called before this check and outside any try —
+    // so typing a short number crashed instead of showing this message.
+    if (!PhoneUtils.isValid(rawPhone)) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Enter a valid 10-digit phone number')),
+        const SnackBar(
+          content: Text('Enter a valid 10-digit mobile number starting 6-9'),
+        ),
       );
       return;
     }
+    final phone = PhoneUtils.normalize(rawPhone);
     setState(() => _saving = true);
     try {
       final code = await ManufacturerRepository().addRetailer(
@@ -1219,13 +1240,22 @@ class _NewRetailerFormState extends State<_NewRetailerForm> {
             ),
           ),
           const SizedBox(height: 16),
-          // Phone
+          // Phone — digits-only, capped at 10, with a live counter, matching
+          // web's add-retailer form. Immutable once saved (see the edit sheet),
+          // so it's worth getting right at entry.
           TextField(
             controller: _phoneCtrl,
             keyboardType: TextInputType.phone,
+            inputFormatters: [
+              FilteringTextInputFormatter.digitsOnly,
+              LengthLimitingTextInputFormatter(10),
+            ],
+            onChanged: (_) => setState(() {}),
             decoration: InputDecoration(
               labelText: 'Phone *',
-              hintText: '+91…',
+              hintText: '10-digit mobile number',
+              helperText: "Can't be changed after the retailer is added",
+              counterText: '${_phoneCtrl.text.length}/10',
               border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
               prefixText: '+91 ',
             ),

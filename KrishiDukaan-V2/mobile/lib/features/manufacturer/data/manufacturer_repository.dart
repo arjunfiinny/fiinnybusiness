@@ -19,6 +19,53 @@ const int kDefaultAssignedStock = 10;
 class ManufacturerRepository {
   final _db = FirebaseFirestore.instance;
 
+  /// Active "assigned" seat listings for this manufacturer.
+  ///
+  /// Queried on BOTH axes of `ownerId` — the auth uid and the phone — then
+  /// deduped by doc id, mirroring web's fetchSeatListingsForOwner. Admin-
+  /// assigned listings key `ownerId` by phone while the manufacturer's own
+  /// assignments key it by uid, so a single-axis query silently misses half
+  /// of them.
+  Future<List<Map<String, dynamic>>> fetchActiveAssignedListings(
+    String manufacturerPhone,
+  ) async {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final owners = <String>{
+      if (manufacturerPhone.isNotEmpty) manufacturerPhone,
+      if (uid.isNotEmpty) uid,
+    };
+    if (owners.isEmpty) return [];
+
+    // One unreadable axis must not blank the whole result, so each query is
+    // resolved independently.
+    Future<List<QueryDocumentSnapshot<Map<String, dynamic>>>> fetch(
+        String owner) async {
+      try {
+        final snap = await _db
+            .collection('retailerSeatListings')
+            .where('ownerId', isEqualTo: owner)
+            .where('listingType', isEqualTo: 'assigned')
+            .where('status', isEqualTo: 'active')
+            .get();
+        return snap.docs;
+      } catch (_) {
+        return const [];
+      }
+    }
+
+    final results = await Future.wait(owners.map(fetch));
+
+    final seen = <String>{};
+    final out = <Map<String, dynamic>>[];
+    for (final docs in results) {
+      for (final doc in docs) {
+        if (!seen.add(doc.id)) continue;
+        out.add({'id': doc.id, ...doc.data()});
+      }
+    }
+    return out;
+  }
+
   // ── Retailer network ──────────────────────────────────────────────────────
 
   Stream<List<NetworkRetailerModel>> watchNetwork(String manufacturerPhone) {
