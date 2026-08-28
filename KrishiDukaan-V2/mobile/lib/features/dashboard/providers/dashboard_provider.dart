@@ -4,6 +4,7 @@ import '../../../core/models/order_model.dart';
 import '../data/dashboard_repository.dart';
 import '../data/store_analytics.dart';
 import '../../../core/data/product_schema_repository.dart';
+import '../../../core/models/subscription_model.dart';
 
 final _repo = DashboardRepository();
 
@@ -53,4 +54,16 @@ final seatStatsProvider =
 /// doc can't be read — see ProductSchemaRepository.fallback.
 final productSchemaProvider = FutureProvider<ProductSchema>((ref) {
   return ProductSchemaRepository().fetch();
+});
+
+/// Full subscription purchase history for a seller, newest first.
+final subscriptionHistoryProvider =
+    FutureProvider.family<List<SubscriptionModel>, String>((ref, phone) {
+  return _repo.fetchSubscriptionHistory(phone);
+});
+
+/// Seat listings currently consuming this seller's seats, product-hydrated.
+final activeSeatListingsProvider =
+    FutureProvider.family<List<SeatListingModel>, String>((ref, phone) {
+  return _repo.fetchActiveSeatListings(phone);
 });

@@ -9,16 +9,22 @@ import 'package:firebase_storage/firebase_storage.dart';
 
 import '../../../core/models/listing_model.dart';
 import '../../../core/models/order_model.dart';
+import '../../../core/models/subscription_model.dart';
 
 class SeatStats {
   final int totalPurchased;
   final int activeUsed;
   final int available;
 
+  /// Active subscriptions expiring within 5 days — the same window web's
+  /// subscription dashboard flags.
+  final int expiringSoon;
+
   const SeatStats({
     required this.totalPurchased,
     required this.activeUsed,
     required this.available,
+    this.expiringSoon = 0,
   });
 }
 
@@ -873,6 +879,7 @@ class DashboardRepository {
     // Deduplicate subscriptions by doc id
     final seenSub = <String>{};
     int totalPurchased = 0;
+    int expiringSoon = 0;
     for (final snap in subSnaps) {
       for (final doc in snap.docs) {
         if (!seenSub.add(doc.id)) continue;
@@ -881,6 +888,10 @@ class DashboardRepository {
         if (expiry != null && expiry.toDate().isBefore(now)) continue;
         final seats = (d['seatsPurchased'] as num?)?.toInt() ?? 0;
         totalPurchased += seats;
+        if (expiry != null &&
+            expiry.toDate().difference(now).inDays <= 5) {
+          expiringSoon++;
+        }
       }
     }
 
@@ -901,6 +912,151 @@ class DashboardRepository {
       totalPurchased: totalPurchased,
       activeUsed: activeUsed,
       available: (totalPurchased - activeUsed).clamp(0, totalPurchased),
+      expiringSoon: expiringSoon,
     );
+  }
+
+  /// Full subscription purchase history, newest first.
+  ///
+  /// Dual-axis on `ownerPhone` + `ownerId` then deduped, because the two
+  /// platforms key ownership differently (and admin grants key by phone).
+  /// Deliberately unfiltered by status — history must show expired and
+  /// revoked rows too, unlike fetchSeatStats which only sums active ones.
+  /// Sorted client-side: an orderBy alongside these equality filters would
+  /// need a composite index, and this repo has been bitten by undeployed
+  /// indexes before.
+  Future<List<SubscriptionModel>> fetchSubscriptionHistory(
+    String ownerPhone,
+  ) async {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+
+    Future<List<QueryDocumentSnapshot>> byField(String field, String value) async {
+      try {
+        final snap = await _db
+            .collection('subscriptions')
+            .where(field, isEqualTo: value)
+            .get();
+        return snap.docs;
+      } catch (_) {
+        return const [];
+      }
+    }
+
+    final results = await Future.wait([
+      if (ownerPhone.isNotEmpty) byField('ownerPhone', ownerPhone),
+      if (uid.isNotEmpty) byField('ownerId', uid),
+    ]);
+
+    final seen = <String>{};
+    final subs = <SubscriptionModel>[];
+    for (final docs in results) {
+      for (final doc in docs) {
+        if (!seen.add(doc.id)) continue;
+        subs.add(SubscriptionModel.fromFirestore(doc));
+      }
+    }
+    subs.sort((a, b) {
+      final av = a.createdAt ?? a.startDate;
+      final bv = b.createdAt ?? b.startDate;
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;
+      if (bv == null) return -1;
+      return bv.compareTo(av);
+    });
+    return subs;
+  }
+
+  /// Seat listings currently consuming this seller's seats, with product
+  /// name/image hydrated from the product docs (seat listings store neither).
+  Future<List<SeatListingModel>> fetchActiveSeatListings(
+    String ownerPhone,
+  ) async {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+
+    Future<List<QueryDocumentSnapshot>> byField(String field, String value) async {
+      try {
+        final snap = await _db
+            .collection('retailerSeatListings')
+            .where(field, isEqualTo: value)
+            .where('status', isEqualTo: 'active')
+            .get();
+        return snap.docs;
+      } catch (_) {
+        return const [];
+      }
+    }
+
+    // Same three axes fetchSeatStats uses, so the list and the seat counter
+    // can never disagree about what is consuming a seat.
+    final results = await Future.wait([
+      if (ownerPhone.isNotEmpty) byField('ownerPhone', ownerPhone),
+      if (uid.isNotEmpty) byField('ownerId', uid),
+      if (ownerPhone.isNotEmpty) byField('manufacturerPhone', ownerPhone),
+    ]);
+
+    final seen = <String>{};
+    var listings = <SeatListingModel>[];
+    for (final docs in results) {
+      for (final doc in docs) {
+        if (!seen.add(doc.id)) continue;
+        final model = SeatListingModel.fromFirestore(doc);
+        if (!model.isCurrentlyActive) continue;
+        listings.add(model);
+      }
+    }
+
+    // Hydrate product names in whereIn chunks (Firestore caps at 30).
+    final ids = listings
+        .map((l) => l.productId)
+        .where((id) => id.isNotEmpty)
+        .toSet()
+        .toList();
+    final products = <String, Map<String, dynamic>>{};
+    for (var i = 0; i < ids.length; i += 30) {
+      final chunk = ids.sublist(i, i + 30 > ids.length ? ids.length : i + 30);
+      try {
+        final snap = await _db
+            .collection('products')
+            .where(FieldPath.documentId, whereIn: chunk)
+            .get();
+        for (final doc in snap.docs) {
+          products[doc.id] = doc.data();
+        }
+      } catch (_) {
+        // A deleted product just leaves the row unnamed.
+      }
+    }
+
+    listings = listings.map((l) {
+      final p = products[l.productId];
+      if (p == null) return l;
+      final images = p['images'];
+      return l.copyWith(
+        productName: (p['name'] ?? '').toString(),
+        productImage: images is List && images.isNotEmpty
+            ? images.first?.toString()
+            : p['imageUrl']?.toString() ?? p['image']?.toString(),
+      );
+    }).toList();
+
+    listings.sort((a, b) {
+      final av = a.assignedAt, bv = b.assignedAt;
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;
+      if (bv == null) return -1;
+      return bv.compareTo(av);
+    });
+    return listings;
+  }
+
+  /// Frees a seat by marking its listing released — mirrors web's per-row
+  /// Release action. The product itself is left alone; only the seat is
+  /// returned to the pool.
+  Future<void> releaseSeatListing(String listingId) async {
+    await _db.collection('retailerSeatListings').doc(listingId).update({
+      'status': 'released',
+      'releasedAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
   }
 }
