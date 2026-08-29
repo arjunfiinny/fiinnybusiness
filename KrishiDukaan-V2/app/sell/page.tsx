@@ -9,6 +9,13 @@ import {
   parseDurations,
   perMonthLabel,
 } from "../lib/pricing";
+import {
+  LEGAL_ROUTES,
+  loadPublicFeeRates,
+  pct,
+  type PublicFeeRates,
+} from "../lib/legal";
+import { LegalLinks } from "../../components/shared/legal-doc";
 
 /**
  * Public, indexable seller-acquisition page.
@@ -19,12 +26,22 @@ import {
  * cost". This page is the crawlable answer, and it states the real numbers in
  * plain text so search engines and AI answer engines can quote them.
  *
- * EVERY price on this page is derived from settings/pricing (app/lib/pricing.ts)
- * — the same document api/payment/create-order uses to price the charge. Nothing
- * here is hardcoded, so the advertised price cannot drift from the billed one.
+ * EVERY number on this page is derived, never typed:
  *
- * The 0% commission claim is enforced in app/api/payment/fee/route.ts, which
- * returns platformFee: 0 unconditionally. If that changes, change this page.
+ *   subscription prices  ← settings/pricing (app/lib/pricing.ts), the same
+ *                          document api/payment/create-order charges from
+ *   platform fee         ← settings/route   (app/lib/legal.ts wrapping
+ *   gateway fee            app/lib/route-split.ts), the same document
+ *                          api/payment/create-cart-order splits a payment with
+ *
+ * so the advertised figure cannot drift from the billed one.
+ *
+ * THIS PAGE USED TO SAY "0% commission, always" and "you keep 100% of your
+ * price", in the H1, the hero stat, a feature card, two FAQ answers and the
+ * JSON-LD offer schema. That was hand-typed in ten places with nothing tying it
+ * to the code, and it stopped being true the moment a platform fee existed. The
+ * legal statement of these charges is app/seller-terms/page.tsx; this page is
+ * the plain-language summary of it and must not contradict it.
  */
 export const revalidate = 86400;
 
@@ -32,18 +49,19 @@ const SITE_URL =
   process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/$/, "") || "https://krishidukan.com";
 
 export async function generateMetadata(): Promise<Metadata> {
-  const plans = await loadPlans();
+  const [plans, fees] = await Promise.all([loadPlans(), loadPublicFeeRates()]);
   const { entry, best } = headline(plans);
 
   // `absolute` bypasses the "%s | KrishiDukan" template in app/layout.tsx — the
   // brand is already in the title, and the template pushed it past 100 chars.
-  const TITLE = `Sell on KrishiDukan — 0% Commission, ₹${entry.price} per Product Listing`;
+  const TITLE = `Sell on KrishiDukan — ₹${entry.price} per Product Listing, ${pct(fees.platformFeePercent)} Platform Fee`;
   const DESCRIPTION =
     `Sell seeds, fertilizers, pesticides and farming tools online on KrishiDukan. ` +
-    `Zero commission on every sale — you keep 100% of your price. Listings start at ` +
-    `₹${entry.price} per product per ${entry.months === 1 ? "month" : `${entry.months} months`}, ` +
-    `or ₹${best.price} per product for ${best.label.toLowerCase()}. Open to retailers, ` +
-    `manufacturers and agri-input dealers across India.`;
+    `Listings start at ₹${entry.price} per product per ${entry.months === 1 ? "month" : `${entry.months} months`}, ` +
+    `or ₹${best.price} per product for ${best.label.toLowerCase()}. On online sales, a ` +
+    `${pct(fees.platformFeePercent)} KrishiDukan platform fee applies, plus payment gateway ` +
+    `charges of currently around ${pct(fees.gatewayFeePercent)} levied by the payment provider. ` +
+    `GST extra as applicable. Open to retailers, manufacturers and agri-input dealers across India.`;
 
   return {
   title: { absolute: TITLE },
@@ -54,7 +72,8 @@ export async function generateMetadata(): Promise<Metadata> {
     "sell fertilizers online",
     "sell seeds online India",
     "agri marketplace seller",
-    "zero commission marketplace",
+    "low commission agri marketplace",
+    "agri marketplace platform fee",
     "agri seller platform India",
     "list products KrishiDukan",
     "agri dealer online selling",
@@ -71,7 +90,7 @@ export async function generateMetadata(): Promise<Metadata> {
   },
   twitter: {
     card: "summary_large_image",
-    title: `Sell on KrishiDukan — 0% Commission, ₹${entry.price} per Listing`,
+    title: `Sell on KrishiDukan — ₹${entry.price} per Listing`,
     description: DESCRIPTION,
     images: ["/images/og-default.png"],
   },
@@ -130,10 +149,20 @@ function headline(plans: Plan[]) {
   return { entry, best, bestPerMonth: Math.round(best.price / best.months) };
 }
 
-const INCLUDED: { title: string; body: string }[] = [
+/**
+ * Built from the live fee config rather than declared as a constant, because the
+ * first card states a rate. A card that quotes a number has to be regenerated
+ * when the number changes, and the only way to guarantee that is to derive it.
+ */
+function buildIncluded(fees: PublicFeeRates): { title: string; body: string }[] {
+  return [
   {
-    title: "0% commission, always",
-    body: "KrishiDukan takes no cut of your sale price. A ₹1,000 order is ₹1,000 to you — we do not deduct a marketplace commission, ever.",
+    title: `Low ${pct(fees.platformFeePercent)} platform fee`,
+    body: `KrishiDukan charges ${pct(fees.platformFeePercent)} of the transaction value on successful online sales — not the 5%–25% that percentage-based marketplaces take. Offline and cash-on-delivery sales carry no platform fee.`,
+  },
+  {
+    title: "You set your own prices",
+    body: "You control MRP, selling price, discounts and delivery charges on every listing. KrishiDukan never sets or changes your price.",
   },
   {
     title: "Farmers nearby find you",
@@ -155,7 +184,8 @@ const INCLUDED: { title: string; body: string }[] = [
     title: "Bulk enquiries for manufacturers",
     body: "Manufacturers get discovered by retailers across the region and can build distribution without depending on traditional distributors.",
   },
-];
+  ];
+}
 
 const STEPS: { title: string; body: string }[] = [
   {
@@ -171,8 +201,8 @@ const STEPS: { title: string; body: string }[] = [
     body: "Add each product with pack sizes, prices and photos. You pay only for the number of products you choose to list.",
   },
   {
-    title: "Start receiving orders",
-    body: "Farmers nearby discover your listings, order or send a direct enquiry, and you fulfil from your existing stock.",
+    title: "Receive orders and fulfil them",
+    body: "Farmers nearby discover your listings, order or send a direct enquiry. You accept the order, pack it, dispatch it and deliver it — KrishiDukan does not provide delivery or logistics.",
   },
 ];
 
@@ -181,7 +211,7 @@ const STEPS: { title: string; body: string }[] = [
  * figures and are the text AI answer engines are most likely to quote, so they
  * must never outlive a price change.
  */
-function buildFaqs(plans: Plan[]): { q: string; a: string }[] {
+function buildFaqs(plans: Plan[], fees: PublicFeeRates): { q: string; a: string }[] {
   const { entry, best, bestPerMonth } = headline(plans);
   const ladder = plans
     .map((p) => `₹${p.price} per listing for ${p.label.toLowerCase()}`)
@@ -196,12 +226,33 @@ function buildFaqs(plans: Plan[]): { q: string; a: string }[] {
       `${best.label.toLowerCase()} plan pays ₹${best.price * 10} in total.`,
   },
   {
-    q: "Does KrishiDukan charge a commission on sales?",
-    a: "No. KrishiDukan charges 0% commission. Unlike agri marketplaces that take 5% to 25% of every transaction, we take nothing from your sale price — you keep 100% of what the buyer pays you. The listing fee is the only charge KrishiDukan bills you.",
+    q: "What does KrishiDukan charge on a sale?",
+    a:
+      `On a successful online transaction, KrishiDukan charges a platform fee of ` +
+      `${pct(fees.platformFeePercent)} of the transaction value. That is the only ` +
+      `transaction charge set by KrishiDukan, and it is far below the 5% to 25% that ` +
+      `percentage-based agri marketplaces typically take. Separately, the payment ` +
+      `service provider levies its own payment gateway charges — currently around ` +
+      `${pct(fees.gatewayFeePercent)} of the transaction value — which are set by the ` +
+      `provider and not by KrishiDukan. GST and other applicable taxes are additional, ` +
+      `at the rates prescribed under law. Sales you make offline or take as cash on ` +
+      `delivery carry no KrishiDukan platform fee and no gateway charge.`,
   },
   {
-    q: "Are there any other deductions on an online payment?",
-    a: "KrishiDukan deducts nothing. When a buyer pays online, the payment gateway (Razorpay) charges its own standard processing fee on the transaction, which is shown to you transparently on each order in your dashboard. That fee goes to the gateway, not to KrishiDukan. Orders paid by cash on delivery have no deduction at all.",
+    q: "So what is deducted from an online order?",
+    a:
+      `Three things, and they are shown on every order in your dashboard: the ` +
+      `${pct(fees.platformFeePercent)} KrishiDukan platform fee, the payment gateway ` +
+      `charge (currently about ${pct(fees.gatewayFeePercent)}, levied by the payment ` +
+      `service provider, plus the tax the provider charges on its own fee), and any ` +
+      `applicable taxes. Current base transaction charges therefore come to about ` +
+      `${pct(fees.baseTransactionPercent)}, with GST additional as prescribed by law. ` +
+      `Payment gateway charges are not controlled by KrishiDukan and may change from ` +
+      `time to time depending on the payment method, the provider and its pricing.`,
+  },
+  {
+    q: "Who handles packing, shipping and delivery?",
+    a: "You do. KrishiDukan does not currently provide logistics or delivery services. As the seller you are responsible for inventory, product availability, pricing, packing, dispatch, shipping, delivery and overall order fulfilment, as well as product authenticity, licences, labels and regulatory compliance. KrishiDukan provides the technology platform, the discovery surface and the payment flow.",
   },
   {
     q: "Who can sell on KrishiDukan?",
@@ -213,7 +264,7 @@ function buildFaqs(plans: Plan[]): { q: string; a: string }[] {
   },
   {
     q: "How do I get paid?",
-    a: "Online payments settle to your registered account through the payment gateway, and cash-on-delivery orders are collected by you directly. Your payouts and the gateway fee on each order are visible in the payouts section of your seller dashboard.",
+    a: "Online payments settle to the account you register with us, through the payment service provider, net of the KrishiDukan platform fee, the gateway charges and applicable taxes. Cash-on-delivery orders are collected by you directly. Your payouts and the charges on each order are visible in the payouts section of your seller dashboard. Settlement timing depends on the payment service provider and your account setup.",
   },
   {
     q: "Can I try it with just one product?",
@@ -223,8 +274,9 @@ function buildFaqs(plans: Plan[]): { q: string; a: string }[] {
 }
 
 export default async function SellPage() {
-  const PLANS = await loadPlans();
-  const FAQS = buildFaqs(PLANS);
+  const [PLANS, fees] = await Promise.all([loadPlans(), loadPublicFeeRates()]);
+  const FAQS = buildFaqs(PLANS, fees);
+  const INCLUDED = buildIncluded(fees);
   const { entry, best, bestPerMonth } = headline(PLANS);
   const faqLd = {
     "@context": "https://schema.org",
@@ -249,13 +301,13 @@ export default async function SellPage() {
       url: SITE_URL,
     },
     description:
-      `List seeds, fertilizers, pesticides and farming tools on KrishiDukan with zero sales commission. Sellers pay a per-product listing fee starting at ₹${entry.price} per ${entry.months === 1 ? "month" : `${entry.months} months`}.`,
+      `List seeds, fertilizers, pesticides and farming tools on KrishiDukan. Sellers pay a per-product listing subscription starting at ₹${entry.price} per ${entry.months === 1 ? "month" : `${entry.months} months`}, plus a ${pct(fees.platformFeePercent)} platform fee on successful online transactions and payment gateway charges of currently around ${pct(fees.gatewayFeePercent)} levied by the payment service provider. GST additional as applicable.`,
     offers: PLANS.map((p) => ({
       "@type": "Offer",
       name: `${p.label} product listing`,
       price: String(p.price),
       priceCurrency: "INR",
-      description: `₹${p.price} per product listing for ${p.months} month${p.months === 1 ? "" : "s"} (${p.perMonth}). 0% sales commission.`,
+      description: `₹${p.price} per product listing for ${p.months} month${p.months === 1 ? "" : "s"} (${p.perMonth}). A ${pct(fees.platformFeePercent)} KrishiDukan platform fee applies to successful online transactions, in addition to payment gateway charges levied by the payment service provider (currently around ${pct(fees.gatewayFeePercent)}) and applicable taxes.`,
     })),
   };
 
@@ -302,28 +354,33 @@ export default async function SellPage() {
             For retailers, manufacturers &amp; dealers
           </p>
           <h1 className="mt-6 text-3xl sm:text-4xl font-black text-on-surface leading-tight">
-            Sell your agri products online — with 0% commission
+            Sell your agri products online — from ₹{entry.price} per listing
           </h1>
           <p className="mt-5 text-base text-on-surface-variant leading-relaxed">
             List seeds, fertilizers, pesticides, herbicides, sprayers and farming
-            tools on KrishiDukan and reach farmers across your region. We do not
-            take a cut of your sales. You pay{" "}
+            tools on KrishiDukan and reach farmers across your region. You pay{" "}
             <strong className="text-on-surface">
               ₹{entry.price} per product listing
             </strong>{" "}
-            per {entry.months === 1 ? "month" : `${entry.months} months`} — and
-            nothing else.
+            per {entry.months === 1 ? "month" : `${entry.months} months`}, plus a{" "}
+            <strong className="text-on-surface">
+              {pct(fees.platformFeePercent)} platform fee
+            </strong>{" "}
+            on successful online sales. Payment gateway charges and applicable
+            taxes are additional — the full breakdown is below.
           </p>
 
           {/* Headline numbers */}
           <div className="mt-10 grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div className="rounded-2xl border border-surface-container bg-white p-5">
-              <p className="text-3xl font-black text-primary">0%</p>
+              <p className="text-3xl font-black text-primary">
+                {pct(fees.platformFeePercent)}
+              </p>
               <p className="mt-1 text-sm font-bold text-on-surface">
-                Commission on sales
+                Platform fee on online sales
               </p>
               <p className="mt-1 text-xs text-on-surface-variant">
-                You keep 100% of your price
+                Nothing on offline or cash-on-delivery sales
               </p>
             </div>
             <div className="rounded-2xl border border-surface-container bg-white p-5">
@@ -342,7 +399,7 @@ export default async function SellPage() {
                 Setup &amp; joining fee
               </p>
               <p className="mt-1 text-xs text-on-surface-variant">
-                No monthly platform subscription
+                No fixed monthly platform charge — you pay per listing
               </p>
             </div>
           </div>
@@ -371,9 +428,13 @@ export default async function SellPage() {
             Seller pricing
           </h2>
           <p className="mt-3 text-sm text-on-surface-variant text-center max-w-2xl mx-auto leading-relaxed">
-            You pay per product you list, for as long as you want it listed.
-            Longer plans cost less per month. There is no minimum — list one
-            product or a thousand.
+            The subscription is a seat model:{" "}
+            <strong className="text-on-surface">one seat = one product listing</strong>.
+            You buy the number of seats you need, then add your products — 30
+            products need 30 seats. Longer plans cost less per month, and there is
+            no minimum. Assigning a product to a retailer in your network occupies
+            a seat in the same way, and your dashboard always shows your current
+            seat position.
           </p>
 
           <div className="mt-8 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -412,8 +473,92 @@ export default async function SellPage() {
             <strong className="text-on-surface">
               10 products on the {best.label.toLowerCase()} plan
             </strong>{" "}
-            costs ₹{(best.price * 10).toLocaleString("en-IN")} in total — and every
-            sale you make on top of that is commission-free.
+            costs ₹{(best.price * 10).toLocaleString("en-IN")} in total for the
+            subscription. Transaction charges on online sales are separate and are
+            set out below.
+          </p>
+        </section>
+
+        {/* Transaction charges — the legally-operative breakdown, in plain text
+            so search and answer engines quote the real figures rather than the
+            "0% commission" line this page used to lead with. */}
+        <section className="mt-20" id="transaction-charges">
+          <h2 className="text-2xl font-black text-on-surface text-center">
+            What a sale costs you
+          </h2>
+          <p className="mt-3 text-sm text-on-surface-variant text-center max-w-2xl mx-auto leading-relaxed">
+            The subscription above covers your listings. These charges apply only
+            when a buyer pays you online through KrishiDukan.
+          </p>
+
+          <div className="mt-8 overflow-x-auto rounded-2xl border border-surface-container bg-white">
+            <table className="w-full min-w-[520px] border-collapse text-sm">
+              <tbody>
+                <tr className="border-b border-surface-container">
+                  <td className="py-4 px-5">
+                    <p className="font-bold text-on-surface">
+                      KrishiDukan platform fee
+                    </p>
+                    <p className="mt-0.5 text-xs text-on-surface-variant">
+                      Set by KrishiDukan. Charged on successful online transactions.
+                    </p>
+                  </td>
+                  <td className="py-4 px-5 text-right text-lg font-black text-on-surface whitespace-nowrap">
+                    {pct(fees.platformFeePercent)}
+                  </td>
+                </tr>
+                <tr className="border-b border-surface-container">
+                  <td className="py-4 px-5">
+                    <p className="font-bold text-on-surface">
+                      Payment gateway charges
+                    </p>
+                    <p className="mt-0.5 text-xs text-on-surface-variant">
+                      Levied by the payment service provider, not by KrishiDukan.
+                      Currently approximately this rate; may vary by payment method,
+                      provider and pricing plan, and may change from time to time.
+                    </p>
+                  </td>
+                  <td className="py-4 px-5 text-right text-lg font-black text-on-surface whitespace-nowrap">
+                    ~{pct(fees.gatewayFeePercent)}
+                  </td>
+                </tr>
+                <tr className="border-b border-surface-container bg-surface-container-low">
+                  <td className="py-4 px-5 font-black text-on-surface">
+                    Current base transaction charges
+                  </td>
+                  <td className="py-4 px-5 text-right text-lg font-black text-primary whitespace-nowrap">
+                    {pct(fees.baseTransactionPercent)}
+                  </td>
+                </tr>
+                <tr>
+                  <td className="py-4 px-5">
+                    <p className="font-bold text-on-surface">GST and other taxes</p>
+                    <p className="mt-0.5 text-xs text-on-surface-variant">
+                      Charged separately on applicable fees and charges, at the
+                      rates prescribed under applicable law.
+                    </p>
+                  </td>
+                  <td className="py-4 px-5 text-right text-sm font-bold text-on-surface whitespace-nowrap">
+                    Additional
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <p className="mt-4 text-xs text-on-surface-variant text-center max-w-2xl mx-auto leading-relaxed">
+            The {pct(fees.baseTransactionPercent)} figure is the platform fee plus
+            the gateway charge currently applying, and is stated exclusive of tax.
+            No platform fee or gateway charge applies to a sale you complete
+            offline or take as cash on delivery. The binding statement of these
+            charges is in the{" "}
+            <Link
+              href={LEGAL_ROUTES.sellerTerms}
+              className="font-semibold text-primary hover:underline"
+            >
+              Seller &amp; Manufacturer Subscription Terms
+            </Link>
+            .
           </p>
         </section>
 
@@ -423,10 +568,10 @@ export default async function SellPage() {
             Why sellers choose KrishiDukan
           </h2>
           <p className="mt-3 text-sm text-on-surface-variant text-center max-w-2xl mx-auto leading-relaxed">
-            Most agri marketplaces earn from a percentage of every sale, so the
-            more you sell, the more you pay. KrishiDukan charges a flat listing
-            fee instead — your cost stays the same whether you sell ₹10,000 or
-            ₹10 lakh.
+            Most agri marketplaces earn from a large percentage of every sale.
+            KrishiDukan earns mainly from a flat per-listing subscription, with a
+            small {pct(fees.platformFeePercent)} platform fee on online
+            transactions — so your cost barely moves as your sales grow.
           </p>
 
           <div className="mt-8 overflow-x-auto">
@@ -447,10 +592,22 @@ export default async function SellPage() {
               <tbody className="text-on-surface-variant">
                 <tr className="border-b border-surface-container">
                   <td className="py-3 px-4 font-bold text-on-surface">
-                    Commission taken
+                    Platform fee on sales
                   </td>
                   <td className="py-3 px-4">5% – 25% of every sale</td>
-                  <td className="py-3 px-4 font-bold text-primary">₹0 (0%)</td>
+                  <td className="py-3 px-4 font-bold text-primary">
+                    {pct(fees.platformFeePercent)} — ₹
+                    {(100000 * fees.platformFeePercent / 100).toLocaleString("en-IN")}
+                  </td>
+                </tr>
+                <tr className="border-b border-surface-container">
+                  <td className="py-3 px-4 font-bold text-on-surface">
+                    Payment gateway charges
+                  </td>
+                  <td className="py-3 px-4">Charged by the provider, varies</td>
+                  <td className="py-3 px-4">
+                    Currently ~{pct(fees.gatewayFeePercent)}, set by the provider
+                  </td>
                 </tr>
                 <tr className="border-b border-surface-container">
                   <td className="py-3 px-4 font-bold text-on-surface">
@@ -473,11 +630,16 @@ export default async function SellPage() {
                 </tr>
                 <tr>
                   <td className="py-3 px-4 font-bold text-on-surface">
-                    You keep
+                    You keep, before tax
                   </td>
                   <td className="py-3 px-4">₹75,000 – ₹95,000</td>
                   <td className="py-3 px-4 font-bold text-primary">
-                    ₹1,00,000 minus your listing fee
+                    about ₹
+                    {(
+                      100000 -
+                      (100000 * fees.baseTransactionPercent) / 100
+                    ).toLocaleString("en-IN")}
+                    , less your listing subscription
                   </td>
                 </tr>
               </tbody>
@@ -487,8 +649,12 @@ export default async function SellPage() {
           <p className="mt-4 text-xs text-on-surface-variant text-center max-w-2xl mx-auto leading-relaxed">
             Commission and subscription ranges shown for comparison are typical
             published rates across Indian agri marketplaces and vary by platform
-            and product category. Check each platform&apos;s current terms.
-            KrishiDukan&apos;s own rates are exactly as listed above.
+            and product category. Check each platform&apos;s current terms. The
+            KrishiDukan column assumes the whole ₹1,00,000 was taken as online
+            transactions; sales completed offline or as cash on delivery carry no
+            platform fee or gateway charge. Figures are stated before GST and
+            other applicable taxes, which are charged at the rates prescribed
+            under applicable law.
           </p>
         </section>
 
@@ -556,9 +722,82 @@ export default async function SellPage() {
           </p>
           <p className="mt-3 text-sm text-on-surface-variant leading-relaxed">
             You continue to trade under your own licence and remain the seller of
-            record on every order. KrishiDukan is the marketplace that connects
-            you to buyers — it does not sell on your behalf, and it does not take
-            a share of your sale.
+            record on every order. KrishiDukan is the technology, marketplace and
+            discovery platform that connects you to buyers — it does not sell on
+            your behalf. Listing a product on KrishiDukan is not a certification
+            of its regulatory status: responsibility for licences, registrations,
+            labels and compliance stays with you.
+          </p>
+        </section>
+
+        {/* What the seller is responsible for. This was implicit before, and
+            "you fulfil from your existing stock" was the closest the page came
+            to saying that KrishiDukan ships nothing. */}
+        <section className="mt-20">
+          <h2 className="text-2xl font-black text-on-surface text-center">
+            What you are responsible for
+          </h2>
+          <p className="mt-3 text-sm text-on-surface-variant text-center max-w-2xl mx-auto leading-relaxed">
+            KrishiDukan provides the technology, the discovery surface and the
+            payment flow.{" "}
+            <strong className="text-on-surface">
+              KrishiDukan does not currently provide logistics or delivery
+              services.
+            </strong>{" "}
+            As the seller, you handle:
+          </p>
+          <div className="mt-8 grid gap-4 sm:grid-cols-2">
+            {[
+              {
+                title: "Stock and availability",
+                body: "Maintaining inventory and keeping availability, pack sizes and stock levels accurate on your listings.",
+              },
+              {
+                title: "Pricing",
+                body: "Setting and maintaining your MRP, selling price, discounts and any delivery charge you apply.",
+              },
+              {
+                title: "Packing and dispatch",
+                body: "Packing each order appropriately and dispatching it within the time your listing states.",
+              },
+              {
+                title: "Shipping and delivery",
+                body: "Arranging courier or transport, bearing its cost, and getting the order to the buyer.",
+              },
+              {
+                title: "Product information",
+                body: "The accuracy of product name, composition, description, MRP, pack size, images, usage information, labels and any claim you make.",
+              },
+              {
+                title: "Authenticity and compliance",
+                body: "Product authenticity, and holding the licences, registrations and regulatory approvals required for what you sell.",
+              },
+            ].map((r) => (
+              <div
+                key={r.title}
+                className="rounded-2xl border border-surface-container bg-white p-5"
+              >
+                <h3 className="text-sm font-black text-on-surface mb-1.5">
+                  {r.title}
+                </h3>
+                <p className="text-sm text-on-surface-variant leading-relaxed">
+                  {r.body}
+                </p>
+              </div>
+            ))}
+          </div>
+          <p className="mt-6 text-center text-sm text-on-surface-variant leading-relaxed">
+            These responsibilities, and the charges above, are set out in full in
+            the{" "}
+            <Link
+              href={LEGAL_ROUTES.sellerTerms}
+              className="font-semibold text-primary hover:underline"
+            >
+              Seller &amp; Manufacturer Subscription Terms
+            </Link>
+            . The same standard terms apply to every seller and manufacturer on
+            KrishiDukan — we do not maintain separate company-specific
+            agreements.
           </p>
         </section>
 
@@ -593,8 +832,9 @@ export default async function SellPage() {
             List your first product for ₹{entry.price}
           </h2>
           <p className="mt-3 text-sm text-white/90 max-w-xl mx-auto leading-relaxed">
-            No joining fee, no monthly platform charge, and no commission on what
-            you sell. Try it with one product and see the enquiries it brings.
+            No joining fee and no fixed monthly platform charge — you pay per
+            listing, plus {pct(fees.platformFeePercent)} on online sales. Try it
+            with one product and see the enquiries it brings.
           </p>
           <Link
             href="/?view=signup"
@@ -602,7 +842,28 @@ export default async function SellPage() {
           >
             Create your seller account →
           </Link>
+          <p className="mt-5 text-xs text-white/80 leading-relaxed">
+            By creating a seller account or purchasing a subscription you agree to
+            the{" "}
+            <Link href={LEGAL_ROUTES.terms} className="font-semibold underline">
+              Terms &amp; Conditions
+            </Link>{" "}
+            and the{" "}
+            <Link
+              href={LEGAL_ROUTES.sellerTerms}
+              className="font-semibold underline"
+            >
+              Seller &amp; Manufacturer Subscription Terms
+            </Link>
+            .
+          </p>
         </section>
+
+        {/* /sell is SSR and does not render the SPA footer, so these are the
+            only legal links a crawler or a seller reading this page can reach. */}
+        <div className="mb-12 border-t border-surface-container pt-6">
+          <LegalLinks />
+        </div>
       </div>
     </main>
   );

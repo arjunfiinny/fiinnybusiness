@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import SellerPricingLine from "../../../components/shared/seller-pricing-line";
 import { notFound } from "next/navigation";
 import { getStoreGeography } from "../../lib/seo/stores-server";
 
@@ -123,8 +124,8 @@ export default async function StateStoresPage({ params }: PageProps) {
             Run an agricultural shop in {entry.state}?
           </h2>
           <p className="mt-2 text-sm leading-relaxed text-on-surface-variant">
-            List your store so farmers nearby can find you. 0% commission on every
-            sale — you pay ₹21 per product listing.
+            List your store so farmers nearby can find you.{" "}
+            <SellerPricingLine />
           </p>
           <Link
             href="/sell"

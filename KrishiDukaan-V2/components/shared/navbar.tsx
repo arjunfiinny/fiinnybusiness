@@ -296,7 +296,13 @@ export function Navbar({
           {searchResults.stores.map(s => (
             <button
               key={s.id}
-              onMouseDown={() => handleResultClick(() => onStoreClick?.(s.id))}
+              onMouseDown={() => handleResultClick(() => {
+                // A shop result should open that shop's page, not drop the user on
+                // the map. Only manufacturers have a brand page (/brand/{slug});
+                // retailers have none, so they still fall back to the locator.
+                if (s.slug) { router.push(`/brand/${s.slug}`); return; }
+                onStoreClick?.(s.id);
+              })}
               className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-surface-container-low transition-colors text-left"
             >
               <div className="w-10 h-10 rounded-xl bg-primary/10 shrink-0 flex items-center justify-center">

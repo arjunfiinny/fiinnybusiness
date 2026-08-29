@@ -9,6 +9,7 @@ import { recordEngagement } from "./notifications/engagement";
 
 export { sendWaNotification, retryWaNotifications, webhookReceiver } from "./wa-dispatch";
 export { transcodeReel } from "./reels/media/transcodeReel";
+export { releaseTransferOnDelivery } from "./route-release";
 export {
   notifyOwnerOnReelRepost,
   flushEngagementNotifications,

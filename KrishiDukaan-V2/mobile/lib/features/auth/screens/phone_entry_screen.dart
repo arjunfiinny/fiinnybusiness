@@ -1,8 +1,11 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../../core/constants/app_colors.dart';
+import '../../../core/constants/app_config.dart';
 import '../../../core/constants/app_text_styles.dart';
 import '../../../core/utils/phone_utils.dart';
 import '../../../core/widgets/loading_overlay.dart';
@@ -39,6 +42,21 @@ class _PhoneEntryScreenState extends ConsumerState<PhoneEntryScreen> {
   void dispose() {
     _phoneController.dispose();
     super.dispose();
+  }
+
+  /// Open a published legal document in the browser.
+  ///
+  /// External browser rather than an in-app webview: someone part-way through
+  /// signing in should be able to read the Terms and come straight back to the
+  /// OTP screen they left.
+  Future<void> _openLegalDoc(String path) async {
+    final uri = Uri.parse('${AppConfig.apiBaseUrl}$path');
+    final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!opened && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not open $uri')),
+      );
+    }
   }
 
   Future<void> _sendOtp() async {
@@ -256,10 +274,40 @@ class _PhoneEntryScreenState extends ConsumerState<PhoneEntryScreen> {
                     ),
                   ),
                   const SizedBox(height: 24),
+                  // These two documents are now real pages, and this line is
+                  // the acceptance notice for them — so it links to them. It
+                  // used to be flat text pointing at a "Terms of Service" that
+                  // had never been written.
                   Center(
-                    child: Text(
-                      'By continuing, you agree to our Terms of Service\nand Privacy Policy',
-                      style: AppTextStyles.caption,
+                    child: Text.rich(
+                      TextSpan(
+                        style: AppTextStyles.caption,
+                        children: [
+                          const TextSpan(text: 'By continuing, you agree to our '),
+                          TextSpan(
+                            text: 'Terms & Conditions',
+                            style: AppTextStyles.caption.copyWith(
+                              color: AppColors.primary,
+                              fontWeight: FontWeight.bold,
+                              decoration: TextDecoration.underline,
+                            ),
+                            recognizer: TapGestureRecognizer()
+                              ..onTap = () => _openLegalDoc('/terms'),
+                          ),
+                          const TextSpan(text: ' and '),
+                          TextSpan(
+                            text: 'Privacy Policy',
+                            style: AppTextStyles.caption.copyWith(
+                              color: AppColors.primary,
+                              fontWeight: FontWeight.bold,
+                              decoration: TextDecoration.underline,
+                            ),
+                            recognizer: TapGestureRecognizer()
+                              ..onTap = () => _openLegalDoc('/privacy'),
+                          ),
+                          const TextSpan(text: '.'),
+                        ],
+                      ),
                       textAlign: TextAlign.center,
                     ),
                   ),

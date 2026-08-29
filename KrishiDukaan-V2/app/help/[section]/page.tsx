@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import SellerPricingLine from "../../../components/shared/seller-pricing-line";
 import { notFound } from "next/navigation";
 import { HELP_SECTIONS } from "../../views/helpContent";
 import { HELP_FRAMING } from "../_lib/framing";
@@ -187,7 +188,7 @@ export default async function HelpSectionPage({ params }: PageProps) {
             Ready to list your products?
           </h2>
           <p className="mt-2 text-sm leading-relaxed text-on-surface-variant">
-            0% commission on every sale — you pay ₹21 per product listing.
+            <SellerPricingLine />
           </p>
           <div className="mt-4 flex flex-wrap gap-3">
             <Link
