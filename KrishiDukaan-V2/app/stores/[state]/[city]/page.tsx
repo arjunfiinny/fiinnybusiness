@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import SellerPricingLine from "../../../../components/shared/seller-pricing-line";
 import { notFound } from "next/navigation";
 import {
   getStoresInCity,
@@ -214,8 +215,8 @@ export default async function CityStoresPage({ params }: PageProps) {
             Run an agricultural shop in {cityName}?
           </h2>
           <p className="mt-2 text-sm leading-relaxed text-on-surface-variant">
-            Add your store so farmers searching in {cityName} can find you. 0%
-            commission on every sale — you pay ₹21 per product listing.
+            Add your store so farmers searching in {cityName} can find you.{" "}
+            <SellerPricingLine />
           </p>
           <Link
             href="/sell"

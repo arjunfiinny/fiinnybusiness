@@ -25,13 +25,21 @@ export async function POST(request: Request) {
     const isAuthentic = expectedSignature === razorpay_signature;
 
     if (isAuthentic) {
-      // Fetch order to get verified seatCount from notes
+      // Fetch the order so every figure the client goes on to record comes from
+      // Razorpay rather than from the browser. `order.amount` is authoritative:
+      // it is the sum the gateway actually captured, in paise.
       const order = await razorpay.orders.fetch(razorpay_order_id);
       const verifiedSeatCount = order.notes?.seatCount ? Number(order.notes.seatCount) : 1;
+      const verifiedMonths = order.notes?.durationMonths
+        ? Number(order.notes.durationMonths)
+        : undefined;
+      const amountPaid = Math.round(Number(order.amount) / 100);
 
-      return NextResponse.json({ 
-        status: 'ok', 
-        seatCount: verifiedSeatCount 
+      return NextResponse.json({
+        status: 'ok',
+        seatCount: verifiedSeatCount,
+        durationMonths: verifiedMonths,
+        amountPaid,
       });
     } else {
       return NextResponse.json({ status: 'failed' }, { status: 400 });

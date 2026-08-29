@@ -178,10 +178,18 @@ export default function AdminPricingPage() {
         ) : null}
 
         <div className="mt-5 space-y-3">
+          <p className="mb-3 text-xs text-on-surface-variant">
+            Leave <strong>₹ flat</strong> empty for a normal per-listing price. Fill it in to
+            sell a bundle — the seller pays that one amount for up to{" "}
+            <strong>Listings incl.</strong> listings, and the per-listing price is ignored.
+            {" "}Use <strong>Who can buy</strong> to keep a plan off the wrong account type —
+            a retailer bundle left open to everyone lets a manufacturer buy it instead of a
+            volume contract.
+          </p>
           {rows.map((r, i) => (
             <div
               key={i}
-              className="grid grid-cols-1 gap-3 rounded-2xl border border-surface-container bg-white p-4 sm:grid-cols-[110px_130px_1fr_auto]"
+              className="grid grid-cols-1 gap-3 rounded-2xl border border-surface-container bg-white p-4 sm:grid-cols-[110px_130px_130px_130px_1fr_130px_auto]"
             >
               <label className="text-sm">
                 <span className="block text-[10px] font-black uppercase tracking-wide text-on-surface-variant">
@@ -209,6 +217,38 @@ export default function AdminPricingPage() {
               </label>
               <label className="text-sm">
                 <span className="block text-[10px] font-black uppercase tracking-wide text-on-surface-variant">
+                  ₹ flat (bundle)
+                </span>
+                <input
+                  type="number"
+                  min={0}
+                  placeholder="—"
+                  value={r.flatPrice ?? ""}
+                  onChange={(e) => {
+                    const v = e.target.value.trim();
+                    setRow(i, v === ""
+                      ? { flatPrice: undefined, includedListings: undefined }
+                      : { flatPrice: Number(v), includedListings: r.includedListings ?? 50 });
+                  }}
+                  className="mt-1 w-full rounded-lg border border-surface-container px-3 py-2"
+                />
+              </label>
+              <label className="text-sm">
+                <span className="block text-[10px] font-black uppercase tracking-wide text-on-surface-variant">
+                  Listings incl.
+                </span>
+                <input
+                  type="number"
+                  min={1}
+                  placeholder="—"
+                  disabled={r.flatPrice === undefined}
+                  value={r.includedListings ?? ""}
+                  onChange={(e) => setRow(i, { includedListings: Number(e.target.value) })}
+                  className="mt-1 w-full rounded-lg border border-surface-container px-3 py-2 disabled:bg-surface-container/40"
+                />
+              </label>
+              <label className="text-sm">
+                <span className="block text-[10px] font-black uppercase tracking-wide text-on-surface-variant">
                   Badge (optional)
                 </span>
                 <input
@@ -217,6 +257,23 @@ export default function AdminPricingPage() {
                   onChange={(e) => setRow(i, { badge: e.target.value })}
                   className="mt-1 w-full rounded-lg border border-surface-container px-3 py-2"
                 />
+              </label>
+              <label className="text-sm">
+                <span className="block text-[10px] font-black uppercase tracking-wide text-on-surface-variant">
+                  Who can buy
+                </span>
+                <select
+                  value={r.roles?.length ? r.roles[0] : ""}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setRow(i, { roles: v ? [v] : undefined });
+                  }}
+                  className="mt-1 w-full rounded-lg border border-surface-container px-3 py-2"
+                >
+                  <option value="">Everyone</option>
+                  <option value="retailer">Retailers only</option>
+                  <option value="manufacturer">Manufacturers only</option>
+                </select>
               </label>
               <button
                 onClick={() => setRows((x) => x.filter((_, j) => j !== i))}

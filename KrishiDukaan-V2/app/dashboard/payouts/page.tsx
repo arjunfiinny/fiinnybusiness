@@ -233,7 +233,7 @@ export default function PayoutsPage() {
     <div className="pb-16">
       <PageHeader
         title="Payouts"
-        description="The bank account your order money is sent to. KrishiDukan charges you nothing — you receive the full order amount minus only the payment gateway's own fee."
+        description="The bank account your order money is sent to. You receive the order amount less the KrishiDukan platform fee, the payment gateway's own charges and applicable taxes."
       />
 
       {/* How payouts work — set expectations before they type anything. */}
@@ -244,8 +244,26 @@ export default function PayoutsPage() {
             <p className="font-semibold">How you get paid</p>
             <ul className="mt-1 list-disc space-y-1 pl-4 text-blue-800">
               <li>Money is transferred once you mark the order <strong>Delivered</strong>.</li>
-              <li>KrishiDukan commission is <strong>₹0</strong>. We take no cut.</li>
-              <li>Only the payment gateway&apos;s charge is deducted — see it on each order.</li>
+              <li>
+                The <strong>KrishiDukan platform fee</strong> and the{" "}
+                <strong>payment gateway&apos;s charges</strong> are deducted — the exact
+                amounts are shown on each order.
+              </li>
+              <li>
+                GST and other applicable taxes are charged at the rates prescribed under
+                applicable law.
+              </li>
+              <li>
+                Settlement timing depends on the payment service provider and your
+                account setup. Full terms:{" "}
+                <a
+                  href="/seller-terms"
+                  className="font-semibold underline hover:text-blue-950"
+                >
+                  Seller &amp; Manufacturer Subscription Terms
+                </a>
+                .
+              </li>
             </ul>
           </div>
         </div>

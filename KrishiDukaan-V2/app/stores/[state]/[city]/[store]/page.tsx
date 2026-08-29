@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import SellerPricingLine from "../../../../../components/shared/seller-pricing-line";
 import { notFound } from "next/navigation";
 import {
   findStore,
@@ -309,8 +310,8 @@ export default async function StorePage({ params }: PageProps) {
             Run an agri shop in {store.city}?
           </h2>
           <p className="mt-2 text-sm leading-relaxed text-on-surface-variant">
-            List your store on KrishiDukan so farmers nearby can find you. 0%
-            commission on sales — you pay ₹21 per product listing.
+            List your store on KrishiDukan so farmers nearby can find you.{" "}
+            <SellerPricingLine />
           </p>
           <Link
             href="/sell"

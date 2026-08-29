@@ -26,6 +26,13 @@ import {
   type DocumentData,
 } from 'firebase/firestore';
 import { getAuth } from 'firebase/auth';
+import {
+  DEFAULT_DURATIONS,
+  PRICING_DOC_PATH,
+  computeAmount,
+  parseDurations,
+  type DurationPrice,
+} from './lib/pricing';
 import { getStorage } from 'firebase/storage';
 import { getAnalytics, isSupported } from 'firebase/analytics';
 
@@ -1019,12 +1026,68 @@ export async function getUserProfile(uid: string) {
   return null;
 }
 
+/**
+ * The live plan for a billing period, read from settings/pricing.
+ *
+ * There used to be a `PRICE_PER_SEAT` literal here AND in adminManualActivate
+ * AND in the mobile app, none of which the admin Pricing screen could reach.
+ * Editing the price in admin changed what Razorpay charged but not what got
+ * written to payments/ and subscriptions/, so the books recorded the old price
+ * — Rs 21 for any period outside {1,3,6,12}. Both literals are gone; this is
+ * the only price lookup left on the client, and the amount actually charged is
+ * preferred over it wherever the gateway can tell us (see verify/).
+ */
+async function loadPlan(durationMonths: number): Promise<DurationPrice | null> {
+  let ladder: DurationPrice[] = DEFAULT_DURATIONS;
+  try {
+    const snap = await getDoc(
+      doc(db, PRICING_DOC_PATH.collection, PRICING_DOC_PATH.doc),
+    );
+    if (snap.exists()) ladder = parseDurations(snap.data()) ?? DEFAULT_DURATIONS;
+  } catch {
+    /* unreachable settings doc degrades to the built-in ladder */
+  }
+  return ladder.find((d) => d.months === durationMonths) ?? null;
+}
+
+/**
+ * What the seller was shown, and therefore accepted, at the moment of purchase.
+ *
+ * Recorded against the subscription and the payment so the question "which
+ * version of the terms did this seller agree to, and where" is answerable from
+ * the data years later. Version strings come from app/lib/legal-constants.ts.
+ */
+export interface TermsAcceptance {
+  /** TERMS_VERSION at the time of purchase. */
+  version: string;
+  /** Routes of the documents the notice linked to. */
+  documents: string[];
+  /** ISO 8601, client clock — indicative, the server timestamp is authoritative. */
+  acceptedAt: string;
+  /** Which checkout showed the notice, e.g. 'web:subscription-checkout'. */
+  surface: string;
+}
+
 export async function updateSubscriptionStatus(
   uid: string,
   status: 'paid' | 'unpaid',
   paymentDetails?: any,
   seatCount: number = 1,
-  durationMonths: number = 1
+  durationMonths: number = 1,
+  /**
+   * Rupees Razorpay actually captured, as returned by verify/. Pass it whenever
+   * it is available: it is the only figure guaranteed to match the seller's card
+   * statement. Omitted only by callers with no gateway round-trip behind them.
+   */
+  amountPaid?: number,
+  /**
+   * The terms notice the seller passed through on the way to paying. Optional
+   * so older callers (and the admin-activation path, which has no seller in
+   * front of it to accept anything) keep working — a missing record is honest
+   * about the fact that no notice was shown, which is better than stamping one
+   * that was not.
+   */
+  termsAcceptance?: TermsAcceptance,
 ): Promise<{ profileUpdated: true; paymentLogged: boolean; paymentLogError?: string }> {
   const timestamp = serverTimestamp();
 
@@ -1065,9 +1128,13 @@ export async function updateSubscriptionStatus(
 
   if (status === 'paid') {
     try {
-      const PRICE_PER_SEAT: Record<number, number> = { 1: 21, 3: 54, 6: 90, 12: 144 };
-      const pricePerSeat = PRICE_PER_SEAT[durationMonths] ?? 21;
-      const totalAmount = seatsToAdd * pricePerSeat;
+      // Prefer what the gateway captured; fall back to the live ladder only when
+      // the caller had no verified amount to hand us.
+      let totalAmount = Number(amountPaid);
+      if (!Number.isFinite(totalAmount) || totalAmount < 0) {
+        const plan = await loadPlan(durationMonths);
+        totalAmount = plan ? computeAmount(plan, seatsToAdd) : 0;
+      }
 
       // Write both legacy (userId/ownerId) and new (userPhone/ownerPhone) fields so all queries
       // and Firestore rules work. Rules check ownerPhone == myPhone() OR ownerId == uid.
@@ -1084,6 +1151,7 @@ export async function updateSubscriptionStatus(
         razorpayPaymentId: paymentDetails?.paymentId ?? null,
         timestamp,
         status: 'success',
+        termsAcceptance: termsAcceptance ?? null,
       });
 
       const now = new Date();
@@ -1108,6 +1176,10 @@ export async function updateSubscriptionStatus(
         expiryDate: Timestamp.fromDate(expiry),
         createdAt: timestamp,
         updatedAt: timestamp,
+        // Which standard terms this subscription was sold under. There are no
+        // company-specific seller agreements, so this version string plus the
+        // published documents is the whole contract for this period.
+        termsAcceptance: termsAcceptance ?? null,
       });
 
       return { profileUpdated: true, paymentLogged: true };
@@ -2486,9 +2558,8 @@ export async function adminManualActivate(
   const now = new Date();
   const expiry = new Date(now);
   expiry.setMonth(expiry.getMonth() + durationMonths);
-  const PRICE_PER_SEAT: Record<number, number> = { 1: 21, 3: 54, 6: 90, 12: 144 };
-  const pricePerSeat = PRICE_PER_SEAT[durationMonths] ?? 21;
-  const totalAmount = seats * pricePerSeat;
+  const plan = await loadPlan(durationMonths);
+  const totalAmount = plan ? computeAmount(plan, seats) : 0;
   const ts = serverTimestamp();
 
   await setDoc(userRef, {

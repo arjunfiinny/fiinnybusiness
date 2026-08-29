@@ -197,6 +197,29 @@ export type OrderDoc = {
   status: OrderStatus;
   statusHistory?: StatusHistoryEntry[];
   payment?: PaymentInfo;
+  /**
+   * Razorpay Route payout state, written by the releaseTransferOnDelivery
+   * function when the order is marked delivered. Absent on orders with no
+   * transfer — cash on delivery, orders predating Route, and any seller who has
+   * not onboarded a linked account yet.
+   */
+  routeRelease?: RouteReleaseInfo;
   createdAt?: unknown;
   updatedAt?: unknown;
+};
+
+export type RouteReleaseInfo = {
+  /** Razorpay transfer id this order's payout belongs to. */
+  transferId: string;
+  /** Transfer amount in paise, as Razorpay reports it. */
+  amount?: number;
+  /**
+   * `scheduled` - a release time is set and Razorpay will settle then.
+   * `already_released` - the transfer was no longer on hold when we looked.
+   */
+  status: "scheduled" | "already_released";
+  /** When the money settles to the seller. Delivery + 24h. */
+  releaseAt?: unknown;
+  scheduledAt?: unknown;
+  recordedAt?: unknown;
 };

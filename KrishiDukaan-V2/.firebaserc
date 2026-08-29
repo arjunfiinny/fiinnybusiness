@@ -12,6 +12,9 @@
         ],
         "admin": [
           "krishidukan-admin"
+        ],
+        "wiki": [
+          "krishidukan-wiki"
         ]
       }
     },
@@ -22,5 +25,6 @@
         ]
       }
     }
-  }
+  },
+  "etags": {}
 }

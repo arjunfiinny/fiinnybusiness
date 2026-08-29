@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import SellerPricingLine from "../../components/shared/seller-pricing-line";
 import { HELP_SECTIONS } from "../views/helpContent";
 import { HELP_FRAMING } from "./_lib/framing";
 import { t } from "./_lib/blocks";
@@ -168,8 +169,7 @@ export default function HelpIndexPage() {
             Ready to start selling?
           </h2>
           <p className="mt-2 text-sm leading-relaxed text-on-surface-variant">
-            List your products on KrishiDukan with 0% commission — you pay ₹21 per
-            product listing, and nothing on what you sell.
+            List your products on KrishiDukan. <SellerPricingLine />
           </p>
           <div className="mt-4 flex flex-wrap gap-3">
             <Link
