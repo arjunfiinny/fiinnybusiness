@@ -31,6 +31,12 @@ import {
 } from "../_lib/profile-persistence";
 import { useI18n } from "../../i18n/I18nContext";
 import { StatusToast } from "../../components/shared/status-toast";
+import {
+  OnlineDeliveryTermsDialog,
+  type DisplayedDeliveryRates,
+} from "../../../components/shared/online-delivery-terms-dialog";
+import { DELIVERY_TERMS_VERSION, LEGAL_ROUTES } from "../../lib/legal-constants";
+import type { DeliveryTermsAcceptance } from "../_lib/profile-persistence";
 import { fetchManufacturerCatalogueRows } from "../_lib/inventory-firestore";
 import type { ManufacturerProductRow } from "../_types/inventory";
 import { compressImage } from "../../utils/compressImage";
@@ -216,6 +222,32 @@ function ProfilePageInner() {
 
   // GST inline flow state
   const [gstFlowMode,       setGstFlowMode]       = useState<"pending-enable" | "update" | null>(null);
+
+  // ── Online Delivery terms gate ──────────────────────────────────────────────
+  // Switching Online Delivery on is the moment a seller starts paying a share of
+  // every sale, so both toggles below route through the same dialog and neither
+  // can enable delivery without an explicit acceptance to record.
+  const [deliveryTermsOpen, setDeliveryTermsOpen] = useState(false);
+  const [deliveryAcceptance, setDeliveryAcceptance] = useState<DeliveryTermsAcceptance | null>(null);
+  const deliveryTermsAction = useRef<((a: DeliveryTermsAcceptance) => void) | null>(null);
+
+  /** The record stored on the account: version, links, and the rates displayed. */
+  const buildDeliveryAcceptance = useCallback(
+    (rates: DisplayedDeliveryRates): DeliveryTermsAcceptance => ({
+      version: DELIVERY_TERMS_VERSION,
+      documents: [LEGAL_ROUTES.sellerTerms, LEGAL_ROUTES.terms],
+      acceptedAt: new Date().toISOString(),
+      surface: "web:profile-online-delivery",
+      rates,
+    }),
+    [],
+  );
+
+  /** Open the terms dialog. `run` fires only once the seller has agreed. */
+  const askDeliveryTerms = useCallback((run: (a: DeliveryTermsAcceptance) => void) => {
+    deliveryTermsAction.current = run;
+    setDeliveryTermsOpen(true);
+  }, []);
   const [pendingGstin,      setPendingGstin]      = useState("");
   const [gstSaving,         setGstSaving]         = useState(false);
   const [gstInputError,     setGstInputError]     = useState<string | null>(null);
@@ -519,6 +551,29 @@ function ProfilePageInner() {
 
   // ── GST inline flow handlers ──────────────────────────────────────────────────
 
+  /** The actual enable, run only after the terms have been accepted. */
+  const runEnableWithGst = useCallback(
+    async (trimmed: string, acceptance: DeliveryTermsAcceptance) => {
+      if (!uid || !userRole) return;
+      setGstSaving(true);
+      setGstInputError(null);
+      try {
+        await enableOnlineDeliveryWithGst(uid, userRole, trimmed, acceptance);
+        setForm((p) => ({ ...p, gstin: trimmed }));
+        setDeliveryAcceptance(acceptance);
+        setOnlineDelivery(true);
+        setGstFlowMode(null);
+        setPendingGstin("");
+      } catch (e) {
+        setGstInputError(e instanceof Error ? e.message : "Failed to save. Please try again.");
+      } finally {
+        setGstSaving(false);
+        setDeliveryTermsOpen(false);
+      }
+    },
+    [uid, userRole],
+  );
+
   const handleSaveGstAndEnable = useCallback(async () => {
     const trimmed = pendingGstin.trim().toUpperCase();
     if (!trimmed) {
@@ -530,20 +585,12 @@ function ProfilePageInner() {
       return;
     }
     if (!uid || !userRole) return;
-    setGstSaving(true);
-    setGstInputError(null);
-    try {
-      await enableOnlineDeliveryWithGst(uid, userRole, trimmed);
-      setForm((p) => ({ ...p, gstin: trimmed }));
-      setOnlineDelivery(true);
-      setGstFlowMode(null);
-      setPendingGstin("");
-    } catch (e) {
-      setGstInputError(e instanceof Error ? e.message : "Failed to save. Please try again.");
-    } finally {
-      setGstSaving(false);
-    }
-  }, [pendingGstin, uid, userRole]);
+    // GST is validated first so the seller is not asked to accept commercial
+    // terms only to be blocked by a format error immediately afterwards.
+    askDeliveryTerms((acceptance) => {
+      void runEnableWithGst(trimmed, acceptance);
+    });
+  }, [pendingGstin, uid, userRole, askDeliveryTerms, runEnableWithGst]);
 
   const handleUpdateGst = useCallback(async () => {
     const trimmed = pendingGstin.trim().toUpperCase();
@@ -631,6 +678,7 @@ function ProfilePageInner() {
         socialLinks: social,
         tagline,
         onlineDelivery,
+        ...(deliveryAcceptance ? { onlineDeliveryTerms: deliveryAcceptance } : {}),
         updatedAt: serverTimestamp(),
       }, { merge: true });
 
@@ -642,6 +690,7 @@ function ProfilePageInner() {
         socialLinks: social,
         tagline,
         onlineDelivery,
+        ...(deliveryAcceptance ? { onlineDeliveryTerms: deliveryAcceptance } : {}),
         updatedAt: serverTimestamp(),
       }, { merge: true });
 
@@ -655,6 +704,7 @@ function ProfilePageInner() {
         phone:        formToSave.phone.trim(),
         city:         formToSave.city.trim(),
         onlineDelivery,
+        ...(deliveryAcceptance ? { onlineDeliveryTerms: deliveryAcceptance } : {}),
         updatedAt: serverTimestamp(),
       }, { merge: true });
 
@@ -710,6 +760,12 @@ function ProfilePageInner() {
     return (
       <>
         <StatusToast message={status?.message ?? null} type={status?.type} onDismiss={() => setStatus(null)} autoClose={status?.type === "error" ? 0 : 3500} />
+        <OnlineDeliveryTermsDialog
+          open={deliveryTermsOpen}
+          busy={gstSaving}
+          onAgree={(rates) => deliveryTermsAction.current?.(buildDeliveryAcceptance(rates))}
+          onCancel={() => { deliveryTermsAction.current = null; setDeliveryTermsOpen(false); }}
+        />
 
         {/* Hidden file inputs */}
         <input ref={logoFileRef} type="file" accept="image/*" className="hidden"
@@ -1217,6 +1273,12 @@ function ProfilePageInner() {
       </div>
 
       <StatusToast message={status?.message ?? null} type={status?.type} onDismiss={() => setStatus(null)} autoClose={status?.type === "error" ? 0 : 3500} />
+      <OnlineDeliveryTermsDialog
+        open={deliveryTermsOpen}
+        busy={gstSaving}
+        onAgree={(rates) => deliveryTermsAction.current?.(buildDeliveryAcceptance(rates))}
+        onCancel={() => { deliveryTermsAction.current = null; setDeliveryTermsOpen(false); }}
+      />
 
       {/* Hidden file inputs */}
       <input ref={logoFileRef} type="file" accept="image/*" className="hidden"
@@ -1508,7 +1570,17 @@ function ProfilePageInner() {
                         return;
                       }
                       setGstInputError(null);
-                      setOnlineDelivery(enabling);
+                      if (!enabling) {
+                        setOnlineDelivery(false);
+                        return;
+                      }
+                      // Delivery flips on only after the terms are accepted; the
+                      // acceptance rides along with this form's save below.
+                      askDeliveryTerms((acceptance) => {
+                        setDeliveryAcceptance(acceptance);
+                        setOnlineDelivery(true);
+                        setDeliveryTermsOpen(false);
+                      });
                     }}
                   />
                   <div className={`h-6 w-11 rounded-full transition-colors ${onlineDelivery ? "bg-primary" : "bg-surface-container-highest"}`} />

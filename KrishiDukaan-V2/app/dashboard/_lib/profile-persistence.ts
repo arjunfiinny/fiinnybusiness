@@ -444,6 +444,31 @@ export async function saveRetailerProfile(
 // ─── GST + Online Delivery atomic writes ──────────────────────────────────────
 
 /**
+ * A seller's acceptance of the Online Delivery commercial terms.
+ *
+ * Same shape as TermsAcceptance in app/firebase.ts, which records acceptance at
+ * subscription checkout — one shape means a later question like "show me every
+ * seller still on the old fee schedule" is a single query, not two.
+ */
+export interface DeliveryTermsAcceptance {
+  /** DELIVERY_TERMS_VERSION at the moment of acceptance. */
+  version: string;
+  /** Routes of the documents the dialog linked to. */
+  documents: string[];
+  /** ISO 8601, client clock — indicative; updatedAt is authoritative. */
+  acceptedAt: string;
+  /** Which surface showed the terms, e.g. 'web:profile-online-delivery'. */
+  surface: string;
+  /** The rates actually displayed, so the quote is provable years later. */
+  rates: {
+    listingFeePerMonth: number | null;
+    platformFeePercent: number;
+    gatewayFeePercent: number;
+    gstPercent: number;
+  };
+}
+
+/**
  * Validates GST, then atomically saves the GST number and enables online delivery
  * across all three relevant Firestore collections.
  */
@@ -451,12 +476,24 @@ export async function enableOnlineDeliveryWithGst(
   uid: string,
   role: "retailer" | "manufacturer",
   gstin: string,
+  /**
+   * What the seller was shown, and accepted, to switch delivery on. Written with
+   * the same writes that flip the flag so the record cannot end up on an account
+   * whose delivery never actually enabled, or be missing from one that did.
+   */
+  termsAcceptance?: DeliveryTermsAcceptance,
 ): Promise<void> {
   const gstNumber = gstin.trim().toUpperCase();
   const gstRegistered = isValidGstinFormat(gstNumber);
   const phone = await phoneFromUid(uid);
   const now = serverTimestamp();
-  const payload = { gstin: gstNumber, gstRegistered, onlineDelivery: true, updatedAt: now };
+  const payload = {
+    gstin: gstNumber,
+    gstRegistered,
+    onlineDelivery: true,
+    ...(termsAcceptance ? { onlineDeliveryTerms: termsAcceptance } : {}),
+    updatedAt: now,
+  };
 
   if (role === "manufacturer") {
     const docId = phone || uid;
