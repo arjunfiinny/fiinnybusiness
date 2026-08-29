@@ -30,6 +30,7 @@ import {
 import { db } from "../../firebase";
 import { PageHeader } from "../_components/page-header";
 import { KycDocuments } from "../_components/kyc-documents";
+import { SellerEarningsPanel } from "../_components/seller-earnings-panel";
 import { useEffectiveUser } from "../_context/effective-user-context";
 
 // ─── validation ───────────────────────────────────────────────────────────────
@@ -236,6 +237,11 @@ export default function PayoutsPage() {
         title="Payouts"
         description="The bank account your order money is sent to. KrishiDukan charges you nothing — you receive the full order amount minus only the payment gateway's own fee."
       />
+
+      {/* What they're owed, before the mechanics of where it's sent. */}
+      <div className="mb-6">
+        <SellerEarningsPanel uid={uid} profile={profile} />
+      </div>
 
       {/* How payouts work — set expectations before they type anything. */}
       <div className="mb-6 rounded-xl border border-blue-200 bg-blue-50 p-4">
