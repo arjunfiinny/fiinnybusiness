@@ -11,6 +11,13 @@ class ListingModel {
   final double? sellerLng;
   final double price;
   final int stockQuantity;
+
+  /// Stock level at or below which the seller gets a `low_stock` notification.
+  /// Null means the product has never been configured and the server's
+  /// DEFAULT_LOW_STOCK_THRESHOLD (10) applies — see notifyLowStock in
+  /// functions/src/notifications/inventory.ts.
+  final int? lowStockThreshold;
+
   final List<VariantModel> variants;
   final DiscountModel? discount;
   final String? assignedByManufacturerPhone;
@@ -24,6 +31,22 @@ class ListingModel {
   final bool? gstApplicable;
   final double? gstRate;
   final DateTime? updatedAt;
+
+  /// Product-detail-page view count, bumped by `ProductDetailScreen` (and by
+  /// web's `trackProductClick`) on the SAME doc — the canonical product page
+  /// a shopper actually opens. Summed across a seller's own listings for the
+  /// Profile mini-dashboard's "Views" stat.
+  final int clicks;
+
+  /// Marketplace card impression count and "get directions" tap count — same
+  /// fields web's `fetchRetailerAnalytics` sums into "Total Views" and
+  /// "Directions" on the dashboard Overview cards. Mobile doesn't write
+  /// `impressions` itself yet (only `clicks`/`directionRequests`, via
+  /// ProductDetailScreen), but both fields live on the same shared `products`
+  /// doc web writes to, so reading them here keeps mobile's Overview numbers
+  /// identical to web's rather than silently zero.
+  final int impressions;
+  final int directionRequests;
 
   final String collectionPath;
 
@@ -41,6 +64,7 @@ class ListingModel {
     this.sellerLng,
     required this.price,
     required this.stockQuantity,
+    this.lowStockThreshold,
     required this.variants,
     this.discount,
     this.assignedByManufacturerPhone,
@@ -55,6 +79,9 @@ class ListingModel {
     this.gstRate,
     this.updatedAt,
     this.distanceKm,
+    this.clicks = 0,
+    this.impressions = 0,
+    this.directionRequests = 0,
     this.collectionPath = 'products',
   });
 
@@ -111,6 +138,7 @@ class ListingModel {
       price: (d['price'] as num?)?.toDouble() ??
           (d['sellingPrice'] as num?)?.toDouble() ?? 0.0,
       stockQuantity: _parseStock(d),
+      lowStockThreshold: (d['lowStockThreshold'] as num?)?.toInt(),
       variants: (d['variants'] as List? ?? [])
           .map((v) => VariantModel.fromMap(v as Map<String, dynamic>))
           .toList(),
@@ -127,6 +155,9 @@ class ListingModel {
       gstApplicable: d['gstApplicable'] as bool?,
       gstRate: (d['gstRate'] as num?)?.toDouble(),
       updatedAt: updatedAt,
+      clicks: (d['clicks'] as num?)?.toInt() ?? 0,
+      impressions: (d['impressions'] as num?)?.toInt() ?? 0,
+      directionRequests: (d['directionRequests'] as num?)?.toInt() ?? 0,
     );
   }
 
@@ -147,13 +178,27 @@ class ListingModel {
 class VariantModel {
   final String label;
   final double price;
-  final int stock;
+
+  /// Per-size stock. NULLABLE on purpose: `null` means "this size carries no
+  /// stock figure", which is NOT the same as `0` ("explicitly out of stock").
+  ///
+  /// Canonical/web-created variants routinely omit `stock` — per-store stock
+  /// lives on that store's availability entry, not on the shared size list.
+  /// While this defaulted to 0, every such size rendered as Out of Stock and
+  /// the chip was unselectable, so the buyer could never pick it. Mirrors
+  /// web's resolveStoreVariant, which only treats a size as out of stock when
+  /// `stock !== undefined && stock === 0`.
+  final int? stock;
 
   const VariantModel({
     required this.label,
     required this.price,
     required this.stock,
   });
+
+  /// True only when this size is *known* to be out of stock. A missing figure
+  /// is treated as available, matching web.
+  bool get isOutOfStock => stock == 0;
 
   /// Web stores variants as `{unit, price, stock}` (see inventory.ts
   /// ProductVariant); `label` is the mobile-legacy key. Read both — otherwise
@@ -162,7 +207,7 @@ class VariantModel {
   factory VariantModel.fromMap(Map<String, dynamic> m) => VariantModel(
         label: m['label'] as String? ?? m['unit'] as String? ?? '',
         price: (m['price'] as num?)?.toDouble() ?? 0.0,
-        stock: (m['stock'] as num?)?.toInt() ?? 0,
+        stock: (m['stock'] as num?)?.toInt(),
       );
 
   // Write both keys so web (reads `unit`) and older mobile builds (read

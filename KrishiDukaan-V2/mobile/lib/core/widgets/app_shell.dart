@@ -2,9 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../constants/app_colors.dart';
+import '../../features/profile/widgets/profile_completion_prompt.dart';
 import '../providers/cart_provider.dart';
-import '../providers/user_provider.dart';
-import '../../features/reels/providers/reels_provider.dart';
 
 /// Tracks which bottom-nav tab is currently visible.
 /// ReelsFeedScreen listens to this to pause video when leaving the reels tab.
@@ -50,31 +49,6 @@ class AppShell extends ConsumerWidget {
     ),
   ];
 
-  void _showSubscriptionDialog(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Subscription Required'),
-        content: const Text(
-          'An active subscription is required to upload reels.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () {
-              Navigator.pop(context);
-              context.push('/subscription');
-            },
-            child: const Text('Subscribe Now'),
-          ),
-        ],
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final currentIndex = navigationShell.currentIndex;
@@ -91,27 +65,10 @@ class AppShell extends ConsumerWidget {
     });
 
     final cartCount = ref.watch(cartCountProvider);
-    final userModel = ref.watch(currentUserProvider).value;
-    final isSeller = userModel?.isSeller ?? false;
-    final canAccess = ref.watch(canAccessDashboardProvider);
     final isReelsTab = currentIndex == 4;
-    final commentSheetOpen = ref.watch(reelCommentSheetOpenProvider);
 
     Widget? fab;
-    if (isReelsTab && isSeller && !commentSheetOpen) {
-      fab = FloatingActionButton(
-        backgroundColor: AppColors.secondary,
-        foregroundColor: Colors.white,
-        onPressed: () {
-          if (canAccess) {
-            context.push('/reels/upload');
-          } else {
-            _showSubscriptionDialog(context);
-          }
-        },
-        child: const Icon(Icons.video_call_rounded, size: 26),
-      );
-    } else if (!isReelsTab && cartCount > 0) {
+    if (!isReelsTab && cartCount > 0) {
       fab = Container(
         margin: const EdgeInsets.only(bottom: 12, right: 12),
         child: FloatingActionButton(
@@ -128,7 +85,8 @@ class AppShell extends ConsumerWidget {
 
     // System back from a non-Home tab returns to Home instead of closing the
     // app (Android hardware/gesture back lands here when the shell is on top).
-    return PopScope(
+    return ProfileCompletionPrompt(
+      child: PopScope(
       canPop: currentIndex == 0,
       onPopInvokedWithResult: (didPop, _) {
         if (!didPop) navigationShell.goBranch(0);
@@ -137,7 +95,9 @@ class AppShell extends ConsumerWidget {
         body: navigationShell,
         floatingActionButton: fab,
         floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
-        bottomNavigationBar: SafeArea(
+        bottomNavigationBar: isReelsTab
+            ? null
+            : SafeArea(
           minimum: const EdgeInsets.fromLTRB(12, 0, 12, 12),
           child: DecoratedBox(
             decoration: BoxDecoration(
@@ -179,6 +139,7 @@ class AppShell extends ConsumerWidget {
             ),
           ),
         ),
+      ),
       ),
     );
   }

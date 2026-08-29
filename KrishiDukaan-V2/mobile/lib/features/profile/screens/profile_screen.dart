@@ -1,6 +1,6 @@
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../../core/constants/app_colors.dart';
@@ -10,8 +10,11 @@ import '../../../core/providers/locale_provider.dart';
 import '../../../core/providers/user_provider.dart';
 import '../../../core/widgets/app_brand_icon.dart';
 import '../../../core/widgets/app_top_bar.dart';
-import '../../reels/data/reels_repository.dart';
-import '../data/account_service.dart';
+import '../../dashboard/providers/dashboard_provider.dart';
+import '../../dashboard/widgets/dashboard_drawer.dart';
+import '../../dashboard/widgets/dashboard_overview_widgets.dart';
+import '../../manufacturer/providers/manufacturer_provider.dart';
+import '../../marketplace/providers/marketplace_provider.dart';
 
 class ProfileScreen extends ConsumerWidget {
   const ProfileScreen({super.key});
@@ -21,9 +24,17 @@ class ProfileScreen extends ConsumerWidget {
     final userAsync = ref.watch(currentUserProvider);
     final locale = ref.watch(localeProvider);
     final isHindi = locale.languageCode == 'hi';
+    // isSeller is only known once userAsync resolves; the hamburger/drawer
+    // simply don't render on the first loading frame, same as every other
+    // seller-only section on this screen.
+    final isSeller = userAsync.value?.isSeller ?? false;
 
     return Scaffold(
       backgroundColor: AppColors.background,
+      // Navigate section (see DashboardDrawer) — same 11 destinations as
+      // web's persistent dashboard sidebar, opened via the menu icon below
+      // instead of requiring a separate trip to the standalone Dashboard.
+      drawer: isSeller ? const DashboardDrawer() : null,
       appBar: AppBar(
         elevation: 0,
         backgroundColor: Colors.transparent,
@@ -44,7 +55,26 @@ class ProfileScreen extends ConsumerWidget {
             ),
           ],
         ),
-        automaticallyImplyLeading: true,
+        // Explicit "go home" rather than a plain pop: Profile can be reached
+        // through nested pushes (e.g. Profile → Dashboard → back to Profile
+        // via the person icon), where a plain back arrow would only bounce
+        // to whatever screen happens to be underneath (Dashboard) instead of
+        // actually leaving the account area. go('/') always exits cleanly to
+        // Home no matter how Profile was reached.
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () => context.go('/'),
+        ),
+        actions: [
+          if (isSeller)
+            Builder(
+              builder: (context) => IconButton(
+                icon: const Icon(Icons.menu),
+                tooltip: isHindi ? 'डैशबोर्ड मेनू' : 'Dashboard menu',
+                onPressed: () => Scaffold.of(context).openDrawer(),
+              ),
+            ),
+        ],
       ),
       body: userAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
@@ -55,6 +85,86 @@ class ProfileScreen extends ConsumerWidget {
           }
           return _ProfileBody(user: user, isHindi: isHindi, locale: locale);
         },
+      ),
+    );
+  }
+}
+
+/// "Add Product" quick action, next to "Add Reel" — one of the most frequent
+/// actions for manufacturers, so it's surfaced on Profile itself rather than
+/// requiring a detour through the dashboard first. Reuses the exact same
+/// gating logic as the Quick Actions card's "Add product" row
+/// (`goToAddProduct`), so there's only one paywall flow/copy in the app.
+class _AddProductButton extends StatelessWidget {
+  final dynamic user;
+  const _AddProductButton({required this.user});
+
+  @override
+  Widget build(BuildContext context) {
+    return _ProfileActionButton(
+      icon: Icons.add_box_outlined,
+      label: 'Add Product',
+      filled: true,
+      onTap: () => goToAddProduct(
+        context,
+        canAccessDashboard: user.canAccessDashboard == true,
+        isManufacturer: user.isManufacturer == true,
+      ),
+    );
+  }
+}
+
+/// "Add Reel" quick action — same placement/style as Add Product. No paywall
+/// gate: matches the existing /reels/upload route today, which has no
+/// subscription/role guard anywhere. Icon matches the one every other
+/// "post a reel" entry point in the app already uses (shop_profile_screen.dart,
+/// reels_feed_screen.dart) — `video_call_outlined` isn't in the bundled icon
+/// font subset and rendered blank, which is why the button looked missing.
+class _AddReelButton extends StatelessWidget {
+  const _AddReelButton();
+
+  @override
+  Widget build(BuildContext context) {
+    return _ProfileActionButton(
+      icon: Icons.video_call_rounded,
+      label: 'Add Reel',
+      filled: false,
+      onTap: () => context.push('/reels/upload'),
+    );
+  }
+}
+
+class _ProfileActionButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool filled;
+  final VoidCallback onTap;
+  const _ProfileActionButton({
+    required this.icon,
+    required this.label,
+    required this.filled,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: TextButton.icon(
+        onPressed: onTap,
+        style: TextButton.styleFrom(
+          backgroundColor: filled ? AppColors.primary : Colors.white,
+          foregroundColor: filled ? Colors.white : AppColors.primary,
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          side: filled ? null : const BorderSide(color: AppColors.primary),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
+        ),
+        icon: Icon(icon, size: 18),
+        label: Text(
+          label,
+          style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
+        ),
       ),
     );
   }
@@ -83,6 +193,22 @@ class _ProfileBody extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final String phone = user.phone as String;
+    final bool isManufacturer = user.isSeller
+        ? ref.watch(isManufacturerProvider)
+        : false;
+    // Only fetched for sellers — these streams/futures are cheap no-ops for
+    // everyone else since the providers are never watched in that case.
+    final listingsAsync =
+        user.isSeller ? ref.watch(myListingsProvider(phone)) : null;
+    final seatsAsync =
+        user.isSeller ? ref.watch(seatStatsProvider(phone)) : null;
+    final analyticsAsync = user.isSeller && isManufacturer
+        ? ref.watch(manufacturerAnalyticsProvider(phone))
+        : null;
+    final reviewsAsync =
+        user.isSeller ? ref.watch(storeReviewsProvider(phone)) : null;
+
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
@@ -91,61 +217,13 @@ class _ProfileBody extends ConsumerWidget {
           child: Column(
             children: [
               const SizedBox(height: 8),
-              CircleAvatar(
-                radius: 40,
-                backgroundColor: AppColors.primaryContainer,
-                child: Text(
-                  user.name.isNotEmpty ? user.name[0].toUpperCase() : '?',
-                  style: AppTextStyles.heading1.copyWith(
-                    color: AppColors.primary,
-                    fontSize: 32,
-                  ),
-                ),
-              ),
+              _ProfileAvatar(user: user),
               const SizedBox(height: 12),
-              Text(user.name, style: AppTextStyles.heading2),
-              const SizedBox(height: 4),
-              // Username — tap to set/edit (sellers only)
-              if (user.isSeller)
-                GestureDetector(
-                  onTap: () => showModalBottomSheet(
-                    context: context,
-                    isScrollControlled: true,
-                    backgroundColor: Colors.transparent,
-                    builder: (_) => _SetUsernameSheet(user: user),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 4),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          user.username != null
-                              ? '@${user.username}'
-                              : (isHindi
-                                  ? '+ यूज़रनेम जोड़ें'
-                                  : '+ Add username'),
-                          style: AppTextStyles.bodyMedium.copyWith(
-                            color: user.username != null
-                                ? AppColors.primary
-                                : AppColors.onSurfaceVariant,
-                            fontWeight: user.username != null
-                                ? FontWeight.w600
-                                : FontWeight.normal,
-                          ),
-                        ),
-                        const SizedBox(width: 4),
-                        Icon(
-                          Icons.edit_outlined,
-                          size: 14,
-                          color: user.username != null
-                              ? AppColors.primary
-                              : AppColors.onSurfaceVariant,
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
+              Text(
+                user.name,
+                style: AppTextStyles.heading2,
+                textAlign: TextAlign.center,
+              ),
               const SizedBox(height: 4),
               Container(
                 padding: const EdgeInsets.symmetric(
@@ -166,7 +244,50 @@ class _ProfileBody extends ConsumerWidget {
             ],
           ),
         ),
-        const SizedBox(height: 24),
+        const SizedBox(height: 16),
+
+        // Add Product / Add Reel — right under the avatar/logo.
+        if (user.isSeller) ...[
+          Row(
+            children: [
+              _AddProductButton(user: user),
+              const SizedBox(width: 10),
+              const _AddReelButton(),
+            ],
+          ),
+          const SizedBox(height: 10),
+          // My Shop — the public storefront preview (reels + listed
+          // products), previously buried two taps deep inside Business
+          // Settings. Important enough to surface right here instead.
+          InkWell(
+            onTap: () => context.push('/shop/${user.phone}'),
+            borderRadius: BorderRadius.circular(14),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              decoration: BoxDecoration(
+                color: AppColors.primary.withValues(alpha: 0.06),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: AppColors.primary.withValues(alpha: 0.15)),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.storefront_outlined,
+                      size: 20, color: AppColors.primary),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text('My Shop',
+                        style: AppTextStyles.bodyMedium
+                            .copyWith(fontWeight: FontWeight.w700, color: AppColors.primary)),
+                  ),
+                  const Icon(Icons.chevron_right,
+                      size: 18, color: AppColors.primary),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 24),
+        ] else
+          const SizedBox(height: 8),
 
         // Prompt to finish profile when key fields are missing.
         if (!user.isProfileComplete) ...[
@@ -203,97 +324,75 @@ class _ProfileBody extends ConsumerWidget {
           const SizedBox(height: 12),
         ],
 
-        // Account info card
-        _Card(
-          title: isHindi ? 'खाता जानकारी' : 'Account Info',
-          children: [
-            _InfoRow(
-              icon: Icons.phone_outlined,
-              label: isHindi ? 'फ़ोन' : 'Phone',
-              value: user.phone,
-            ),
-            _InfoRow(
-              icon: Icons.badge_outlined,
-              label: isHindi ? 'भूमिका' : 'Role',
-              value: _roleLabel(user.role, isHindi),
-            ),
-          ],
-        ),
-        const SizedBox(height: 12),
+        // Everything below mirrors web's dashboard overview
+        // (krishidukan.com/dashboard) card-for-card, shown directly on
+        // Profile so sellers never have to leave this tab to check their
+        // numbers or act on them. Read-only stats are shown for paid and
+        // unpaid sellers alike; the full nav hub lives in the drawer (tap
+        // the menu icon in the AppBar) instead of an inline link list.
+        if (user.isSeller) ...[
+          QuickActionsCard(
+            isManufacturer: isManufacturer,
+            canAccessDashboard: user.canAccessDashboard == true,
+          ),
+          const SizedBox(height: 16),
 
-        // Quick links
-        _Card(
-          title: isHindi ? 'त्वरित लिंक' : 'Quick Links',
-          children: [
-            _LinkRow(
-              icon: Icons.edit_outlined,
-              label: isHindi ? 'प्रोफ़ाइल संपादित करें' : 'Edit Profile',
-              onTap: () => context.push('/profile/edit'),
+          Text('Overview', style: AppTextStyles.heading3),
+          Text('Performance snapshot for your storefront and operations.',
+              style: AppTextStyles.caption),
+          const SizedBox(height: 12),
+          OverviewGrid(
+            listingsAsync: listingsAsync!,
+            analyticsAsync: analyticsAsync,
+            isManufacturer: isManufacturer,
+          ),
+          const SizedBox(height: 16),
+
+          listingsAsync.when(
+            loading: () => const CardShimmer(height: 160),
+            error: (_, _) => const SizedBox.shrink(),
+            data: (listings) => InventoryHealthCard(
+              listings: listings.cast(),
+              onManageInventory: () => context.push(isManufacturer
+                  ? '/dashboard/manufacturer/catalog'
+                  : '/dashboard/inventory'),
             ),
+          ),
+          const SizedBox(height: 12),
+
+          seatsAsync!.when(
+            loading: () => const CardShimmer(height: 90),
+            error: (_, _) => const SizedBox.shrink(),
+            data: (seats) => SeatsCard(seats: seats),
+          ),
+          const SizedBox(height: 12),
+
+          reviewsAsync!.when(
+            loading: () => const CardShimmer(height: 140),
+            error: (_, _) => const SizedBox.shrink(),
+            data: (reviews) => RecentReviewsCard(
+              reviews: reviews,
+              onViewAll: () => context.push('/dashboard/reviews'),
+            ),
+          ),
+          const SizedBox(height: 20),
+        ],
+
+        // Account menu — mirrors web's Account dropdown. "My Orders" is the
+        // buyer-side order history (everyone, incl. sellers who also buy),
+        // distinct from the seller "Orders" entry in the dashboard drawer.
+        _Card(
+          title: isHindi ? 'खाता' : 'Account',
+          children: [
             _LinkRow(
               icon: Icons.receipt_long_outlined,
-              label: isHindi ? 'ऑर्डर इतिहास' : 'Order History',
+              label: isHindi ? 'मेरे ऑर्डर' : 'My Orders',
               onTap: () => context.push('/orders'),
             ),
             _LinkRow(
-              icon: Icons.support_agent_outlined,
-              label: isHindi ? 'सहायता और समर्थन' : 'Help & Support',
-              onTap: () => context.push('/support'),
-            ),
-            if (user.isSeller)
-              _LinkRow(
-                icon: user.canAccessDashboard
-                    ? Icons.dashboard_outlined
-                    : Icons.lock_outline,
-                label: user.canAccessDashboard
-                    ? (isHindi ? 'विक्रेता डैशबोर्ड' : 'Seller Dashboard')
-                    : (isHindi
-                        ? 'विक्रेता डैशबोर्ड (सदस्यता लें)'
-                        : 'Seller Dashboard (Subscribe)'),
-                // Unpaid sellers are redirected to the paywall by the router
-                // guard on /dashboard, so they can purchase a subscription.
-                onTap: () => context.push('/dashboard'),
-              ),
-            if (user.isSeller)
-              _LinkRow(
-                icon: Icons.storefront_outlined,
-                label: isHindi ? 'मेरी दुकान' : 'My Shop',
-                onTap: () => context.push('/shop/${user.phone}'),
-              ),
-            if (user.isSeller)
-              _LinkRow(
-                icon: Icons.alternate_email,
-                label: user.username != null
-                    ? '@${user.username}'
-                    : (isHindi ? 'यूज़रनेम सेट करें' : 'Set Username'),
-                onTap: () => showModalBottomSheet(
-                  context: context,
-                  isScrollControlled: true,
-                  backgroundColor: Colors.transparent,
-                  builder: (_) => _SetUsernameSheet(user: user),
-                ),
-              ),
-          ],
-        ),
-        const SizedBox(height: 12),
-
-        // Language toggle
-        _Card(
-          title: isHindi ? 'भाषा' : 'Language',
-          children: [
-            _LanguageTile(
-              label: 'English',
-              selected: !isHindi,
-              onTap: () => ref
-                  .read(localeProvider.notifier)
-                  .setLocale(const Locale('en')),
-            ),
-            _LanguageTile(
-              label: 'हिंदी (Hindi)',
-              selected: isHindi,
-              onTap: () => ref
-                  .read(localeProvider.notifier)
-                  .setLocale(const Locale('hi')),
+              icon: Icons.settings_outlined,
+              label: isHindi ? 'सेटिंग्स' : 'Settings',
+              onTap: () => context.push('/profile/settings'),
             ),
           ],
         ),
@@ -319,27 +418,6 @@ class _ProfileBody extends ConsumerWidget {
             ),
           ),
         ),
-        const SizedBox(height: 12),
-
-        // Delete account
-        OutlinedButton.icon(
-          onPressed: () => _showDeleteAccountDialog(context, isHindi),
-          icon: const Icon(Icons.delete_forever_outlined,
-              color: AppColors.onSurfaceVariant),
-          label: Text(
-            isHindi ? 'खाता हटाएं' : 'Delete Account',
-            style: AppTextStyles.bodyMedium
-                .copyWith(color: AppColors.onSurfaceVariant),
-          ),
-          style: OutlinedButton.styleFrom(
-            side: const BorderSide(color: AppColors.divider),
-            padding: const EdgeInsets.symmetric(vertical: 14),
-            minimumSize: const Size(double.infinity, 0),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
-            ),
-          ),
-        ),
         const SizedBox(height: 8),
         Center(
           child: Text(
@@ -356,112 +434,38 @@ class _ProfileBody extends ConsumerWidget {
   }
 }
 
-void _showDeleteAccountDialog(BuildContext context, bool isHindi) {
-  showDialog(
-    context: context,
-    barrierDismissible: true,
-    builder: (_) => _DeleteAccountDialog(isHindi: isHindi),
-  );
-}
-
-class _DeleteAccountDialog extends StatefulWidget {
-  final bool isHindi;
-  const _DeleteAccountDialog({required this.isHindi});
-
-  @override
-  State<_DeleteAccountDialog> createState() => _DeleteAccountDialogState();
-}
-
-class _DeleteAccountDialogState extends State<_DeleteAccountDialog> {
-  final _ctrl = TextEditingController();
-  bool _deleting = false;
-  String? _error;
+/// Shows the seller's real profile photo when they've set one — on web or
+/// mobile — falling back to the initial-letter avatar otherwise. Sellers set
+/// this photo via the web dashboard's Profile page today (`profiles/{phone}
+/// .logo`, mirrored to `retailers/{phone}.logo`); no separate mobile upload
+/// flow exists yet. Reuses `retailerProfileProvider`, the same provider
+/// `ShopProfileScreen` already reads this field from — no new Firestore
+/// query. Consumers have no `profiles/{phone}` doc, so this only queries for
+/// sellers.
+class _ProfileAvatar extends ConsumerWidget {
+  final dynamic user;
+  const _ProfileAvatar({required this.user});
 
   @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
+  Widget build(BuildContext context, WidgetRef ref) {
+    final String? logo = user.isSeller
+        ? ref.watch(retailerProfileProvider(user.phone as String)).value?.logo
+        : null;
+    final hasLogo = logo != null && logo.isNotEmpty;
 
-  Future<void> _confirm() async {
-    setState(() {
-      _deleting = true;
-      _error = null;
-    });
-    try {
-      await AccountService().deleteMyAccount();
-      await FirebaseAuth.instance.signOut();
-      if (mounted) {
-        Navigator.of(context).pop();
-        context.go('/');
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _deleting = false;
-          final msg = e.toString().replaceAll('Exception: ', '');
-          _error = msg.isNotEmpty ? msg : 'Failed to delete account. Please try again.';
-        });
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final canConfirm = _ctrl.text.trim().toUpperCase() == 'DELETE' && !_deleting;
-    return AlertDialog(
-      title: Text(
-        widget.isHindi ? 'खाता हटाएं' : 'Delete Account',
-        style: AppTextStyles.heading3.copyWith(color: AppColors.error),
-      ),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            widget.isHindi
-                ? 'यह आपकी प्रोफ़ाइल, लिस्टिंग, सदस्यता, रील्स, रिव्यू और अन्य खाता डेटा को स्थायी रूप से हटा देगा। यह पूर्ववत नहीं किया जा सकता। पुष्टि करने के लिए नीचे DELETE टाइप करें।'
-                : 'This permanently deletes your profile, listings, subscriptions, reels, reviews, and other account data. Past orders/payments are kept for records. This cannot be undone. Type DELETE to confirm.',
-            style: AppTextStyles.bodySmall,
-          ),
-          const SizedBox(height: 16),
-          TextField(
-            controller: _ctrl,
-            enabled: !_deleting,
-            textCapitalization: TextCapitalization.characters,
-            onChanged: (_) => setState(() {}),
-            decoration: InputDecoration(
-              hintText: 'DELETE',
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-              isDense: true,
-              contentPadding:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+    return CircleAvatar(
+      radius: 40,
+      backgroundColor: AppColors.primaryContainer,
+      backgroundImage: hasLogo ? CachedNetworkImageProvider(logo) : null,
+      child: hasLogo
+          ? null
+          : Text(
+              user.name.isNotEmpty ? user.name[0].toUpperCase() : '?',
+              style: AppTextStyles.heading1.copyWith(
+                color: AppColors.primary,
+                fontSize: 32,
+              ),
             ),
-          ),
-          if (_error != null) ...[
-            const SizedBox(height: 10),
-            Text(_error!, style: const TextStyle(color: AppColors.error, fontSize: 12)),
-          ],
-        ],
-      ),
-      actions: [
-        TextButton(
-          onPressed: _deleting ? null : () => Navigator.of(context).pop(),
-          child: Text(widget.isHindi ? 'रद्द करें' : 'Cancel'),
-        ),
-        FilledButton(
-          onPressed: canConfirm ? _confirm : null,
-          style: FilledButton.styleFrom(backgroundColor: AppColors.error),
-          child: _deleting
-              ? const SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(
-                      strokeWidth: 2, color: Colors.white),
-                )
-              : Text(widget.isHindi ? 'हटाएं' : 'Delete'),
-        ),
-      ],
     );
   }
 }
@@ -501,9 +505,9 @@ class _GuestView extends StatelessWidget {
 }
 
 class _Card extends StatelessWidget {
-  final String title;
+  final String? title;
   final List<Widget> children;
-  const _Card({required this.title, required this.children});
+  const _Card({this.title, required this.children});
 
   @override
   Widget build(BuildContext context) {
@@ -523,47 +527,11 @@ class _Card extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(title, style: AppTextStyles.heading3),
-          const SizedBox(height: 8),
+          if (title != null && title!.isNotEmpty) ...[
+            Text(title!, style: AppTextStyles.heading3),
+            const SizedBox(height: 8),
+          ],
           ...children,
-        ],
-      ),
-    );
-  }
-}
-
-class _InfoRow extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final String value;
-  const _InfoRow({
-    required this.icon,
-    required this.label,
-    required this.value,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
-      child: Row(
-        children: [
-          Icon(icon, size: 18, color: AppColors.onSurfaceVariant),
-          const SizedBox(width: 10),
-          Text(
-            label,
-            style: AppTextStyles.caption.copyWith(
-              color: AppColors.onSurfaceVariant,
-            ),
-          ),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text(
-              value,
-              style: AppTextStyles.bodyMedium,
-              textAlign: TextAlign.end,
-            ),
-          ),
         ],
       ),
     );
@@ -604,243 +572,3 @@ class _LinkRow extends StatelessWidget {
   }
 }
 
-class _LanguageTile extends StatelessWidget {
-  final String label;
-  final bool selected;
-  final VoidCallback onTap;
-  const _LanguageTile({
-    required this.label,
-    required this.selected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(8),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 10),
-        child: Row(
-          children: [
-            Icon(
-              selected ? Icons.radio_button_checked : Icons.radio_button_off,
-              color: selected ? AppColors.primary : AppColors.onSurfaceVariant,
-              size: 20,
-            ),
-            const SizedBox(width: 10),
-            Text(label, style: AppTextStyles.bodyMedium),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ── Username bottom sheet ─────────────────────────────────────────────────────
-
-enum _CheckState { idle, checking, available, taken, invalid }
-
-class _SetUsernameSheet extends ConsumerStatefulWidget {
-  final dynamic user;
-  const _SetUsernameSheet({required this.user});
-
-  @override
-  ConsumerState<_SetUsernameSheet> createState() => _SetUsernameSheetState();
-}
-
-class _SetUsernameSheetState extends ConsumerState<_SetUsernameSheet> {
-  final _ctrl = TextEditingController();
-  _CheckState _checkState = _CheckState.idle;
-  bool _saving = false;
-
-  static final _validPattern = RegExp(r'^[a-z0-9_]{3,20}$');
-
-  @override
-  void initState() {
-    super.initState();
-    if (widget.user.username != null) {
-      _ctrl.text = widget.user.username as String;
-      _checkState = _CheckState.available;
-    }
-  }
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  Future<void> _onChanged(String raw) async {
-    final val = raw.toLowerCase().trim();
-    if (val.isEmpty) {
-      setState(() => _checkState = _CheckState.idle);
-      return;
-    }
-    if (!_validPattern.hasMatch(val)) {
-      setState(() => _checkState = _CheckState.invalid);
-      return;
-    }
-    setState(() => _checkState = _CheckState.checking);
-    final repo = ReelsRepository();
-    final available = await repo.checkUsernameAvailable(
-      val,
-      widget.user.phone as String,
-    );
-    if (!mounted) return;
-    setState(() =>
-        _checkState = available ? _CheckState.available : _CheckState.taken);
-  }
-
-  Future<void> _save() async {
-    final handle = _ctrl.text.toLowerCase().trim();
-    if (!_validPattern.hasMatch(handle)) return;
-    setState(() => _saving = true);
-    try {
-      final repo = ReelsRepository();
-      await repo.setUsername(
-        username: handle,
-        phone: widget.user.phone as String,
-        businessName:
-            (widget.user.businessName ?? widget.user.name ?? '') as String,
-        role: widget.user.role as String,
-        oldUsername: widget.user.username as String?,
-      );
-      if (mounted) Navigator.pop(context);
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to save: $e')),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _saving = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final bottomPad = MediaQuery.of(context).viewInsets.bottom;
-    final canSave = _checkState == _CheckState.available && !_saving;
-
-    Widget? statusWidget;
-    switch (_checkState) {
-      case _CheckState.checking:
-        statusWidget = const Row(children: [
-          SizedBox(
-              width: 14,
-              height: 14,
-              child: CircularProgressIndicator(strokeWidth: 2)),
-          SizedBox(width: 8),
-          Text('Checking…'),
-        ]);
-      case _CheckState.available:
-        statusWidget = Row(children: [
-          const Icon(Icons.check_circle, color: Colors.green, size: 16),
-          const SizedBox(width: 6),
-          Text('@${_ctrl.text.toLowerCase()} is available',
-              style: const TextStyle(color: Colors.green)),
-        ]);
-      case _CheckState.taken:
-        statusWidget = Row(children: [
-          const Icon(Icons.cancel, color: Colors.red, size: 16),
-          const SizedBox(width: 6),
-          Text('@${_ctrl.text.toLowerCase()} is taken',
-              style: const TextStyle(color: Colors.red)),
-        ]);
-      case _CheckState.invalid:
-        statusWidget = const Text(
-          'Only a–z, 0–9 and _ allowed (3–20 chars)',
-          style: TextStyle(color: Colors.orange),
-        );
-      case _CheckState.idle:
-        statusWidget = null;
-    }
-
-    return Container(
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      padding: EdgeInsets.fromLTRB(24, 24, 24, 24 + bottomPad),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Center(
-            child: Container(
-              width: 40,
-              height: 4,
-              margin: const EdgeInsets.only(bottom: 20),
-              decoration: BoxDecoration(
-                color: AppColors.divider,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-          ),
-          Text('Set Username', style: AppTextStyles.heading2),
-          const SizedBox(height: 6),
-          Text(
-            'A unique handle others can use to find your shop. Once set, it can be changed later.',
-            style: AppTextStyles.bodySmall
-                .copyWith(color: AppColors.onSurfaceVariant),
-          ),
-          const SizedBox(height: 20),
-          TextField(
-            controller: _ctrl,
-            inputFormatters: [
-              FilteringTextInputFormatter.allow(RegExp(r'[a-zA-Z0-9_]')),
-              LengthLimitingTextInputFormatter(20),
-            ],
-            onChanged: (v) {
-              _ctrl.value = _ctrl.value.copyWith(
-                text: v.toLowerCase(),
-                selection: TextSelection.collapsed(
-                    offset: v.toLowerCase().length),
-              );
-              _onChanged(v);
-            },
-            decoration: InputDecoration(
-              prefixText: '@',
-              prefixStyle: AppTextStyles.bodyMedium
-                  .copyWith(color: AppColors.primary, fontWeight: FontWeight.bold),
-              hintText: 'yourshopname',
-              border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12)),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide:
-                    const BorderSide(color: AppColors.primary, width: 2),
-              ),
-            ),
-            autofocus: true,
-          ),
-          if (statusWidget != null) ...[
-            const SizedBox(height: 8),
-            statusWidget,
-          ],
-          const SizedBox(height: 20),
-          SizedBox(
-            width: double.infinity,
-            child: FilledButton(
-              onPressed: canSave ? _save : null,
-              style: FilledButton.styleFrom(
-                backgroundColor: AppColors.primary,
-                padding: const EdgeInsets.symmetric(vertical: 14),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12)),
-              ),
-              child: _saving
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: Colors.white))
-                  : const Text('Save Username'),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}

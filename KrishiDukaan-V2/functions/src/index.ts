@@ -4,9 +4,31 @@ import { onSchedule } from "firebase-functions/v2/scheduler";
 import { onRequest } from "firebase-functions/v2/https";
 import { logger } from "firebase-functions/v2";
 import { queueWaNotification } from "./wa-notify";
+import { looksLikePhone, firstPhone, notify, displayName } from "./notify";
+import { recordEngagement } from "./notifications/engagement";
 
 export { sendWaNotification, retryWaNotifications, webhookReceiver } from "./wa-dispatch";
 export { transcodeReel } from "./reels/media/transcodeReel";
+export {
+  notifyOwnerOnReelRepost,
+  flushEngagementNotifications,
+  pruneEngagementBuffer,
+} from "./notifications/engagement";
+export {
+  notifySellerOnInventoryAdd,
+  notifyLowStock,
+} from "./notifications/inventory";
+export { sendStoreAnalyticsDigest } from "./notifications/digest";
+export {
+  remindIncompleteProfiles,
+  remindSubscriptionRenewal,
+} from "./notifications/reminders";
+export {
+  provisionErpTenantOnSubscription,
+  provisionErpTenantByAdmin,
+  createErpHandoffCode,
+  redeemErpHandoffCode,
+} from "./erp-bridge";
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -16,7 +38,7 @@ const db = admin.firestore();
  *
  * Triggers on every write to products/{productId}.
  * If the doc is a seller copy (has manufacturerProductId or originalProductId),
- * it fans out the changed price / stock / discount to:
+ * it fans out the changed price / stock / discount / online-delivery status to:
  *   1. The canonical product's availability[] entry  (marketplace reads this)
  *   2. The seller's inventory doc                    (web dashboard reads this)
  *
@@ -73,7 +95,24 @@ export const syncSellerProductToCanonical = onDocumentWritten(
         before.ownerPhone !== d.ownerPhone ||
         before.ownerId !== d.ownerId ||
         before.retailerId !== d.retailerId;
-      if (!priceChanged && !stockChanged && !discountChanged && !identityChanged) return;
+      // A seller flipping their own Inventory → Online Delivery toggle must
+      // reach the canonical availability[] entry too — without this, a
+      // retailer who legitimately turns delivery on for an assigned product
+      // never shows up as orderable, since availability[].isOnline (what the
+      // marketplace store picker reads) was never being kept in sync with
+      // this doc's own isOnline/sellMode.
+      const onlineChanged =
+        before.isOnline !== d.isOnline || before.sellMode !== d.sellMode;
+      // A seller adding or repricing a package size must reach the canonical
+      // availability entry. Without this the trigger returned immediately on a
+      // variants-only edit, so a retailer who stocked a new size (5L on a
+      // catalogue product listing only 1L) never surfaced it anywhere.
+      const variantsChanged =
+        JSON.stringify(before.variants ?? null) !== JSON.stringify(d.variants ?? null);
+      if (
+        !priceChanged && !stockChanged && !discountChanged &&
+        !identityChanged && !onlineChanged && !variantsChanged
+      ) return;
     }
 
     // Values to mirror
@@ -102,6 +141,15 @@ export const syncSellerProductToCanonical = onDocumentWritten(
         ? (d.discountPct as number)
         : 0;
 
+    // A seller's copy is the source of truth for whether THEY personally sell
+    // this online — explicit isOnline wins; otherwise derive from sellMode.
+    // Missing/unset entirely defaults to false (never advertise online
+    // delivery a seller never explicitly turned on).
+    const isOnline =
+      typeof d.isOnline === "boolean"
+        ? d.isOnline
+        : d.sellMode === "online_delivery";
+
     // ── 1. Update canonical availability[] entry ──────────────────────────────
     try {
       const rootRef = db.collection("products").doc(rootId);
@@ -114,7 +162,10 @@ export const syncSellerProductToCanonical = onDocumentWritten(
           ? [...(root.availability as Record<string, unknown>[])]
           : [];
 
-        if (!availability.length) return;
+        // The seller's own package sizes. The marketplace resolves per-store
+        // pricing from the entry's variants, so a size missing here is a size
+        // that store cannot sell even when the chip is visible.
+        const sellerVariants = Array.isArray(d.variants) ? d.variants : null;
 
         let changed = false;
         const updated = availability.map((entry) => {
@@ -130,12 +181,32 @@ export const syncSellerProductToCanonical = onDocumentWritten(
           if (sellingPrice != null) patch.sellingPrice = sellingPrice;
           if (stockLabel != null) patch.stockLevel = stockLabel;
           patch.discountPct = effectivePct;
+          patch.isOnline = isOnline;
+          if (sellerVariants) patch.variants = sellerVariants;
           // P6: Enrich storePhone when it is missing in the availability entry.
           // This replaces the per-product arrayRemove+arrayUnion loop that backfill
           // used to run after the batch commit (which generated N extra HTTP requests).
           if (!entry.storePhone && ownerPhone) patch.storePhone = ownerPhone;
           return patch;
         });
+
+        // No entry for this seller yet — create one rather than dropping the
+        // update. Canonical docs assigned by admin often have no availability[]
+        // at all, so the map above matched nothing and every price, stock, and
+        // variant change this seller made was silently discarded.
+        if (!changed && (ownerId || ownerPhone)) {
+          updated.push({
+            storeId: ownerId || ownerPhone,
+            storePhone: ownerPhone || undefined,
+            storeName: d.store ?? d.storeName ?? undefined,
+            stockLevel: stockLabel ?? "In Stock",
+            sellingPrice: sellingPrice ?? undefined,
+            isOnline,
+            discountPct: effectivePct,
+            ...(sellerVariants ? { variants: sellerVariants } : {}),
+          });
+          changed = true;
+        }
 
         if (changed) {
           txn.update(rootRef, {
@@ -310,11 +381,57 @@ export const decrementStockOnOrder = onDocumentCreated(
  * Runs daily. Finds users whose subscription has expired (expiryDate < now)
  * and flips isPaid=false so canAccessDashboard correctly returns false.
  * Also marks the subscription doc as expired.
+ *
+ * Also promotes future-dated admin-assigned subscriptions (subscriptionStatus
+ * "scheduled", written by /api/admin/subscriptions/assign when the admin
+ * picks a future start date) to "active" once startDate has arrived, and
+ * flips isPaid=true at that point — access is intentionally NOT granted at
+ * creation time for a scheduled subscription, only once it actually starts.
  */
 export const expireSubscriptions = onSchedule(
   { schedule: "every 24 hours", timeZone: "Asia/Kolkata" },
   async () => {
     const now = admin.firestore.Timestamp.now();
+
+    // ── Promote scheduled subscriptions whose start date has arrived ───────
+    // Single-field equality query (no composite index needed — scheduled
+    // subscriptions are rare, admin-assigned only, so filtering startDate
+    // in code instead of a second range clause is cheap and avoids needing
+    // a new Firestore composite index deploy for this one query).
+    const scheduledSnap = await db
+      .collection("subscriptions")
+      .where("subscriptionStatus", "==", "scheduled")
+      .get();
+    const dueDocs = scheduledSnap.docs.filter((d) => {
+      const startDate = d.data().startDate as FirebaseFirestore.Timestamp | undefined;
+      return !!startDate && startDate.toMillis() <= now.toMillis();
+    });
+
+    if (dueDocs.length > 0) {
+      const promoteBatch = db.batch();
+      for (const subDoc of dueDocs) {
+        const d = subDoc.data() as Record<string, unknown>;
+        promoteBatch.update(subDoc.ref, {
+          subscriptionStatus: "active",
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        const ownerPhone = String(d.ownerPhone ?? "");
+        const seats = Number(d.seatsPurchased) || 0;
+        if (ownerPhone) {
+          const userRef = db.collection("users").doc(ownerPhone);
+          const userSnap = await userRef.get();
+          const currentSeats = Number(userSnap.data()?.totalSeats) || 0;
+          promoteBatch.update(userRef, {
+            isPaid: true,
+            subscriptionStatus: "paid",
+            totalSeats: currentSeats + seats,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        }
+      }
+      await promoteBatch.commit();
+      console.log(`[expireSubscriptions] promoted ${dueDocs.length} scheduled subscriptions to active`);
+    }
 
     // Find active subscriptions that have passed their expiry date
     const expiredSnap = await db
@@ -379,117 +496,6 @@ export const expireSubscriptions = onSchedule(
 
 // ─── Notifications ────────────────────────────────────────────────────────────
 
-/** Phone variants to try when looking up users/{phone}: as-is, +91-prefixed,
- *  and 10-digit stripped — doc IDs exist in both formats. */
-function phoneVariants(phone: string): string[] {
-  const v = new Set<string>();
-  const p = phone.trim();
-  if (!p) return [];
-  v.add(p);
-  if (p.startsWith("+91")) v.add(p.substring(3));
-  else v.add(`+91${p}`);
-  return Array.from(v);
-}
-
-/**
- * Writes a notifications/{id} doc for the recipient and sends an FCM push to
- * their saved token (users/{phone}.fcmToken). Never throws — notification
- * failures must not break the triggering write.
- */
-/** True when [v] looks like an Indian phone (10–13 digits, optional +91). */
-function looksLikePhone(v: unknown): v is string {
-  if (typeof v !== "string") return false;
-  const t = v.trim();
-  const stripped = t.startsWith("+91") ? t.slice(3) : t;
-  return /^\d{10,13}$/.test(stripped);
-}
-
-/**
- * Returns the first phone-like value from the candidates. Web and mobile
- * write phones into different fields (retailerPhone vs retailerId/ownerId,
- * some null) — and UID values must be skipped, so plain ?? chains don't work.
- */
-function firstPhone(...candidates: unknown[]): string {
-  for (const c of candidates) {
-    if (looksLikePhone(c)) return (c as string).trim();
-  }
-  return "";
-}
-
-async function notify(
-  recipientPhone: string,
-  type: string,
-  title: string,
-  body: string,
-  data: Record<string, string> = {}
-): Promise<void> {
-  const phone = (recipientPhone ?? "").trim();
-  if (!phone) {
-    console.warn(`[notify] skipped ${type} "${title}" — no recipient phone`);
-    return;
-  }
-
-  try {
-    await db.collection("notifications").add({
-      recipientPhone: phone,
-      // Store the alternate format too so the client query matches whichever
-      // format its user doc uses.
-      recipientPhones: phoneVariants(phone),
-      type,
-      title,
-      body,
-      data,
-      read: false,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-  } catch (err) {
-    console.error(`[notify] doc write failed for ${phone}:`, err);
-  }
-
-  try {
-    let token: string | null = null;
-    for (const variant of phoneVariants(phone)) {
-      const snap = await db.collection("users").doc(variant).get();
-      const t = snap.exists
-        ? (snap.data()?.fcmToken as string | undefined)
-        : undefined;
-      if (t) {
-        token = t;
-        break;
-      }
-    }
-    if (!token) return;
-
-    await admin.messaging().send({
-      token,
-      notification: { title, body },
-      data: { type, ...data },
-      android: { priority: "high" },
-    });
-  } catch (err) {
-    console.error(`[notify] push failed for ${phone}:`, err);
-  }
-}
-
-/** Resolves a seller's display name from manufacturers/users/retailers docs. */
-async function displayName(phone: string, fallback: string): Promise<string> {
-  for (const variant of phoneVariants(phone)) {
-    for (const col of ["manufacturers", "users", "retailers"]) {
-      try {
-        const snap = await db.collection(col).doc(variant).get();
-        if (!snap.exists) continue;
-        const d = snap.data() ?? {};
-        const name = String(
-          d.businessName ?? d.shopName ?? d.name ?? d.ownerName ?? ""
-        ).trim();
-        if (name) return name;
-      } catch {
-        /* keep trying other variants */
-      }
-    }
-  }
-  return fallback;
-}
 
 /**
  * Resolves a manufacturer's display name by trying phone variants first, then
@@ -527,6 +533,158 @@ async function manufacturerDisplayName(phone: string, uid: string, fallback: str
 }
 
 /** New order placed → notify the seller (store owner / manufacturer). */
+/** Product-doc fields that can carry a seller identity, phone-first. */
+const OWNER_FIELDS = ["retailerPhone", "ownerPhone", "retailerId", "ownerId"] as const;
+
+/**
+ * Sources marking a doc as a seller's copy of a canonical catalog product.
+ * Kept in sync with CatalogRepository.fetchAllMergedProducts (mobile) and the
+ * merge in app/firebase.ts — the marketplace joins these to the canonical doc
+ * by product name, which is why the name lookup below is the right join key.
+ */
+const COPY_SOURCES = new Set([
+  "admin_assigned",
+  "manufacturer_assigned",
+  "retailer_inventory_copy",
+]);
+
+/** First non-empty OWNER_FIELDS value on a product doc, or "". */
+function ownerOf(d: Record<string, unknown> | undefined): string {
+  for (const f of OWNER_FIELDS) {
+    const v = String(d?.[f] ?? "").trim();
+    if (v) return v;
+  }
+  return "";
+}
+
+type ResolvedSeller = {
+  sellerId: string;
+  sellerPhone: string;
+  sellerName: string;
+  via: string;
+};
+
+/**
+ * Recovers the seller for an order whose client wrote none.
+ *
+ * Two shapes produce an unkeyed order:
+ *   1. The ordered product owns itself (ownerPhone / retailerId / …).
+ *   2. The ordered product is a CANONICAL catalog doc (source: "admin") with
+ *      no ownership fields at all but flagged online_delivery. The real seller
+ *      lives on a separate copy doc that the marketplace merges in by name.
+ *
+ * Case 2 is only resolved when it is UNAMBIGUOUS — if two retailers stock the
+ * same catalog product the order genuinely cannot be attributed automatically,
+ * and guessing would hand one seller another's money. Those return null and
+ * are left for `scripts/repair-orphan-order-sellers.js` to report.
+ */
+async function resolveSellerForOrder(
+  items: Record<string, unknown>[]
+): Promise<ResolvedSeller | null> {
+  const productId = String(
+    items[0]?.catalogId ?? items[0]?.listingId ?? items[0]?.productId ?? ""
+  ).trim();
+  if (!productId) return null;
+
+  const prodSnap = await db.collection("products").doc(productId).get();
+  if (!prodSnap.exists) return null;
+  const prod = prodSnap.data() as Record<string, unknown>;
+
+  // 1. The ordered doc owns itself.
+  const direct = ownerOf(prod);
+  if (direct) {
+    return {
+      sellerId: direct,
+      sellerPhone: firstPhone(...OWNER_FIELDS.map((f) => prod[f])),
+      sellerName: String(prod.store ?? prod.storeName ?? "").trim(),
+      via: `products/${productId}`,
+    };
+  }
+
+  // 2. Ownerless canonical doc — join to its seller copies by name.
+  const name = String(prod.name ?? "").trim();
+  if (!name) return null;
+
+  const siblings = await db.collection("products").where("name", "==", name).get();
+  const copies = siblings.docs
+    .map((d) => ({ id: d.id, data: d.data() as Record<string, unknown> }))
+    .filter((c) => COPY_SOURCES.has(String(c.data.source ?? "")) && ownerOf(c.data));
+
+  const distinctOwners = Array.from(new Set(copies.map((c) => ownerOf(c.data))));
+  if (distinctOwners.length !== 1) return null;
+
+  const copy = copies.find((c) => ownerOf(c.data))!;
+  return {
+    sellerId: distinctOwners[0],
+    sellerPhone: firstPhone(...OWNER_FIELDS.map((f) => copy.data[f])),
+    sellerName: String(copy.data.store ?? copy.data.storeName ?? "").trim(),
+    via: `products/${copy.id} (source: ${copy.data.source}, matched by name)`,
+  };
+}
+
+/**
+ * backfillOrderSeller
+ *
+ * Server-side backstop for orders written with no seller key at all. A paid
+ * order with `sellerId: ""` matches no seller-dashboard query on web or
+ * mobile, so the retailer never sees it and never fulfils it — the money
+ * lands and the order silently vanishes.
+ *
+ * The client-side guards live in the Flutter checkout, but old installs stay
+ * in the field for months after a release, so the fix cannot be client-only.
+ * This runs regardless of which client wrote the order, or how old it is.
+ *
+ * Updating the doc does not re-fire this trigger (onDocumentCreated only fires
+ * on create), so there is no write loop.
+ */
+export const backfillOrderSeller = onDocumentCreated(
+  "orders/{orderId}",
+  async (event) => {
+    const snap = event.data;
+    const d = snap?.data() as Record<string, unknown> | undefined;
+    if (!snap || !d) return;
+
+    if (String(d.sellerId ?? "").trim()) return; // already keyed — nothing to do
+
+    const orderId = event.params.orderId;
+    const items = Array.isArray(d.items) ? (d.items as Record<string, unknown>[]) : [];
+
+    logger.warn("[backfillOrderSeller] order written with no seller key", {
+      orderId,
+      customerPhone: d.customerPhone ?? null,
+      itemCount: items.length,
+    });
+
+    let resolved: ResolvedSeller | null = null;
+    try {
+      resolved = await resolveSellerForOrder(items);
+    } catch (err) {
+      logger.error("[backfillOrderSeller] resolution threw", { orderId, err: String(err) });
+      return;
+    }
+
+    if (!resolved) {
+      logger.error("[backfillOrderSeller] could not attribute order — needs manual repair", {
+        orderId,
+        productId: items[0]?.catalogId ?? items[0]?.listingId ?? null,
+      });
+      return;
+    }
+
+    const update: Record<string, string> = {
+      sellerId: resolved.sellerId,
+      sellerPhone: resolved.sellerPhone,
+    };
+    // Only fill a blank name — never overwrite one the client already wrote.
+    if (resolved.sellerName && !String(d.sellerName ?? "").trim()) {
+      update.sellerName = resolved.sellerName;
+    }
+
+    await snap.ref.update(update);
+    logger.info("[backfillOrderSeller] repaired", { orderId, ...update, via: resolved.via });
+  }
+);
+
 export const notifySellerOnOrder = onDocumentCreated(
   "orders/{orderId}",
   async (event) => {
@@ -587,6 +745,29 @@ export const notifySellerOnOrder = onDocumentCreated(
       } catch (lookupErr) {
         logger.error("[notifySellerOnOrder] UID→phone lookup threw", {
           orderId, sellerId, err: String(lookupErr),
+        });
+      }
+    }
+
+    // Last resort: the order carries no seller key at all, so the lookups above
+    // were skipped entirely (they need a sellerId to start from). Recover the
+    // owner from the ordered product the same way backfillOrderSeller does —
+    // that trigger repairs the doc, but it races this one, so resolving here
+    // too is what actually gets the alert out on an orphaned order.
+    if (!sellerPhone) {
+      try {
+        const resolved = await resolveSellerForOrder(
+          Array.isArray(d.items) ? (d.items as Record<string, unknown>[]) : []
+        );
+        if (resolved?.sellerPhone) {
+          sellerPhone = resolved.sellerPhone;
+          logger.info("[notifySellerOnOrder] resolved phone from the ordered product", {
+            orderId, sellerPhone, via: resolved.via,
+          });
+        }
+      } catch (err) {
+        logger.error("[notifySellerOnOrder] product-based resolution threw", {
+          orderId, err: String(err),
         });
       }
     }
@@ -750,16 +931,17 @@ export const notifyReelOwnerOnLike = onDocumentCreated(
     const ownerPhone = String(reel.shopOwnerId ?? "");
     if (!ownerPhone || ownerPhone === likerId) return; // don't notify self-like
 
-    const shopName = String(reel.shopName ?? "your reel");
     const likerName = await displayName(likerId, "Someone");
 
-    await notify(
+    // Buffered, not pushed: a reel that takes off would otherwise fire one
+    // notification per like. flushEngagementNotifications groups them hourly.
+    await recordEngagement({
       ownerPhone,
-      "reel_like",
-      "New like on your reel ❤️",
-      `${likerName} liked your reel "${shopName}"`,
-      { reelId }
-    );
+      actorPhone: likerId,
+      actorName: likerName,
+      kind: "like",
+      reelId,
+    });
   }
 );
 
@@ -795,6 +977,29 @@ export const notifyReelOwnerOnComment = onDocumentCreated(
       preview || "Tap to view",
       { reelId }
     );
+
+    // Also buffered — with instantSent so the hourly flush never re-sends it,
+    // but a grouped summary can still read "…liked and commented on your
+    // content". Comments stay instant because they expect a reply.
+    await recordEngagement({
+      ownerPhone,
+      actorPhone: commenterPhone,
+      actorName: commenterName,
+      kind: "comment",
+      reelId,
+      instantSent: true,
+    });
+
+    const taggedUserId = d.taggedUserId as string | undefined;
+    if (taggedUserId && taggedUserId !== commenterPhone) {
+      await notify(
+        taggedUserId,
+        "reel_comment_tag",
+        `${commenterName} tagged you in a comment 🏷️`,
+        preview || "Tap to view",
+        { reelId }
+      );
+    }
   }
 );
 
@@ -814,13 +1019,12 @@ export const notifyShopOwnerOnFollow = onDocumentCreated(
 
     const followerName = await displayName(followerPhone, "Someone");
 
-    await notify(
-      shopPhone,
-      "reel_follow",
-      "New follower 🎉",
-      `${followerName} started following your shop`,
-      { followerPhone }
-    );
+    await recordEngagement({
+      ownerPhone: shopPhone,
+      actorPhone: followerPhone,
+      actorName: followerName,
+      kind: "follow",
+    });
   }
 );
 

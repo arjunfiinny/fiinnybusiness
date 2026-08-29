@@ -2,7 +2,9 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Box, Plus, Pencil, Trash2, Search, X, ImageIcon, Link2, Loader2, Check, Store, Users } from "lucide-react";
-import { auth, fetchAllProductsForAdmin, fetchAllSellerProducts, fetchInventoryForProducts, adminCreateProduct, adminUpdateProduct, adminDeleteProduct, adminAssignProductToSeller, adminRemoveAssignment, adminUpdateAssignmentPricing, fetchAllUsers } from "../../firebase";
+import { auth, mapAdminProductDocs, fetchAdminAssignedCopies, fetchInventoryForProducts, adminCreateProduct, adminUpdateProduct, adminDeleteProduct, adminAssignProductToSeller, adminRemoveAssignment, adminUpdateAssignmentPricing } from "../../firebase";
+import { getProducts, getUsers, invalidateProducts, invalidateUsers, cacheAge, CACHE_KEYS } from "../_lib/admin-data";
+import { RefreshButton } from "../_components/refresh-button";
 import type { MarketplaceProduct } from "../../../types/product";
 import { cn } from "../../dashboard/_lib/cn";
 import { AddProductInventoryForm } from "../../dashboard/_components/add-product-inventory-form";
@@ -16,6 +18,11 @@ export default function AdminProductsPage() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [catFilter, setCatFilter] = useState("all");
+  // Renders only a window of the (already-fetched) product list at a time — the admin
+  // catalog table is heavy per-row (images, badges, several buttons), so painting all
+  // of it at once was the dominant slowness, separate from the network fetch itself.
+  const PAGE_SIZE = 30;
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [showForm, setShowForm] = useState(false);
   const [editProduct, setEditProduct] = useState<MarketplaceProduct | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
@@ -33,7 +40,7 @@ export default function AdminProductsPage() {
 
   const loadSellers = async () => {
     if (sellersLoaded) return;
-    const users = await fetchAllUsers();
+    const users = await getUsers();
     setSellers(
       users
         .filter(u => u.role === "retailer" || u.role === "manufacturer")
@@ -68,14 +75,41 @@ export default function AdminProductsPage() {
     } finally { setAssigningSeller(null); }
   };
 
-  const load = () => {
+  const [refreshing, setRefreshing] = useState(false);
+  const [dataAge, setDataAge] = useState<number | null>(null);
+
+  /**
+   * `force` (Refresh, and every write on this tab) drops the shared products cache so
+   * the next read hits Firestore; a plain load reuses the snapshot Overview/Analytics
+   * may already have paid for.
+   *
+   * rawProducts only needs admin_assigned copies (~50 docs) — fetching the whole
+   * `products` collection a second time here used to double the read for no reason,
+   * since ~95% of that collection is manufacturer_assigned inventory copies this
+   * tab never reads.
+   */
+  const load = (force = false) => {
+    if (force) invalidateProducts();
     setLoading(true);
-    Promise.all([fetchAllProductsForAdmin(), fetchAllSellerProducts().catch(() => [])])
-      .then(([prods, raw]) => { setProducts(prods); setRawProducts(raw); })
+    return Promise.all([getProducts({ force }), fetchAdminAssignedCopies().catch(() => [])])
+      .then(([docs, raw]) => {
+        setProducts(mapAdminProductDocs(docs));
+        setRawProducts(raw);
+        const age = cacheAge(CACHE_KEYS.products);
+        setDataAge(age === null ? Date.now() : Date.now() - age);
+      })
       .finally(() => setLoading(false));
   };
 
   useEffect(() => { load(); }, []);
+
+  const handleRefresh = () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    invalidateUsers();
+    setSellersLoaded(false);
+    load(true).finally(() => setRefreshing(false));
+  };
 
   // Map of base product id → active admin-assigned seller copies.
   const assignmentsByOriginal = useMemo(() => {
@@ -152,7 +186,7 @@ export default function AdminProductsPage() {
         stockQuantity: Number(row.stock) || 0,
         variants: row.variants,
       });
-      await load();
+      await load(true);
       setRowMsg(`Saved ${row.store}.`);
     } catch (e) {
       setRowMsg(e instanceof Error ? e.message : "Save failed.");
@@ -174,7 +208,7 @@ export default function AdminProductsPage() {
       const adminUid = auth.currentUser?.uid ?? "admin";
       await adminRemoveAssignment(row.copyId, viewAssignmentsFor.name, row.phone, adminUid);
       setAssignmentRows(prev => prev.filter(r => r.copyId !== row.copyId));
-      await load();
+      await load(true);
       setRowMsg(`Removed ${row.store}.`);
     } catch (e) {
       setRowMsg(e instanceof Error ? e.message : "Remove failed.");
@@ -249,6 +283,11 @@ export default function AdminProductsPage() {
       return matchSearch && matchCat;
     });
   }, [groupedProducts, search, catFilter]);
+
+  // Reset the visible window whenever the result set changes underneath it.
+  useEffect(() => { setVisibleCount(PAGE_SIZE); }, [search, catFilter]);
+
+  const visibleProducts = filtered.slice(0, visibleCount);
 
   const openAdd  = () => { setEditProduct(null); setShowForm(true); };
   const openEdit = (p: MarketplaceProduct) => { setEditProduct(p); setShowForm(true); };
@@ -326,9 +365,12 @@ export default function AdminProductsPage() {
           </div>
           <p className="ml-7 text-xs text-on-surface-variant sm:ml-9 sm:text-sm">All marketplace products. Admin can add, edit, or delete any product.</p>
         </div>
-        <button onClick={openAdd} className="flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-primary-container sm:w-auto shrink-0">
-          <Plus className="h-4 w-4" /> Add Product
-        </button>
+        <div className="flex items-center gap-2 shrink-0 flex-wrap">
+          <RefreshButton savedAt={dataAge} refreshing={refreshing} onRefresh={handleRefresh} />
+          <button onClick={openAdd} className="flex items-center justify-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-primary-container shrink-0">
+            <Plus className="h-4 w-4" /> Add Product
+          </button>
+        </div>
       </div>
 
       <div className="flex flex-wrap gap-2">
@@ -353,7 +395,9 @@ export default function AdminProductsPage() {
       ) : (
         <div className="rounded-2xl border border-outline-variant/30 bg-surface-container-lowest overflow-hidden">
           <div className="px-5 py-3 border-b border-outline-variant/20 bg-surface-container-low">
-            <span className="text-xs font-bold text-on-surface-variant">{filtered.length} product{filtered.length !== 1 ? "s" : ""}</span>
+            <span className="text-xs font-bold text-on-surface-variant">
+              Showing {visibleProducts.length} of {filtered.length} product{filtered.length !== 1 ? "s" : ""}
+            </span>
           </div>
           <div className="hidden md:block overflow-x-auto">
             <table className="w-full text-sm">
@@ -370,7 +414,7 @@ export default function AdminProductsPage() {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map(p => {
+                {visibleProducts.map(p => {
                   const imgs: string[] = (p as any).images?.length ? (p as any).images : (p.image ? [p.image] : []);
                   return (
                     <tr key={p.id} className="border-b border-outline-variant/10 hover:bg-surface-container-low transition-colors">
@@ -451,7 +495,7 @@ export default function AdminProductsPage() {
             </table>
           </div>
           <div className="divide-y divide-outline-variant/10 md:hidden">
-            {filtered.map(p => {
+            {visibleProducts.map(p => {
               const imgs: string[] = (p as any).images?.length ? (p as any).images : (p.image ? [p.image] : []);
               return (
                 <div key={p.id} className="space-y-3 px-4 py-3">
@@ -510,6 +554,18 @@ export default function AdminProductsPage() {
               <div className="px-5 py-10 text-center text-sm text-on-surface-variant">No products found.</div>
             )}
           </div>
+
+          {visibleCount < filtered.length && (
+            <div className="flex justify-center border-t border-outline-variant/20 py-3">
+              <button
+                type="button"
+                onClick={() => setVisibleCount(c => c + PAGE_SIZE)}
+                className="rounded-xl border border-outline-variant/40 bg-surface-container-low px-5 py-2 text-sm font-bold text-on-surface hover:bg-surface-container"
+              >
+                See More
+              </button>
+            </div>
+          )}
         </div>
       )}
 
@@ -529,7 +585,7 @@ export default function AdminProductsPage() {
                 role="manufacturer"
                 seatStats={ADMIN_SEAT_STATS}
                 onAdminSave={handleAdminSave}
-                onCreated={async () => { await load(); setShowForm(false); }}
+                onCreated={async () => { await load(true); setShowForm(false); }}
               />
             </div>
           </div>

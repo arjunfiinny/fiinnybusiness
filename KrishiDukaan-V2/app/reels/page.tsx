@@ -1,9 +1,10 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { Suspense } from "react";
 import {
   getAllReels,
   buildReelSlug,
-  linkedProductStorePath,
+  linkedProductPath,
   reelCssFilter,
 } from "../lib/seo/reels-server";
 import ReelsFeedClient from "./ReelsFeedClient";
@@ -17,7 +18,8 @@ const SITE_URL =
 export const revalidate = 600;
 
 export const metadata: Metadata = {
-  title: "AgriReels — Farming Videos, Product Demos & Tips | KrishiDukan",
+  // Brand appended by the "%s | KrishiDukan" template in app/layout.tsx.
+  title: "AgriReels — Farming Videos, Product Demos & Tips",
   description:
     "Watch short farming videos from verified agri sellers: product demos, crop tips, pesticides, fertilizers and seeds in action. Shop products directly from every reel.",
   alternates: { canonical: `${SITE_URL}/reels` },
@@ -46,7 +48,11 @@ export default async function ReelsPage() {
     shopName: r.shopName,
     viewsCount: r.viewsCount,
     likesCount: r.likesCount,
-    productPath: linkedProductStorePath(r),
+    commentsCount: r.commentsCount,
+    // Canonical /products/[slug] — see the note in app/reels/[slug]/page.tsx.
+    // The feed renders server-side, so these are 60 real crawlable links into
+    // the product catalogue; the SPA deep link they replaced was invisible.
+    productPath: linkedProductPath(r),
     linkedProductName: r.linkedProductName,
     cssFilter: reelCssFilter(r.filterId),
     overlayText: r.overlayText,
@@ -109,7 +115,9 @@ export default async function ReelsPage() {
           <p className="text-sm">Sellers can post the first one from the KrishiDukan app!</p>
         </div>
       ) : (
-        <ReelsFeedClient reels={feedReels} />
+        <Suspense fallback={<div className="h-[calc(100dvh-4rem)] bg-black" />}>
+          <ReelsFeedClient reels={feedReels} />
+        </Suspense>
       )}
     </main>
   );

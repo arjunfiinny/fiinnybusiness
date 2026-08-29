@@ -60,6 +60,35 @@ service cloud.firestore {
       return isDirectSalesExec() || (isAuthed() && myRole() == 'salesExecutive');
     }
 
+    // ─── Team accounts (limited-access admin-portal staff) ─────────────────
+    // Team accounts are always email-based (users/{uid}, created via the
+    // admin "Team" tab, same shape as email admins/sales-execs) — mirrors
+    // isDirectAdmin()/isDirectSalesExec(). Each doc carries an
+    // `adminSections: string[]` field naming which admin-portal tabs the
+    // account may use; `teamHas(section)` checks membership directly on
+    // that doc instead of adding a second read via myRole()/myPhone().
+    function isDirectTeam() {
+      return isAuthed()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'team';
+    }
+
+    function isTeam() {
+      return isDirectTeam();
+    }
+
+    function teamSections() {
+      return isDirectTeam()
+        ? get(/databases/$(database)/documents/users/$(request.auth.uid)).data.adminSections
+        : [];
+    }
+
+    // True only for a team account granted [section]. Never true for admins —
+    // callers should write `isAdmin() || teamHas('x')`, not rely on this alone.
+    function teamHas(section) {
+      return isTeam() && (section in teamSections());
+    }
+
     // Compares a stored phone value against the caller's phone (myPhone()),
     // handling both E164 (+919876543210) and 10-digit (9876543210) formats.
     // This is the fix for the invite-acceptance "Missing or insufficient permissions" error:
@@ -86,6 +115,9 @@ service cloud.firestore {
     match /users/{phone} {
       allow read: if isAuthed() && (
         isAdmin() ||
+        // Team members granted "users" need to list/browse every account to
+        // monitor status and send pending-signup reminders.
+        teamHas('users') ||
         request.auth.uid == phone ||
         myPhone() == phone || myRole() in ['retailer', 'manufacturer'] ||
         // Allow first-time phone-auth login to read their pre-created doc before uidIndex exists.
@@ -120,6 +152,21 @@ service cloud.firestore {
       allow update: if isAdmin() || (isAuthed() && myPhone() == phone)
                        || (isAuthed() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['totalReviews', 'averageRating']));
       allow delete: if isAdmin();
+    }
+
+    // ─── payoutAccounts ──────────────────────────────────────────────────────
+    // Seller bank details for order payouts. The ONLY collection in this file
+    // that is neither public nor role-readable, and it must stay that way:
+    //   - profiles/{phone} is `allow read: if true`
+    //   - users/{phone} is readable by any retailer or manufacturer
+    // so bank details in either of those would be visible platform-wide.
+    // Owner and admin only — no teamHas(), no role checks, no exceptions.
+    match /payoutAccounts/{phone} {
+      allow read:   if isAuthed() && (isAdmin() || myPhone() == phone);
+      allow create: if isAuthed() && myPhone() == phone;
+      allow update: if isAuthed() && myPhone() == phone;
+      // Never client-deletable — payout history must stay auditable.
+      allow delete: if false;
     }
 
     // ─── catalog ─────────────────────────────────────────────────────────────
@@ -194,10 +241,14 @@ service cloud.firestore {
     // ─── subscriptions ───────────────────────────────────────────────────────
     // Accepts both new (ownerPhone) and legacy (ownerId) field names.
     match /subscriptions/{docId} {
+      // teamHas('users') covers the admin "view seller's dashboard" link in
+      // Users & Roles (app/dashboard/layout.tsx's admin-impersonation path) —
+      // without it, a team member landed on the dashboard but every read
+      // still denied since they aren't the seller and aren't a full admin.
       allow read: if isAuthed() && (
         (resource.data.ownerPhone is string && resource.data.ownerPhone == myPhone()) ||
         resource.data.ownerId == request.auth.uid ||
-        isAdmin()
+        isAdmin() || teamHas('users')
       );
       allow create: if isAuthed() && (
         (request.resource.data.ownerPhone is string && request.resource.data.ownerPhone == myPhone()) ||
@@ -205,6 +256,45 @@ service cloud.firestore {
         isAdmin()
       ) && request.resource.data.ownerType in ['retailer', 'manufacturer'];
       allow update, delete: if isAdmin();
+    }
+
+    // ─── plans ───────────────────────────────────────────────────────────────
+    // Admin-configurable subscription plan templates. Public read (a future
+    // self-checkout page can list active plans without a server round-trip);
+    // all writes go through app/api/admin/plans/* (Firebase Admin SDK, which
+    // bypasses these rules entirely) — client-side writes are denied outright
+    // so plan mutations always get the server-side validation/audit-log path.
+    match /plans/{planId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // ─── settings ────────────────────────────────────────────────────────────
+    // Public, non-secret configuration. settings/pricing holds the self-serve
+    // subscription ladder that the checkout, SubscriptionView and /sell all read,
+    // so it must be world-readable — the prices are on a public marketing page
+    // anyway. Writes go through /api/admin/pricing (Admin SDK, requireAdmin,
+    // adminLogs), never from a client, because this document decides what a
+    // seller is charged.
+    match /settings/{settingId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // ─── promoCodes ──────────────────────────────────────────────────────────
+    // Subscription discount codes. These had NO rule at all, and with no
+    // catch-all match Firestore denied every read — so SubscriptionView's
+    // client-side lookup always failed and every seller saw "Could not validate
+    // promo code", making the feature entirely non-functional.
+    //
+    // Read is public because the seller must be able to validate a code before
+    // paying, and a discount percentage is not a secret. It is NOT the authority
+    // on the charge: api/payment/create-order re-reads this collection with the
+    // Admin SDK and recomputes the amount, so a tampered client read cannot
+    // change what is billed. Writes are admin-only via /api/admin/promo-codes.
+    match /promoCodes/{codeId} {
+      allow read: if true;
+      allow write: if false;
     }
 
     // ─── payments ────────────────────────────────────────────────────────────
@@ -243,7 +333,8 @@ service cloud.firestore {
       ) && request.resource.data.status == 'placed'
         && request.resource.data.sellerType in ['retailer', 'manufacturer'];
 
-      allow read: if isAdmin() || (isAuthed() && (
+      // teamHas('users') covers the admin "view seller's dashboard" link.
+      allow read: if isAdmin() || teamHas('users') || teamHas('orders') || (isAuthed() && (
         resource.data.customerPhone == myPhone() ||
         resource.data.sellerPhone == myPhone() ||
         resource.data.customerId == request.auth.uid ||
@@ -274,7 +365,11 @@ service cloud.firestore {
 
     // ─── adminLogs ───────────────────────────────────────────────────────────
     match /adminLogs/{docId} {
-      allow read, write: if isAdmin();
+      allow read: if isAdmin();
+      // Team accounts can write their own audit entries (so their actions —
+      // reminder sends, WA replies — are still logged) but never read the
+      // full log, which can reveal admin-account creation/deletion history.
+      allow write: if isAdmin() || isTeam();
     }
 
     // ─── Phone-keyed subcollections ──────────────────────────────────────────
@@ -333,7 +428,9 @@ service cloud.firestore {
     match /products/{productId} {
       allow read: if true;
       allow create: if isAuthed();
-      allow update: if isAdmin() || (isAuthed() && (
+      // Team members granted "products" can help a seller who can't list a
+      // product themselves — same broad section-scoped grant as inventory.
+      allow update: if isAdmin() || teamHas('products') || (isAuthed() && (
         resource.data.ownerId == request.auth.uid ||
         resource.data.retailerId == request.auth.uid ||
         resource.data.manufacturerId == request.auth.uid ||
@@ -347,6 +444,15 @@ service cloud.firestore {
         // Allow any retailer to add their store to the product's availability array
         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['availability', 'updatedAt']) ||
         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['availability']) ||
+        // Allow any authed shopper to bump the analytics counters only
+        // (trackProductImpression/Click/StoreCall/DirectionRequest in
+        // app/firebase.ts). Without this the seller-analytics counters were
+        // permission-denied for every non-owner and silently stayed zero —
+        // same pattern as the reels viewsCount/likesCount clause.
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'impressions', 'clicks', 'positionSum', 'calls', 'directionRequests',
+          'impressionsByDay', 'clicksByDay', 'callsByDay', 'directionRequestsByDay'
+        ]) ||
         // Allow owner to update discount mirror fields (effectiveDiscountPct, maxDiscountPct, availability+discount)
         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['effectiveDiscountPct', 'updatedAt']) ||
         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['maxDiscountPct']) ||
@@ -363,6 +469,17 @@ service cloud.firestore {
     match /retailers/{retailerId} {
       allow read: if true;
       allow create: if isAuthed();
+      // Storefront view counters: any signed-in shopper may bump these two
+      // fields and nothing else, the same narrowly-scoped counter exemption
+      // businessCodes uses. This is what feeds "store views" in the seller's
+      // analytics screen and in the weekly/monthly/yearly digest notification
+      // (collectStats in functions/src/notifications/digest.ts) — without it
+      // the write is denied for every visitor except the owner, which is
+      // precisely the visitor whose views must NOT be counted.
+      allow update: if isAuthed()
+                       && request.resource.data.diff(resource.data)
+                            .affectedKeys()
+                            .hasOnly(['storeViews', 'storeViewsByDay']);
       allow update: if isAdmin() || (isAuthed() && (
         resource.data.userId == request.auth.uid ||
         resource.data.retailerId == request.auth.uid ||
@@ -426,7 +543,11 @@ service cloud.firestore {
     }
 
     match /inventory/{inventoryId} {
-      allow read: if isAdmin() || (isAuthed() && (
+      // Team members granted "inventory" can see/help manage any seller's
+      // listing (helping a seller who can't list a product themselves) —
+      // this is a deliberately broad read/write grant scoped to the section,
+      // not to a specific owner.
+      allow read: if isAdmin() || teamHas('inventory') || (isAuthed() && (
         resource.data.ownerId == request.auth.uid ||
         resource.data.retailerId == request.auth.uid ||
         resource.data.manufacturerId == request.auth.uid ||
@@ -438,8 +559,8 @@ service cloud.firestore {
         // Allow if retailerPhone is set (post-backfill) and matches caller
         (resource.data.retailerPhone is string && phoneMatches(resource.data.retailerPhone))
       ));
-      allow create: if isAdmin() || (isAuthed() && discountFieldsValid());
-      allow update: if isAdmin() || (isAuthed() && discountFieldsValid() && (
+      allow create: if isAdmin() || teamHas('inventory') || (isAuthed() && discountFieldsValid());
+      allow update: if isAdmin() || teamHas('inventory') || (isAuthed() && discountFieldsValid() && (
         resource.data.ownerId == request.auth.uid ||
         resource.data.retailerId == request.auth.uid ||
         phoneMatches(resource.data.ownerId) ||
@@ -485,6 +606,15 @@ service cloud.firestore {
           request.resource.data.status == 'active' &&
           request.resource.data.retailerId == request.auth.uid &&
           request.resource.data.claimable == false
+        ) ||
+        // Team members (Users & Roles section) sending a pending-signup
+        // reminder only ever touch these three audit fields — never status,
+        // claimable, or ownership, so this can't be used to hijack an invite.
+        (
+          teamHas('users') &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(
+            ['lastReminderSentAt', 'lastReminderSentBy', 'reminderCount']
+          )
         )
       ));
       allow delete: if isAdmin() || (isAuthed() && (
@@ -494,7 +624,9 @@ service cloud.firestore {
     }
 
     match /retailerSeatListings/{docId} {
-      allow read: if isAdmin() || (isAuthed() && (
+      // teamHas('users') covers the admin "view seller's dashboard" link —
+      // the dashboard's "Listing Seats" card needs this too.
+      allow read: if isAdmin() || teamHas('users') || (isAuthed() && (
         resource.data.ownerId == request.auth.uid ||
         resource.data.retailerId == request.auth.uid ||
         resource.data.manufacturerId == request.auth.uid ||
@@ -535,29 +667,31 @@ service cloud.firestore {
 
     match /contactMessages/{docId} {
       allow create: if true;
-      allow read, write: if isAdmin();
+      allow read, write: if isAdmin() || teamHas('messages');
     }
 
     // ─── WhatsApp inbox ──────────────────────────────────────────────────────
     // Written by Cloud Functions / webhook (admin SDK, bypasses rules).
-    // Read and write restricted to admins only from the client.
+    // Read/write from the client restricted to admins and team members
+    // granted the "whatsapp" or "users" section (the latter needs
+    // waNotifications write access to queue pending-signup reminders).
     match /waIncomingMessages/{msgId} {
-      allow read, write: if isAdmin();
+      allow read, write: if isAdmin() || teamHas('whatsapp');
     }
 
     match /waNotifications/{notifId} {
-      allow read, write: if isAdmin();
+      allow read, write: if isAdmin() || teamHas('whatsapp') || teamHas('users');
     }
 
     match /waConversations/{phone} {
-      allow read, write: if isAdmin();
+      allow read, write: if isAdmin() || teamHas('whatsapp');
 
       match /messages/{msgId} {
-        allow read, write: if isAdmin();
+        allow read, write: if isAdmin() || teamHas('whatsapp');
       }
 
       match /notes/{noteId} {
-        allow read, write: if isAdmin();
+        allow read, write: if isAdmin() || teamHas('whatsapp');
       }
     }
 
@@ -669,7 +803,9 @@ service cloud.firestore {
     }
 
     // ─── reels ───────────────────────────────────────────────────────────────
-    // Public read. Any authenticated user can create.
+    // Public read. Any authenticated user can create their own reel; admin can
+    // also create a reel on behalf of any seller (web admin "upload for seller"
+    // flow, e.g. when the seller can't upload it themselves).
     // Only the shop owner (matched by phone) or admin can update/delete.
     // viewsCount increment is the only anonymous-adjacent write, but we keep
     // write gated on auth to prevent abuse — unauthenticated viewers still
@@ -677,8 +813,8 @@ service cloud.firestore {
     // after the user has the app open (implying phone auth).
     match /reels/{reelId} {
       allow read: if true;
-      allow create: if isAuthed()
-        && request.resource.data.shopOwnerId == myPhone();
+      allow create: if isAdmin()
+        || (isAuthed() && request.resource.data.shopOwnerId == myPhone());
       allow update: if isAdmin()
         // The owner can edit their own reel, but not moderationStatus or
         // reportCount — those exist so a report can't be reversed by the
@@ -719,6 +855,23 @@ service cloud.firestore {
     match /follows/{followId} {
       allow read: if true;
       allow write: if isAuthed();
+    }
+
+    // ─── engagement_buffer ───────────────────────────────────────────────────
+    // Server-only. recordEngagement (Cloud Functions, admin SDK) writes here
+    // and flushEngagementNotifications drains it. No client has any business
+    // reading it — it would expose every like/follow across all sellers — and
+    // a client that could write to it could forge grouped notifications.
+    match /engagement_buffer/{eventId} {
+      allow read, write: if isAdmin();
+    }
+
+    // ─── engagement_groups ───────────────────────────────────────────────────
+    // The actor list behind one grouped notification. Only the seller it was
+    // built for may open it; writes stay server-side.
+    match /engagement_groups/{groupId} {
+      allow get: if isAdmin() || (isAuthed() && phoneMatches(resource.data.ownerPhone));
+      allow list, write: if isAdmin();
     }
 
     // ─── reel_reports ────────────────────────────────────────────────────────
@@ -781,6 +934,15 @@ service cloud.firestore {
       allow update: if isAuthed()
                        && resource.data.salesExecutiveId == request.auth.uid;
       allow delete: if isAdmin();
+    }
+
+    // ─── erpHandoffCodes ──────────────────────────────────────────────────────
+    // Single-use codes that are exchanged for an ERP sign-in token. Each document
+    // is a bearer credential, so no client may read, list or write one — reading a
+    // code would be enough to take over the matching ERP session. Both sides of the
+    // exchange run in Cloud Functions, and the Admin SDK bypasses these rules.
+    match /erpHandoffCodes/{codeHash} {
+      allow read, write: if false;
     }
   }
 }

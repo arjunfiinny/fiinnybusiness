@@ -1,28 +1,85 @@
+import 'package:cached_network_image/cached_network_image.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/app_text_styles.dart';
+import '../../../core/widgets/user_tag_dialog.dart';
 import '../../../core/models/listing_model.dart';
 import '../../../core/models/reel_model.dart';
 import '../../../core/providers/user_provider.dart';
 import '../../../core/utils/format_count.dart';
+import '../../marketplace/providers/marketplace_provider.dart';
 import '../providers/reels_provider.dart';
 import '../widgets/reel_filters.dart';
 
-class ShopProfileScreen extends ConsumerWidget {
+class ShopProfileScreen extends ConsumerStatefulWidget {
   final String shopPhone;
   const ShopProfileScreen({super.key, required this.shopPhone});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<ShopProfileScreen> createState() => _ShopProfileScreenState();
+}
+
+class _ShopProfileScreenState extends ConsumerState<ShopProfileScreen> {
+  @override
+  void initState() {
+    super.initState();
+    _trackStoreView();
+  }
+
+  /// Best-effort, silent bump of `retailers/{phone}.storeViews` and today's
+  /// bucket in `storeViewsByDay` — the counters the weekly/monthly/yearly
+  /// analytics digest reads for "store views". Same shape and same
+  /// authenticated-shopper gate as _trackProductEvent in the product detail
+  /// screen; a seller opening their own storefront is not a view, and a
+  /// tracking failure must never affect the page.
+  void _trackStoreView() {
+    final auth = FirebaseAuth.instance.currentUser;
+    if (auth == null) return;
+
+    final me = ref.read(currentUserProvider).value;
+    if (me != null && me.phone == widget.shopPhone) return;
+
+    final now = DateTime.now();
+    final dayKey = '${now.year}-${now.month.toString().padLeft(2, '0')}-'
+        '${now.day.toString().padLeft(2, '0')}';
+    FirebaseFirestore.instance
+        .collection('retailers')
+        .doc(widget.shopPhone)
+        .update({
+      'storeViews': FieldValue.increment(1),
+      'storeViewsByDay.$dayKey': FieldValue.increment(1),
+    }).catchError((_) {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final shopPhone = widget.shopPhone;
     final shopAsync = ref.watch(shopUserProvider(shopPhone));
+    // Richer profile data (tagline/website/logo/banner) the web dashboard
+    // profile editor writes to `profiles/{phone}` — additive on top of
+    // shopUserProvider's users/{phone} fields, never a replacement, so a
+    // seller who never touched the web dashboard still sees exactly what
+    // they saw before.
+    final storeProfileAsync = ref.watch(retailerProfileProvider(shopPhone));
     final reelsAsync = ref.watch(sellerReelsProvider(shopPhone));
     final followersAsync = ref.watch(followerCountProvider(shopPhone));
     final productsAsync = ref.watch(shopListingsProvider(shopPhone));
     final currentUser = ref.watch(currentUserProvider).value;
     final isOwnShop = currentUser?.phone == shopPhone;
+    // Editing a listed product isn't done here — Inventory (or the
+    // manufacturer catalog) already owns all of that logic, so both the
+    // Products stat and the "Manage" link below just route there rather
+    // than duplicating add/edit/stock UI on the storefront preview.
+    final isManufacturer = ref.watch(isManufacturerProvider);
+    final inventoryRoute = isManufacturer
+        ? '/dashboard/manufacturer/catalog'
+        : '/dashboard/inventory';
 
     return Scaffold(
       backgroundColor: AppColors.background,
@@ -46,79 +103,168 @@ class ShopProfileScreen extends ConsumerWidget {
                 child: shopAsync.when(
                   loading: () => const SizedBox.shrink(),
                   error: (_, _) => const SizedBox.shrink(),
-                  data: (user) => Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 80, 20, 16),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.end,
+                  data: (user) {
+                    // Additive on top of `user` (users/{phone}) — present
+                    // only for sellers who've set these on the web dashboard
+                    // profile editor (profiles/{phone}). Null-safe throughout
+                    // so a seller with no web profile sees exactly what they
+                    // saw before this change.
+                    final storeProfile = storeProfileAsync.value;
+                    final banner = storeProfile?.banner;
+                    final logo = storeProfile?.logo;
+                    final tagline = storeProfile?.tagline?.trim();
+                    final website = storeProfile?.website?.trim();
+
+                    return Stack(
+                      fit: StackFit.expand,
                       children: [
-                        CircleAvatar(
-                          radius: 36,
-                          backgroundColor: Colors.white24,
-                          child: Text(
-                            (user?.businessName ?? user?.name ?? '?')
-                                .substring(0, 1)
-                                .toUpperCase(),
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 28,
-                              fontWeight: FontWeight.bold,
+                        if (banner != null && banner.isNotEmpty)
+                          CachedNetworkImage(
+                            imageUrl: banner,
+                            fit: BoxFit.cover,
+                            errorWidget: (_, _, _) => const SizedBox.shrink(),
+                          ),
+                        // Scrim so the header text stays legible over any banner.
+                        Container(
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              colors: [
+                                Colors.black.withValues(alpha: banner != null ? 0.45 : 0.0),
+                                Colors.black.withValues(alpha: banner != null ? 0.15 : 0.0),
+                              ],
+                              begin: Alignment.bottomCenter,
+                              end: Alignment.topCenter,
                             ),
                           ),
                         ),
-                        const SizedBox(width: 14),
-                        Expanded(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            crossAxisAlignment: CrossAxisAlignment.start,
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(20, 80, 20, 16),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.end,
                             children: [
-                              Text(
-                                user?.businessName ?? user?.name ?? shopPhone,
-                                style: AppTextStyles.heading2.copyWith(
-                                  color: Colors.white,
-                                ),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
+                              CircleAvatar(
+                                radius: 36,
+                                backgroundColor: Colors.white24,
+                                backgroundImage: (logo != null && logo.isNotEmpty)
+                                    ? CachedNetworkImageProvider(logo)
+                                    : null,
+                                child: (logo == null || logo.isEmpty)
+                                    ? Text(
+                                        (user?.businessName ?? user?.name ?? '?')
+                                            .substring(0, 1)
+                                            .toUpperCase(),
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 28,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      )
+                                    : null,
                               ),
-                              if ((user?.username ?? '').isNotEmpty)
-                                Text(
-                                  '@${user!.username}',
-                                  style: const TextStyle(
-                                    color: Colors.white70,
-                                    fontSize: 13,
-                                  ),
-                                ),
-                              if ((user?.city ?? '').isNotEmpty)
-                                Row(
+                              const SizedBox(width: 14),
+                              Expanded(
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    const Icon(
-                                      Icons.location_on,
-                                      size: 12,
-                                      color: Colors.white70,
+                                    Text(
+                                      user?.businessName ?? user?.name ?? shopPhone,
+                                      style: AppTextStyles.heading2.copyWith(
+                                        color: Colors.white,
+                                      ),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
                                     ),
-                                    const SizedBox(width: 3),
-                                    Flexible(
-                                      child: Text(
-                                        [user?.city, user?.state]
-                                            .where(
-                                              (s) => s != null && s.isNotEmpty,
-                                            )
-                                            .join(', '),
+                                    if ((user?.username ?? '').isNotEmpty)
+                                      Text(
+                                        '@${user!.username}',
                                         style: const TextStyle(
                                           color: Colors.white70,
-                                          fontSize: 12,
+                                          fontSize: 13,
                                         ),
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
                                       ),
-                                    ),
+                                    if (tagline != null && tagline.isNotEmpty)
+                                      Padding(
+                                        padding: const EdgeInsets.only(top: 2),
+                                        child: Text(
+                                          tagline,
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 12,
+                                            fontStyle: FontStyle.italic,
+                                          ),
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                    if ((user?.city ?? '').isNotEmpty)
+                                      Padding(
+                                        padding: const EdgeInsets.only(top: 2),
+                                        child: Row(
+                                          children: [
+                                            const Icon(
+                                              Icons.location_on,
+                                              size: 12,
+                                              color: Colors.white70,
+                                            ),
+                                            const SizedBox(width: 3),
+                                            Flexible(
+                                              child: Text(
+                                                [user?.city, user?.state]
+                                                    .where(
+                                                      (s) => s != null && s.isNotEmpty,
+                                                    )
+                                                    .join(', '),
+                                                style: const TextStyle(
+                                                  color: Colors.white70,
+                                                  fontSize: 12,
+                                                ),
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    if (website != null && website.isNotEmpty)
+                                      Padding(
+                                        padding: const EdgeInsets.only(top: 2),
+                                        child: GestureDetector(
+                                          behavior: HitTestBehavior.opaque,
+                                          onTap: () => _openWebsite(website),
+                                          child: Row(
+                                            children: [
+                                              const Icon(
+                                                Icons.link,
+                                                size: 12,
+                                                color: Colors.white70,
+                                              ),
+                                              const SizedBox(width: 3),
+                                              Flexible(
+                                                child: Text(
+                                                  website,
+                                                  style: const TextStyle(
+                                                    color: Colors.white70,
+                                                    fontSize: 12,
+                                                    decoration: TextDecoration.underline,
+                                                  ),
+                                                  maxLines: 1,
+                                                  overflow: TextOverflow.ellipsis,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
                                   ],
                                 ),
+                              ),
                             ],
                           ),
                         ),
                       ],
-                    ),
-                  ),
+                    );
+                  },
                 ),
               ),
             ),
@@ -160,6 +306,12 @@ class ShopProfileScreen extends ConsumerWidget {
                           loading: () => '—',
                           error: (_, _) => '—',
                         ),
+                        // Same screen a `reel_follow` notification opens.
+                        onTap: () => context.push(
+                          isOwnShop
+                              ? '/followers'
+                              : '/followers?phone=${Uri.encodeComponent(shopPhone)}',
+                        ),
                       ),
                       Container(width: 1, height: 32, color: AppColors.divider),
                       _StatColumn(
@@ -170,6 +322,9 @@ class ShopProfileScreen extends ConsumerWidget {
                           loading: () => '—',
                           error: (_, _) => '—',
                         ),
+                        onTap: isOwnShop
+                            ? () => context.push(inventoryRoute)
+                            : null,
                       ),
                     ],
                   ),
@@ -284,7 +439,23 @@ class ShopProfileScreen extends ConsumerWidget {
           SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(16, 4, 16, 6),
-              child: Text('Products', style: AppTextStyles.heading3),
+              child: Row(
+                children: [
+                  Text('Products', style: AppTextStyles.heading3),
+                  const Spacer(),
+                  if (isOwnShop)
+                    TextButton.icon(
+                      onPressed: () => context.push(inventoryRoute),
+                      icon: const Icon(Icons.edit_outlined, size: 16),
+                      label: const Text('Manage'),
+                      style: TextButton.styleFrom(
+                        padding: EdgeInsets.zero,
+                        minimumSize: const Size(0, 24),
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                    ),
+                ],
+              ),
             ),
           ),
           SliverToBoxAdapter(
@@ -302,11 +473,25 @@ class ShopProfileScreen extends ConsumerWidget {
                   return Padding(
                     padding: const EdgeInsets.all(24),
                     child: Center(
-                      child: Text(
-                        'No products listed.',
-                        style: AppTextStyles.body.copyWith(
-                          color: Colors.black45,
-                        ),
+                      child: Column(
+                        children: [
+                          Text(
+                            isOwnShop
+                                ? "You haven't listed any products yet."
+                                : 'No products listed.',
+                            style: AppTextStyles.body.copyWith(
+                              color: Colors.black45,
+                            ),
+                          ),
+                          if (isOwnShop) ...[
+                            const SizedBox(height: 12),
+                            FilledButton.icon(
+                              onPressed: () => context.push(inventoryRoute),
+                              icon: const Icon(Icons.add_box_outlined),
+                              label: const Text('Add Your First Product'),
+                            ),
+                          ],
+                        ],
                       ),
                     ),
                   );
@@ -331,6 +516,15 @@ class ShopProfileScreen extends ConsumerWidget {
   }
 
   String _fmt(int n) => formatCount(n);
+
+  Future<void> _openWebsite(String website) async {
+    final withScheme = website.startsWith('http') ? website : 'https://$website';
+    final url = Uri.tryParse(withScheme);
+    if (url == null) return;
+    if (await canLaunchUrl(url)) {
+      await launchUrl(url, mode: LaunchMode.externalApplication);
+    }
+  }
 }
 
 // ── Stat column ───────────────────────────────────────────────────────────────
@@ -338,11 +532,12 @@ class ShopProfileScreen extends ConsumerWidget {
 class _StatColumn extends StatelessWidget {
   final String label;
   final String valueAsync;
-  const _StatColumn({required this.label, required this.valueAsync});
+  final VoidCallback? onTap;
+  const _StatColumn({required this.label, required this.valueAsync, this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    return Column(
+    final column = Column(
       mainAxisSize: MainAxisSize.min,
       children: [
         Text(
@@ -357,6 +552,15 @@ class _StatColumn extends StatelessWidget {
           ),
         ),
       ],
+    );
+    if (onTap == null) return column;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+        child: column,
+      ),
     );
   }
 }
@@ -1169,6 +1373,10 @@ class _StandaloneReelsFeedState extends ConsumerState<StandaloneReelsFeed>
           PageView.builder(
             controller: _pageController,
             scrollDirection: Axis.vertical,
+            // See reels_feed_screen.dart's matching comment — explicit
+            // physics avoids iOS's default BouncingScrollPhysics contesting
+            // the gesture arena against the nested product-link tap target.
+            physics: const ClampingScrollPhysics(),
             onPageChanged: _onPageChanged,
             itemCount: widget.reels.length,
             itemBuilder: (_, index) {
@@ -1346,16 +1554,6 @@ class _SingleReelViewState extends ConsumerState<_SingleReelView>
       ).showSnackBar(const SnackBar(content: Text('Login to repost reels')));
       return;
     }
-    if (!user.canAccessDashboard) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'An active seller subscription is required to repost reels.',
-          ),
-        ),
-      );
-      return;
-    }
     if (_reposting) return;
     setState(() {
       _reposting = true;
@@ -1400,6 +1598,27 @@ class _SingleReelViewState extends ConsumerState<_SingleReelView>
     }
   }
 
+  Widget _buildPosterOrLoader() {
+    final thumb = widget.reel.thumbnailUrl ?? widget.reel.linkedProductImageUrl;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        if (thumb != null && thumb.isNotEmpty)
+          Image.network(
+            thumb,
+            fit: BoxFit.cover,
+            errorBuilder: (context, error, stackTrace) => const SizedBox.shrink(),
+          ),
+        const Center(
+          child: CircularProgressIndicator(
+            color: Colors.white38,
+            strokeWidth: 2,
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final ctrl = widget.controller;
@@ -1416,12 +1635,7 @@ class _SingleReelViewState extends ConsumerState<_SingleReelView>
                     valueListenable: ctrl,
                     builder: (_, value, _) {
                       if (!value.isInitialized) {
-                        return const Center(
-                          child: CircularProgressIndicator(
-                            color: Colors.white38,
-                            strokeWidth: 2,
-                          ),
-                        );
+                        return _buildPosterOrLoader();
                       }
                       return applyReelFilter(
                         widget.reel.filterId,
@@ -1438,12 +1652,7 @@ class _SingleReelViewState extends ConsumerState<_SingleReelView>
                       );
                     },
                   )
-                : const Center(
-                    child: CircularProgressIndicator(
-                      color: Colors.white38,
-                      strokeWidth: 2,
-                    ),
-                  ),
+                : _buildPosterOrLoader(),
           ),
         ),
         if (widget.reel.overlayText != null)
@@ -1673,6 +1882,9 @@ class _ProductBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
+      // Opaque hit-testing — see the matching comment on _ProductCard in
+      // reels_feed_screen.dart.
+      behavior: HitTestBehavior.opaque,
       onTap: () {
         if (currentUserId == null) {
           // Carry the product as the post-login destination so the buyer
@@ -1768,9 +1980,67 @@ class _CommentSheetSimple extends ConsumerStatefulWidget {
 class _CommentSheetSimpleState extends ConsumerState<_CommentSheetSimple> {
   final _ctrl = TextEditingController();
   bool _busy = false;
+  String? _taggedUserId;
+  String? _taggedUserName;
+
+  // Inline "@mention" suggestions while typing.
+  String? _mentionQuery;
+  List<TaggedUser> _mentionResults = const [];
+  bool _mentionLoading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl.addListener(_onTextChanged);
+  }
+
+  void _onTextChanged() {
+    final text = _ctrl.text;
+    final caret = _ctrl.selection.baseOffset;
+    final uptoCaret = caret >= 0 ? text.substring(0, caret) : text;
+    final match = RegExp(r'@([^\s@]*)$').firstMatch(uptoCaret);
+    if (match == null) {
+      if (_mentionQuery != null) setState(() => _mentionQuery = null);
+      return;
+    }
+    final q = match.group(1) ?? '';
+    setState(() {
+      _mentionQuery = q;
+      _mentionLoading = true;
+    });
+    searchTaggableUsers(q).then((results) {
+      if (!mounted || _mentionQuery != q) return;
+      setState(() {
+        _mentionResults = results;
+        _mentionLoading = false;
+      });
+    });
+  }
+
+  void _pickMention(TaggedUser u) {
+    // Strip the in-progress "@partial" trigger text back out — the tag
+    // itself is rendered separately (the "Tagging: @name" chip below, and
+    // the bold @name prefix on the posted comment), so leaving "@Name " in
+    // the free-text comment too made every tagged comment show the name twice.
+    final text = _ctrl.text;
+    final caret = _ctrl.selection.baseOffset;
+    final uptoCaret = caret >= 0 ? text.substring(0, caret) : text;
+    final stripped = uptoCaret.replaceFirst(RegExp(r'@([^\s@]*)$'), '');
+    final rest = caret >= 0 ? text.substring(caret) : '';
+    _ctrl.value = TextEditingValue(
+      text: stripped + rest,
+      selection: TextSelection.collapsed(offset: stripped.length),
+    );
+    setState(() {
+      _taggedUserId = u.id;
+      _taggedUserName = u.name;
+      _mentionQuery = null;
+    });
+  }
 
   @override
   void dispose() {
+    _ctrl.removeListener(_onTextChanged);
     _ctrl.dispose();
     super.dispose();
   }
@@ -1789,8 +2059,12 @@ class _CommentSheetSimpleState extends ConsumerState<_CommentSheetSimple> {
             widget.currentUserId!,
             widget.currentUserName,
             _ctrl.text.trim(),
+            taggedUserId: _taggedUserId,
+            taggedUserName: _taggedUserName,
           );
       _ctrl.clear();
+      _taggedUserId = null;
+      _taggedUserName = null;
       widget.onAdded();
     } finally {
       if (mounted)
@@ -1867,9 +2141,18 @@ class _CommentSheetSimpleState extends ConsumerState<_CommentSheetSimple> {
                                         fontWeight: FontWeight.w700,
                                       ),
                                     ),
-                                    Text(
-                                      c.text,
-                                      style: AppTextStyles.bodySmall,
+                                    RichText(
+                                      text: TextSpan(
+                                        style: AppTextStyles.bodySmall.copyWith(color: Colors.black87),
+                                        children: [
+                                          if (c.taggedUserName != null)
+                                            TextSpan(
+                                              text: '@${c.taggedUserName} ',
+                                              style: const TextStyle(color: Colors.blue, fontWeight: FontWeight.bold),
+                                            ),
+                                          TextSpan(text: c.text),
+                                        ],
+                                      ),
                                     ),
                                   ],
                                 ),
@@ -1883,15 +2166,45 @@ class _CommentSheetSimpleState extends ConsumerState<_CommentSheetSimple> {
           ),
           Padding(
             padding: EdgeInsets.only(
-              left: 16,
+              left: 12,
               right: 8,
               top: 8,
               bottom: MediaQuery.of(context).viewInsets.bottom + 12,
             ),
-            child: Row(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Expanded(
-                  child: TextField(
+                if (_mentionQuery != null)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: MentionSuggestions(
+                      results: _mentionResults,
+                      loading: _mentionLoading,
+                      query: _mentionQuery!,
+                      onSelect: _pickMention,
+                    ),
+                  ),
+                if (_taggedUserName != null)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 12, bottom: 4),
+                    child: Row(
+                      children: [
+                        Text('Tagging: @$_taggedUserName', style: const TextStyle(color: Colors.blue, fontSize: 12, fontWeight: FontWeight.bold)),
+                        const SizedBox(width: 4),
+                        GestureDetector(
+                          onTap: () => setState(() {
+                            _taggedUserId = null;
+                            _taggedUserName = null;
+                          }),
+                          child: const Icon(Icons.close, size: 14, color: Colors.blue),
+                        )
+                      ],
+                    ),
+                  ),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
                     controller: _ctrl,
                     enabled: widget.currentUserId != null,
                     decoration: InputDecoration(
@@ -1925,9 +2238,11 @@ class _CommentSheetSimpleState extends ConsumerState<_CommentSheetSimple> {
                 ),
               ],
             ),
-          ),
-        ],
+          ],
+        ),
       ),
-    );
-  }
+    ],
+  ),
+);
+}
 }

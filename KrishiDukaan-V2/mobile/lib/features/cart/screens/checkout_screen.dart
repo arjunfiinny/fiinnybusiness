@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
@@ -17,6 +19,7 @@ import '../../../core/widgets/empty_state.dart';
 import '../../../core/widgets/loading_overlay.dart';
 import '../data/payment_service.dart';
 import '../../orders/data/order_repository.dart';
+import '../../../core/services/app_review_service.dart';
 
 class CheckoutScreen extends ConsumerStatefulWidget {
   const CheckoutScreen({super.key});
@@ -36,6 +39,7 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
   late final AppRazorpay _razorpay;
   final _paymentService = PaymentService();
   final _orderRepo = OrderRepository();
+  final _reviewService = AppReviewService();
 
   bool _isLoading = false;
   bool _prefilled = false;
@@ -153,6 +157,8 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
       );
 
       ref.read(cartProvider.notifier).clear();
+      // Fire-and-forget: never block navigation on the review prompt.
+      unawaited(_reviewService.onOrderCompleted());
       if (mounted) context.go('/orders');
     } catch (e) {
       if (mounted) {
@@ -594,12 +600,12 @@ class _SectionCard extends StatelessWidget {
 
 // ── Order item tile: thumbnail + name + qty/variant + line total ────────────
 
-class _ItemTile extends StatelessWidget {
+class _ItemTile extends ConsumerWidget {
   final CartItemModel item;
   const _ItemTile({required this.item});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -650,7 +656,7 @@ class _ItemTile extends StatelessWidget {
                           style: AppTextStyles.caption),
                     ),
                   Text(
-                    'Qty ${item.quantity} × ${CurrencyUtils.format(item.price)}',
+                    '× ${CurrencyUtils.format(item.price)}',
                     style: AppTextStyles.caption
                         .copyWith(color: AppColors.onSurfaceVariant),
                   ),
@@ -663,6 +669,12 @@ class _ItemTile extends StatelessWidget {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
+              const SizedBox(height: 6),
+              // Quantity is adjustable here as well as in the cart. Every
+              // total on this screen (subtotal, savings, GST, delivery) is
+              // derived from cartProvider, so they all recompute on change —
+              // nothing needs recalculating by hand.
+              _CheckoutQtyControl(item: item),
             ],
           ),
         ),
@@ -690,4 +702,64 @@ class _ItemTile extends StatelessWidget {
         color: AppColors.primaryContainer.withValues(alpha: 0.3),
         child: const Icon(Icons.grass, color: AppColors.primary, size: 24),
       );
+}
+
+/// Compact +/- stepper for a checkout line.
+///
+/// Deliberately stops at 1 rather than removing the line the way the cart's
+/// control does: emptying the cart from the checkout screen would bounce the
+/// buyer out to "Your cart is empty" mid-payment. Removing a product stays a
+/// cart action.
+class _CheckoutQtyControl extends ConsumerWidget {
+  final CartItemModel item;
+  const _CheckoutQtyControl({required this.item});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final atMinimum = item.quantity <= 1;
+
+    void setQty(int qty) => ref
+        .read(cartProvider.notifier)
+        .updateQuantity(item.listingId, item.variantLabel, qty);
+
+    return Container(
+      decoration: BoxDecoration(
+        color: AppColors.background,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: AppColors.divider),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            icon: const Icon(Icons.remove, size: 16),
+            color: atMinimum ? AppColors.onSurfaceVariant : AppColors.primary,
+            padding: const EdgeInsets.all(4),
+            constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+            visualDensity: VisualDensity.compact,
+            tooltip: atMinimum ? 'Remove from the cart screen' : 'Reduce quantity',
+            onPressed: atMinimum ? null : () => setQty(item.quantity - 1),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 6),
+            child: Text(
+              '${item.quantity}',
+              style: AppTextStyles.bodyMedium
+                  .copyWith(fontWeight: FontWeight.w700),
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.add, size: 16),
+            color: AppColors.primary,
+            padding: const EdgeInsets.all(4),
+            constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+            visualDensity: VisualDensity.compact,
+            tooltip: 'Increase quantity',
+            onPressed: () => setQty(item.quantity + 1),
+          ),
+        ],
+      ),
+    );
+  }
 }

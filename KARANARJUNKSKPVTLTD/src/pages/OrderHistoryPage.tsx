@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { ShoppingCart, FileText, Loader2, Search, Trash2, Pencil, X, Save } from 'lucide-react';
-import { query, onSnapshot, orderBy, deleteDoc, doc, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { useNavigate } from 'react-router-dom';
+import { query, onSnapshot, orderBy, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { softDelete } from '../utils/softDelete';
 import { db } from '../firebase';
 import { useAuth } from '../contexts/AuthContext';
 import { getTenantCollection, getTenantDoc } from '../utils/tenantPath';
@@ -8,6 +10,7 @@ import { getTenantCollection, getTenantDoc } from '../utils/tenantPath';
 interface SalesOrder {
     id: string;
     orderNumber: string;
+    billNumber?: string;
     retailerName: string;
     phoneNumber?: string;
     subtotal?: number;
@@ -44,7 +47,8 @@ function getAmount(order: SalesOrder): number {
 const PAYMENT_MODES = ['Cash', 'Credit', 'UPI', 'NEFT', 'RTGS', 'Cheque', 'Online'];
 
 export default function OrderHistoryPage() {
-    const { tenantId } = useAuth();
+    const { tenantId, currentUser, userName, userRole } = useAuth();
+    const navigate = useNavigate();
     const [orders, setOrders] = useState<SalesOrder[]>([]);
     const [loading, setLoading] = useState(true);
     const [searchTerm, setSearchTerm] = useState('');
@@ -62,12 +66,19 @@ export default function OrderHistoryPage() {
         if (!tenantId) return;
         const q = query(getTenantCollection(db, tenantId, 'salesOrders'), orderBy('createdAt', 'desc'));
         const unsubscribe = onSnapshot(q, (snapshot) => {
-            const ordersData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as SalesOrder[];
+            const ordersData = snapshot.docs
+                .map(doc => ({ id: doc.id, ...doc.data() }))
+                .filter((o: any) => !o.deleted) as SalesOrder[];
             setOrders(ordersData);
             setLoading(false);
         });
         return () => unsubscribe();
     }, [tenantId]);
+
+    // Reuses the POS reprint flow (POSPage reads ?reprintOrderId and prints the
+    // saved bill), the same route the Khata screen's Print button takes.
+    const reprintBill = (order: SalesOrder) =>
+        navigate(`/pos?reprintOrderId=${encodeURIComponent(order.id)}`);
 
     const openEdit = (order: SalesOrder) => {
         setEditOrder(order);
@@ -106,7 +117,18 @@ export default function OrderHistoryPage() {
         if (!tenantId) return;
         setDeleting(true);
         try {
-            await deleteDoc(doc(getTenantCollection(db, tenantId, 'salesOrders'), id));
+            const order = orders.find(o => o.id === id);
+            const module = order?.invoiceType === 'B2B_GST' ? 'B2B Invoice' : 'POS Billing';
+            await softDelete({
+                db, tenantId,
+                collectionName: 'salesOrders',
+                docId: id,
+                userId: currentUser?.uid || '',
+                userName: userName || currentUser?.email || 'Unknown',
+                userRole: userRole || 'unknown',
+                module,
+                entityName: order?.orderNumber || order?.billNumber || id,
+            });
             setDeleteConfirmId(null);
         } catch {
             alert('Failed to delete order.');
@@ -177,7 +199,7 @@ export default function OrderHistoryPage() {
                             <th style={{ padding: '1rem', fontWeight: 600, textAlign: 'right' }}>Total Amount</th>
                             <th style={{ padding: '1rem', fontWeight: 600 }}>Payment</th>
                             <th style={{ padding: '1rem', fontWeight: 600 }}>Status</th>
-                            <th style={{ padding: '1rem', fontWeight: 600, textAlign: 'center' }}>Actions</th>
+                            <th className="sticky-actions-col" style={{ padding: '1rem', fontWeight: 600, textAlign: 'center' }}>Actions</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -216,7 +238,7 @@ export default function OrderHistoryPage() {
                                                 {isPaid ? 'Paid' : 'Pending'}
                                             </span>
                                         </td>
-                                        <td style={{ padding: '1rem' }}>
+                                        <td className="sticky-actions-col" style={{ padding: '1rem' }}>
                                             <div style={{ display: 'flex', gap: '0.4rem', justifyContent: 'center' }}>
                                                 <button
                                                     onClick={() => openEdit(order)}
@@ -233,6 +255,7 @@ export default function OrderHistoryPage() {
                                                     <Trash2 size={13} /> Delete
                                                 </button>
                                                 <button
+                                                    onClick={() => reprintBill(order)}
                                                     title="Reprint"
                                                     style={{ display: 'flex', alignItems: 'center', gap: '0.25rem', padding: '0.3rem 0.7rem', background: 'rgba(16,185,129,0.1)', color: '#10b981', border: '1px solid rgba(16,185,129,0.25)', borderRadius: '8px', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 600, fontFamily: 'inherit' }}
                                                 >

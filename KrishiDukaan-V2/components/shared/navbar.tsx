@@ -243,7 +243,12 @@ export function Navbar({
     { id: 'map', label: t('stores') }
   ];
   const canAccessDashboard = (userRole === 'retailer' || userRole === 'manufacturer') && !!user && !isDashboard;
-  const isAdmin = userRole === 'admin';
+  // "team" accounts (limited-access admin-portal staff, created from the
+  // admin Team tab) log into /admin same as full admins — without this they
+  // matched none of the branches below (not retailer/manufacturer, not
+  // customer, not admin) and saw only a bare Logout button with no way back
+  // into the portal they'd just logged into.
+  const isAdmin = userRole === 'admin' || userRole === 'team';
   const cycleLanguage = () => {
     const langs = ['en', 'mr', 'hi'] as const;
     const idx = langs.indexOf(language as any);
@@ -291,7 +296,13 @@ export function Navbar({
           {searchResults.stores.map(s => (
             <button
               key={s.id}
-              onMouseDown={() => handleResultClick(() => onStoreClick?.(s.id))}
+              onMouseDown={() => handleResultClick(() => {
+                // A shop result should open that shop's page, not drop the user on
+                // the map. Only manufacturers have a brand page (/brand/{slug});
+                // retailers have none, so they still fall back to the locator.
+                if (s.slug) { router.push(`/brand/${s.slug}`); return; }
+                onStoreClick?.(s.id);
+              })}
               className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-surface-container-low transition-colors text-left"
             >
               <div className="w-10 h-10 rounded-xl bg-primary/10 shrink-0 flex items-center justify-center">

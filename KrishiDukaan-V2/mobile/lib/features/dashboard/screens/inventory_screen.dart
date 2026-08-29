@@ -7,6 +7,7 @@ import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 import '../../../core/constants/app_colors.dart';
+import '../../../core/utils/product_validation.dart';
 import '../../../core/constants/app_text_styles.dart';
 import '../../../core/models/catalog_model.dart';
 import '../../../core/models/listing_model.dart';
@@ -19,8 +20,28 @@ import '../data/dashboard_repository.dart';
 import '../providers/dashboard_provider.dart';
 // SeatStats is defined in dashboard_repository.dart
 
+/// Mirrors DEFAULT_LOW_STOCK_THRESHOLD in
+/// functions/src/notifications/inventory.ts — shown as the hint on the
+/// per-product override so the seller knows what they get by leaving it blank.
+const _kDefaultLowStockThreshold = 10;
+
 class InventoryScreen extends ConsumerWidget {
-  const InventoryScreen({super.key});
+  // Set when arriving via the Profile screen's "Add Product" shortcut
+  // (?autoAdd=1) so the add-product sheet opens immediately instead of
+  // requiring a second tap on the in-page + button.
+  final bool autoOpenAdd;
+
+  /// Product id from an `inventory_added` or `low_stock` notification. Once
+  /// the inventory list has loaded, that product's edit sheet opens on its
+  /// own — a restock prompt that still needed the seller to find the product
+  /// in a long list would not be much of a shortcut.
+  final String? focusProductId;
+
+  const InventoryScreen({
+    super.key,
+    this.autoOpenAdd = false,
+    this.focusProductId,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -34,7 +55,12 @@ class InventoryScreen extends ConsumerWidget {
         if (user == null) {
           return const Scaffold(body: ErrorView(message: 'Not logged in.'));
         }
-        return _InventoryBody(sellerPhone: user.phone, sellerName: user.name);
+        return _InventoryBody(
+          sellerPhone: user.phone,
+          sellerName: user.name,
+          autoOpenAdd: autoOpenAdd,
+          focusProductId: focusProductId,
+        );
       },
     );
   }
@@ -43,7 +69,14 @@ class InventoryScreen extends ConsumerWidget {
 class _InventoryBody extends ConsumerStatefulWidget {
   final String sellerPhone;
   final String sellerName;
-  const _InventoryBody({required this.sellerPhone, required this.sellerName});
+  final bool autoOpenAdd;
+  final String? focusProductId;
+  const _InventoryBody({
+    required this.sellerPhone,
+    required this.sellerName,
+    this.autoOpenAdd = false,
+    this.focusProductId,
+  });
 
   @override
   ConsumerState<_InventoryBody> createState() => _InventoryBodyState();
@@ -52,6 +85,53 @@ class _InventoryBody extends ConsumerStatefulWidget {
 class _InventoryBodyState extends ConsumerState<_InventoryBody> {
   final _searchController = TextEditingController();
   String _searchQuery = '';
+
+  /// Guards the one-shot deep-link open — the listings stream emits on every
+  /// Firestore change, and re-opening the sheet on each emission (including
+  /// the one caused by saving the edit) would trap the user in it.
+  bool _focusHandled = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.autoOpenAdd) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _showAddListingSheet(context, ref);
+      });
+    }
+  }
+
+  /// Opens the edit sheet for [widget.focusProductId] the first time that
+  /// product appears in the loaded listings.
+  void _maybeOpenFocused(List<ListingModel> listings) {
+    final id = widget.focusProductId;
+    if (id == null || id.isEmpty || _focusHandled) return;
+
+    ListingModel? match;
+    for (final l in listings) {
+      // The notification carries the products/{id} doc id, which is the
+      // listing id for a seller's own inventory copy.
+      if (l.id == id) {
+        match = l;
+        break;
+      }
+    }
+    if (match == null) return;
+
+    _focusHandled = true;
+    final listing = match;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      showModalBottomSheet(
+        context: context,
+        isScrollControlled: true,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        builder: (_) => _EditListingSheet(listing: listing),
+      );
+    });
+  }
 
   @override
   void dispose() {
@@ -83,6 +163,8 @@ class _InventoryBodyState extends ConsumerState<_InventoryBody> {
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (_, _) => const ErrorView(message: 'Could not load inventory.'),
         data: (listings) {
+          _maybeOpenFocused(listings);
+
           final filteredListings = listings.where((l) {
             final name = (l.productName ?? '').toLowerCase();
             return name.contains(_searchQuery.toLowerCase());
@@ -284,7 +366,7 @@ class _ListingTile extends StatelessWidget {
         : 'Not updated';
 
     final isAssigned = listing.assignedByManufacturerPhone != null;
-    final sourceLabel = isAssigned ? 'Assigned' : 'Own Catalogue';
+    final sourceLabel = isAssigned ? 'Assigned' : 'Own Inventory';
 
     return Card(
       elevation: 0,
@@ -443,7 +525,7 @@ class _ListingTile extends StatelessWidget {
                       ),
                     ),
                     child: Text(
-                      '${v.label} · ₹${v.price.toStringAsFixed(0)} (${v.stock})',
+                      '${v.label} · ₹${v.price.toStringAsFixed(0)} (${v.stock ?? 0})',
                       style: AppTextStyles.caption.copyWith(
                         fontWeight: FontWeight.w500,
                       ),
@@ -822,7 +904,7 @@ class _AddListingSheetState extends ConsumerState<_AddListingSheet> {
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     Text(
-                      'Add Product to Catalogue',
+                      'Add Product',
                       style: AppTextStyles.heading2,
                     ),
                     IconButton(
@@ -950,10 +1032,30 @@ class _AddListingSheetState extends ConsumerState<_AddListingSheet> {
                 TextField(
                   controller: _descCtrl,
                   maxLines: 2,
+                  // Rebuild on every keystroke so the counter below tracks live,
+                  // the same feedback the web form gives.
+                  onChanged: (_) => setState(() {}),
                   decoration: InputDecoration(
                     hintText: 'Crop suitability, yield, dosage, soil type...',
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(12),
+                    ),
+                    errorText: validateDescription(_descCtrl.text),
+                    counterText: '',
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: Text(
+                    '${_descCtrl.text.length}/$kDescriptionMaxLength',
+                    style: AppTextStyles.caption.copyWith(
+                      color: isDescriptionInvalid(_descCtrl.text)
+                          ? AppColors.error
+                          : AppColors.onSurfaceVariant,
+                      fontWeight: isDescriptionInvalid(_descCtrl.text)
+                          ? FontWeight.w700
+                          : FontWeight.w400,
                     ),
                   ),
                 ),
@@ -982,7 +1084,7 @@ class _AddListingSheetState extends ConsumerState<_AddListingSheet> {
                           style: const TextStyle(fontWeight: FontWeight.bold),
                         ),
                         subtitle: Text(
-                          'Price: ₹${v.price.toStringAsFixed(0)} · Stock: ${v.stock}',
+                          'Price: ₹${v.price.toStringAsFixed(0)} · Stock: ${v.stock ?? 0}',
                         ),
                         trailing: IconButton(
                           icon: const Icon(
@@ -1292,7 +1394,7 @@ class _AddListingSheetState extends ConsumerState<_AddListingSheet> {
                           ),
                         )
                       : const Text(
-                          'Add to Catalogue / Inventory',
+                          'Add to Inventory',
                           style: TextStyle(
                             fontSize: 16,
                             fontWeight: FontWeight.bold,
@@ -1312,6 +1414,16 @@ class _AddListingSheetState extends ConsumerState<_AddListingSheet> {
     if (name.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Please enter product name.')),
+      );
+      return;
+    }
+
+    // Same rule the web enforces. Without it an over-long description was
+    // accepted here and only failed later, with nothing telling the seller why.
+    final descError = validateDescription(_descCtrl.text);
+    if (descError != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(descError)),
       );
       return;
     }
@@ -1358,7 +1470,7 @@ class _AddListingSheetState extends ConsumerState<_AddListingSheet> {
     int totalStock = 0;
     if (_variants.isNotEmpty) {
       basePrice = _variants.first.price;
-      totalStock = _variants.fold(0, (acc, v) => acc + v.stock);
+      totalStock = _variants.fold(0, (acc, v) => acc + (v.stock ?? 0));
     } else {
       if (priceInput == null || stockInput == null) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1450,6 +1562,7 @@ class _EditListingSheet extends StatefulWidget {
 class _EditListingSheetState extends State<_EditListingSheet> {
   late final TextEditingController _priceCtrl;
   late final TextEditingController _stockCtrl;
+  late final TextEditingController _lowStockCtrl;
   final List<File?> _imageFiles = List.filled(5, null);
 
   bool _gstApplicable = false;
@@ -1478,13 +1591,18 @@ class _EditListingSheetState extends State<_EditListingSheet> {
       text: widget.listing.price.toStringAsFixed(0),
     );
     _stockCtrl = TextEditingController(text: '${widget.listing.stockQuantity}');
+    // Blank means "unset" — the server's default of 10 applies until the
+    // seller picks a number of their own.
+    _lowStockCtrl = TextEditingController(
+      text: widget.listing.lowStockThreshold?.toString() ?? '',
+    );
     _isActive = widget.listing.isActive;
     _gstApplicable = widget.listing.gstApplicable ?? false;
     _gstRate = widget.listing.gstRate ?? 18.0;
     _sellMode = widget.listing.sellMode ?? 'online_delivery';
     _variants = widget.listing.variants
         .map(
-          (v) => _VariantEntry(label: v.label, price: v.price, stock: v.stock),
+          (v) => _VariantEntry(label: v.label, price: v.price, stock: v.stock ?? 0),
         )
         .toList();
     // Initialize image URL controllers from existing images
@@ -1502,6 +1620,7 @@ class _EditListingSheetState extends State<_EditListingSheet> {
   void dispose() {
     _priceCtrl.dispose();
     _stockCtrl.dispose();
+    _lowStockCtrl.dispose();
     for (final c in _imageUrlCtrls) {
       c.dispose();
     }
@@ -1685,6 +1804,25 @@ class _EditListingSheetState extends State<_EditListingSheet> {
               keyboardType: TextInputType.number,
               decoration: InputDecoration(
                 labelText: 'Stock Quantity',
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Drives the low_stock notification (notifyLowStock, Cloud
+            // Functions). Left blank, the server default of 10 applies.
+            TextField(
+              controller: _lowStockCtrl,
+              keyboardType: TextInputType.number,
+              decoration: InputDecoration(
+                labelText: 'Low stock alert at',
+                hintText: '$_kDefaultLowStockThreshold',
+                helperText:
+                    'Get notified when stock drops to this level or below.',
+                helperMaxLines: 2,
+                prefixIcon: const Icon(Icons.notifications_active_outlined),
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
                 ),
@@ -1965,12 +2103,20 @@ class _EditListingSheetState extends State<_EditListingSheet> {
           .where((v) => v.label.isNotEmpty)
           .toList();
 
+      // A blank or non-positive entry means "use the default", stored as null.
+      final parsedThreshold = int.tryParse(_lowStockCtrl.text.trim());
+      final lowStockThreshold =
+          (parsedThreshold != null && parsedThreshold > 0) ? parsedThreshold : null;
+
       final effectiveDiscountPct = _discountActive ? _discountPct : 0.0;
       final updates = <String, dynamic>{
         'price': price,
         'stock': stock > 0 ? 'In Stock' : 'Out of Stock',
         'stockQuantity': stock,
         'isActive': _isActive,
+        // Null clears any per-product override, putting the product back on
+        // the server default rather than pinning it at some stale number.
+        'lowStockThreshold': lowStockThreshold,
         if (imageUrls.isNotEmpty) 'images': imageUrls,
         if (imageUrls.isNotEmpty) 'imageUrl': imageUrls.first,
         'variants': variants.map((v) => v.toMap()).toList(),

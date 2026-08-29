@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../../core/constants/app_config.dart';
 import '../../../core/models/catalog_model.dart';
+import '../../../core/models/listing_model.dart' show VariantModel;
 
 const _col = 'products';
 
@@ -71,6 +72,35 @@ class CatalogRepository {
         if (p.startsWith('+91') && p.length > 3) return p.substring(3);
         if (p.startsWith('91') && p.length == 12) return p.substring(2);
         return p;
+      }
+
+      /// Union of package sizes across the canonical product and a seller's copy.
+      ///
+      /// The PACKAGE SIZE chips read the merged card's own `variants`, which
+      /// used to come from the canonical doc alone. A retailer who adds a size
+      /// to their copy (5L on a catalogue product that only lists 1L) could
+      /// never surface it — the chip was missing, so the size was unselectable
+      /// and its stock invisible, no matter what their inventory said.
+      ///
+      /// Sizes are APPENDED, never reordered: existing entries keep their index
+      /// because `_selectedVariantIdx` on the product page indexes into this
+      /// list. Only label+price are carried; per-store stock and pricing live
+      /// on that store's availability entry, resolved separately at order time.
+      ///
+      /// Mirrors web's unionVariants in app/firebase.ts.
+      List<VariantModel>? unionVariants(
+        List<VariantModel>? base,
+        List<VariantModel>? extra,
+      ) {
+        if (extra == null || extra.isEmpty) return base;
+        final out = <VariantModel>[...?base];
+        final seen = out.map((v) => v.label.trim().toLowerCase()).toSet();
+        for (final v in extra) {
+          final label = v.label.trim();
+          if (label.isEmpty || !seen.add(label.toLowerCase())) continue;
+          out.add(VariantModel(label: label, price: v.price, stock: v.stock));
+        }
+        return out.isNotEmpty ? out : base;
       }
 
       final sellerDiscountsByKey = <String, Map<String, double>>{};
@@ -149,6 +179,7 @@ class CatalogRepository {
 
         byName[key] = canonical.copyWith(
           availability: av.isNotEmpty ? av : null,
+          variants: unionVariants(canonical.variants, secondary.variants),
           maxDiscountPct: mergedMaxDiscount,
         );
       }
@@ -213,6 +244,7 @@ class CatalogRepository {
         final newMax = (canonical.maxDiscountPct > copyDiscountPct) ? canonical.maxDiscountPct : copyDiscountPct;
         byName[key] = canonical.copyWith(
           availability: av,
+          variants: unionVariants(canonical.variants, copy.variants),
           maxDiscountPct: newMax,
         );
       }
@@ -405,6 +437,40 @@ class CatalogRepository {
   Future<List<CatalogModel>> fetchFeatured({int limit = 6}) async {
     final list = await fetchAllMergedProducts();
     return list.take(limit).toList();
+  }
+
+  /// "More products from this seller" rail on the product page's Retailer
+  /// Profile section. Queries the global `products` collection directly by
+  /// `retailerPhone` rather than a per-retailer subcollection mirror — that
+  /// mirror (`retailers/{phone}/products`) is only written by the web
+  /// dashboard, so a retailer who only ever used the mobile app to manage
+  /// their inventory would show an empty rail if this read it instead.
+  ///
+  /// Equality-only filter, sorted in memory rather than via `orderBy` — an
+  /// `orderBy` on a field other than the equality filter needs a composite
+  /// index (this repo has been bitten by undeployed indexes before, see
+  /// ReelsRepository.fetchSellerReels), so a plain `retailerPhone==` query is
+  /// deliberately kept index-free.
+  Future<List<CatalogModel>> fetchMoreFromRetailer(
+    String retailerPhone, {
+    required String excludeId,
+    int limit = 8,
+  }) async {
+    if (retailerPhone.isEmpty) return [];
+    try {
+      final snap = await _db
+          .collection(_col)
+          .where('retailerPhone', isEqualTo: retailerPhone)
+          .get();
+      final products = snap.docs
+          .map(CatalogModel.fromFirestore)
+          .where((p) => p.id != excludeId && p.isActive && p.name.isNotEmpty)
+          .toList()
+        ..sort((a, b) => (b.createdAt ?? DateTime(0)).compareTo(a.createdAt ?? DateTime(0)));
+      return products.take(limit).toList();
+    } catch (_) {
+      return [];
+    }
   }
 }
 

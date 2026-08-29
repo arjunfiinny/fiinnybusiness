@@ -1,13 +1,19 @@
+import 'dart:io';
+
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:image_picker/image_picker.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/app_text_styles.dart';
 import '../../../core/providers/user_provider.dart';
 import '../../../core/widgets/loading_overlay.dart';
 import '../../auth/data/auth_repository.dart';
+import '../../dashboard/data/dashboard_repository.dart';
+import '../../marketplace/providers/marketplace_provider.dart';
 
 /// Editable profile / "complete your profile" screen.
 ///
@@ -20,7 +26,15 @@ class ProfileEditScreen extends ConsumerStatefulWidget {
   /// user opened it manually to edit.
   final String? reason;
 
-  const ProfileEditScreen({super.key, this.reason});
+  /// Set by a `profile_incomplete` notification. Any non-null value turns on
+  /// missing-field highlighting; the value itself is the backend's
+  /// pipe-separated list of what was missing when the reminder was sent. The
+  /// list is only used for the banner wording — which fields actually get
+  /// outlined is recomputed from the live form, so a reminder that arrived
+  /// before the user filled something in cannot flag a field they just fixed.
+  final String? highlight;
+
+  const ProfileEditScreen({super.key, this.reason, this.highlight});
 
   @override
   ConsumerState<ProfileEditScreen> createState() => _ProfileEditScreenState();
@@ -43,6 +57,11 @@ class _ProfileEditScreenState extends ConsumerState<ProfileEditScreen> {
   bool _saving = false;
   bool _prefilled = false;
   String? _error;
+
+  // Shop/profile logo — picked file shown immediately, uploaded on Save.
+  File? _logoFile;
+  String? _existingLogoUrl;
+  bool _uploadingLogo = false;
 
   @override
   void dispose() {
@@ -78,11 +97,55 @@ class _ProfileEditScreenState extends ConsumerState<ProfileEditScreen> {
       if (mapsUrl != null && mapsUrl.isNotEmpty && _mapsUrlCtrl.text.isEmpty) {
         _mapsUrlCtrl.text = mapsUrl;
       }
+      final logo = d['logo'] as String?;
+      if (logo != null && logo.isNotEmpty && _existingLogoUrl == null) {
+        setState(() => _existingLogoUrl = logo);
+      }
     } catch (_) {}
   }
 
   String? _required(String? v) =>
       (v == null || v.trim().isEmpty) ? 'Required' : null;
+
+  Future<void> _pickLogo() async {
+    final picker = ImagePicker();
+    final source = await showDialog<ImageSource>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Select image source'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, ImageSource.camera),
+            child: const Text('Camera'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, ImageSource.gallery),
+            child: const Text('Gallery'),
+          ),
+        ],
+      ),
+    );
+    if (source == null) return;
+    final xFile = await picker.pickImage(
+      source: source,
+      maxWidth: 1024,
+      imageQuality: 85,
+    );
+    if (xFile == null || !mounted) return;
+    final file = File(xFile.path);
+    // Matches storage.rules' 5 MB cap on profile-images/** — fail fast with a
+    // clear message instead of letting the upload get rejected server-side.
+    final bytes = await file.length();
+    if (bytes > 5 * 1024 * 1024) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Image must be less than 5MB')),
+        );
+      }
+      return;
+    }
+    setState(() => _logoFile = file);
+  }
 
   Future<void> _save(String role, String phone) async {
     if (!_formKey.currentState!.validate()) return;
@@ -93,6 +156,17 @@ class _ProfileEditScreenState extends ConsumerState<ProfileEditScreen> {
     });
 
     try {
+      String? logoUrl = _existingLogoUrl;
+      if (_logoFile != null) {
+        setState(() => _uploadingLogo = true);
+        try {
+          logoUrl =
+              await DashboardRepository().uploadProfileLogo(_logoFile!, phone);
+        } finally {
+          if (mounted) setState(() => _uploadingLogo = false);
+        }
+      }
+
       await _repo.saveProfile(
         phone: phone,
         role: role,
@@ -105,9 +179,13 @@ class _ProfileEditScreenState extends ConsumerState<ProfileEditScreen> {
         pincode: _pincodeCtrl.text.trim(),
         gstin: _gstinCtrl.text.trim().toUpperCase(),
         googleMapsUrl: _mapsUrlCtrl.text.trim(),
+        logoUrl: logoUrl,
       );
 
       ref.invalidate(currentUserProvider);
+      // The avatar on Profile reads retailerProfileProvider, which is keyed
+      // by phone and won't otherwise know the logo doc just changed.
+      ref.invalidate(retailerProfileProvider(phone));
       if (!mounted) return;
 
       ScaffoldMessenger.of(context).showSnackBar(
@@ -161,8 +239,10 @@ class _ProfileEditScreenState extends ConsumerState<ProfileEditScreen> {
           _pincodeCtrl.text = user.pincode ?? '';
           _gstinCtrl.text = user.gstin ?? '';
           _mapsUrlCtrl.text = user.googleMapsUrl ?? '';
-          if (user.isSeller &&
-              (_gstinCtrl.text.isEmpty || _mapsUrlCtrl.text.isEmpty)) {
+          // Always fetch for sellers — not just when gstin/mapsUrl are
+          // empty — since this is also the only place the existing logo
+          // (never mirrored to users/{phone}) can be prefilled from.
+          if (user.isSeller) {
             _prefillFromRoleDoc(user.role, user.phone);
           }
           _prefilled = true;
@@ -190,6 +270,7 @@ class _ProfileEditScreenState extends ConsumerState<ProfileEditScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    if (_highlighting) _MissingBanner(missing: _missingNow(isSeller)),
                     if (isNew)
                       Padding(
                         padding: const EdgeInsets.only(bottom: 16),
@@ -202,10 +283,24 @@ class _ProfileEditScreenState extends ConsumerState<ProfileEditScreen> {
                         ),
                       ),
 
+                    // Shop/profile logo — sellers only, same field
+                    // (retailers/manufacturers/{phone}.logo, mirrored to
+                    // profiles/{phone}.logo) the web dashboard's logo
+                    // uploader sets.
+                    if (isSeller) ...[
+                      Center(child: _LogoPicker(
+                        file: _logoFile,
+                        existingUrl: _existingLogoUrl,
+                        uploading: _uploadingLogo,
+                        onTap: _pickLogo,
+                      )),
+                      const SizedBox(height: 24),
+                    ],
+
                     Text('Your Details', style: AppTextStyles.heading3),
                     const SizedBox(height: 12),
                     _field(_nameCtrl, 'Full Name', Icons.person_outline,
-                        validator: _required),
+                        validator: _required, highlightIfEmpty: true),
                     const SizedBox(height: 12),
                     _field(_emailCtrl, 'Email (optional)', Icons.email_outlined,
                         keyboardType: TextInputType.emailAddress),
@@ -216,10 +311,12 @@ class _ProfileEditScreenState extends ConsumerState<ProfileEditScreen> {
                       const SizedBox(height: 12),
                       _field(_businessCtrl, 'Shop / Business Name',
                           Icons.storefront_outlined,
-                          validator: _required),
+                          validator: _required, highlightIfEmpty: true),
                       const SizedBox(height: 12),
                       _field(_addressCtrl, 'Address', Icons.home_outlined,
-                          maxLines: 2, validator: _required),
+                          maxLines: 2,
+                          validator: _required,
+                          highlightIfEmpty: true),
                       const SizedBox(height: 12),
                       Row(
                         children: [
@@ -238,6 +335,7 @@ class _ProfileEditScreenState extends ConsumerState<ProfileEditScreen> {
                       const SizedBox(height: 12),
                       _field(_pincodeCtrl, 'Pincode', Icons.pin_outlined,
                           keyboardType: TextInputType.number,
+                          highlightIfEmpty: true,
                           inputFormatters: [
                             FilteringTextInputFormatter.digitsOnly,
                             LengthLimitingTextInputFormatter(6),
@@ -366,6 +464,24 @@ class _ProfileEditScreenState extends ConsumerState<ProfileEditScreen> {
     );
   }
 
+  /// True once the user arrived from a "complete your profile" reminder.
+  bool get _highlighting => widget.highlight != null;
+
+  /// Required-and-still-empty fields, recomputed on every build so an outline
+  /// clears the moment the user types into it.
+  List<String> _missingNow(bool isSeller) {
+    final missing = <String>[];
+    if (_nameCtrl.text.trim().isEmpty) missing.add('Full Name');
+    if (isSeller && _businessCtrl.text.trim().isEmpty) {
+      missing.add('Shop / Business Name');
+    }
+    if (_addressCtrl.text.trim().isEmpty && _cityCtrl.text.trim().isEmpty) {
+      missing.add('Address');
+    }
+    if (_pincodeCtrl.text.trim().isEmpty) missing.add('Pincode');
+    return missing;
+  }
+
   Widget _field(
     TextEditingController controller,
     String label,
@@ -374,7 +490,11 @@ class _ProfileEditScreenState extends ConsumerState<ProfileEditScreen> {
     TextInputType? keyboardType,
     int maxLines = 1,
     List<TextInputFormatter>? inputFormatters,
+    bool highlightIfEmpty = false,
   }) {
+    final flagged =
+        _highlighting && highlightIfEmpty && controller.text.trim().isEmpty;
+
     return TextFormField(
       controller: controller,
       validator: validator,
@@ -382,16 +502,150 @@ class _ProfileEditScreenState extends ConsumerState<ProfileEditScreen> {
       maxLines: maxLines,
       inputFormatters: inputFormatters,
       style: AppTextStyles.body,
+      // Only while highlighting: rebuild per keystroke so the amber outline
+      // disappears as soon as the field has content.
+      onChanged: _highlighting ? (_) => setState(() {}) : null,
       decoration: InputDecoration(
         labelText: label,
-        prefixIcon: Icon(icon),
+        prefixIcon: Icon(icon, color: flagged ? AppColors.error : null),
         filled: true,
         fillColor: Colors.white,
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+        enabledBorder: flagged
+            ? OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide:
+                    const BorderSide(color: AppColors.error, width: 1.5),
+              )
+            : null,
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
           borderSide: const BorderSide(color: AppColors.primary, width: 2),
         ),
+      ),
+    );
+  }
+}
+
+/// "Still missing…" callout shown when the screen is opened from a profile
+/// completion reminder. Turns green once every required field has content, so
+/// the user gets confirmation before they even hit Save.
+class _MissingBanner extends StatelessWidget {
+  final List<String> missing;
+  const _MissingBanner({required this.missing});
+
+  @override
+  Widget build(BuildContext context) {
+    final done = missing.isEmpty;
+    final color = done ? AppColors.success : AppColors.error;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withValues(alpha: 0.4)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(done ? Icons.check_circle_outline : Icons.error_outline,
+              color: color, size: 20),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  done ? 'All set — tap Save' : 'Complete your profile',
+                  style: AppTextStyles.bodyMedium
+                      .copyWith(fontWeight: FontWeight.w800, color: color),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  done
+                      ? 'Everything we need is filled in.'
+                      : 'Still missing: ${missing.join(", ")}. '
+                          'A complete profile helps buyers find and trust your store.',
+                  style: AppTextStyles.bodySmall
+                      .copyWith(color: AppColors.onSurfaceVariant),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Tappable circular avatar with a camera badge — shows the freshly-picked
+/// file if there is one, else the existing logo URL, else an icon
+/// placeholder. Upload itself happens on Save (see `_save`), not on pick, so
+/// there's a single write path and no orphaned-then-abandoned edit state.
+class _LogoPicker extends StatelessWidget {
+  final File? file;
+  final String? existingUrl;
+  final bool uploading;
+  final VoidCallback onTap;
+  const _LogoPicker({
+    required this.file,
+    required this.existingUrl,
+    required this.uploading,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hasExisting = existingUrl != null && existingUrl!.isNotEmpty;
+
+    return GestureDetector(
+      onTap: uploading ? null : onTap,
+      child: Stack(
+        children: [
+          CircleAvatar(
+            radius: 44,
+            backgroundColor: AppColors.primaryContainer,
+            backgroundImage: file != null
+                ? FileImage(file!)
+                : hasExisting
+                    ? CachedNetworkImageProvider(existingUrl!) as ImageProvider
+                    : null,
+            child: (file == null && !hasExisting)
+                ? const Icon(Icons.storefront_outlined,
+                    size: 36, color: AppColors.primary)
+                : null,
+          ),
+          if (uploading)
+            const Positioned.fill(
+              child: CircleAvatar(
+                backgroundColor: Colors.black38,
+                child: SizedBox(
+                  width: 24,
+                  height: 24,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2, color: Colors.white),
+                ),
+              ),
+            )
+          else
+            Positioned(
+              right: 0,
+              bottom: 0,
+              child: Container(
+                padding: const EdgeInsets.all(6),
+                decoration: const BoxDecoration(
+                  color: AppColors.primary,
+                  shape: BoxShape.circle,
+                  border: Border.fromBorderSide(
+                      BorderSide(color: Colors.white, width: 2)),
+                ),
+                child: const Icon(Icons.camera_alt,
+                    size: 16, color: Colors.white),
+              ),
+            ),
+        ],
       ),
     );
   }

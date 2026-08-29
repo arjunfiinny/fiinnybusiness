@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../../../core/models/listing_model.dart';
+import '../../../core/models/store_model.dart';
 import '../../../core/utils/geo_utils.dart';
 
 // Legacy schema: product data lives in 'products'. Each product doc can be
@@ -259,6 +260,35 @@ class ListingRepository {
 
   // ─── Profile resolution ────────────────────────────────────────────────────
 
+  /// Public wrapper around [_fetchProfile] for the product page's "Sold by
+  /// this seller" section — reuses the same profiles→retailers→stores
+  /// fallback chain already relied on elsewhere instead of duplicating it.
+  Future<StoreModel?> fetchStoreProfile(String phone) async {
+    final data = await _fetchProfile(phone);
+    if (data == null) return null;
+    final name = (data['shopName'] ?? data['businessName'] ?? data['ownerName'] ?? '')
+        .toString()
+        .trim();
+    if (name.isEmpty) return null;
+    return StoreModel(
+      id: phone,
+      name: name,
+      ownerName: data['ownerName']?.toString(),
+      phone: (data['phone'] ?? phone).toString(),
+      address: data['address']?.toString(),
+      city: data['city']?.toString(),
+      state: data['state']?.toString(),
+      pincode: data['pincode']?.toString(),
+      averageRating: (data['averageRating'] as num?)?.toDouble(),
+      totalReviews: (data['totalReviews'] as num?)?.toInt(),
+      role: (data['role'] ?? 'retailer').toString(),
+      logo: data['logo']?.toString(),
+      tagline: data['tagline']?.toString(),
+      website: data['website']?.toString(),
+      banner: data['banner']?.toString(),
+    );
+  }
+
   /// Resolves a retailer's profile map from Firestore.
   ///
   /// Lookup order:
@@ -319,7 +349,15 @@ class ListingRepository {
     return ListingModel(
       id:           doc.id,
       catalogId:    doc.id,
-      sellerPhone:  d['retailerPhone'] as String? ?? d['retailerId'] as String? ?? '',
+      // All four ownership keyings must be tried: products written by the web
+      // (source: manufacturer_inventory) carry ownerPhone/ownerId and NO
+      // retailer* fields. Checking only retailer* yielded '' here, which then
+      // travelled into the cart and produced orders with an empty sellerId —
+      // invisible to the seller dashboard forever after.
+      sellerPhone:  d['retailerPhone'] as String? ??
+                    d['ownerPhone'] as String? ??
+                    d['retailerId'] as String? ??
+                    d['ownerId'] as String? ?? '',
       sellerName:   d['store'] as String? ?? d['storeName'] as String? ?? '',
       sellerType:   'retailer',
       sellerAddress: d['address'] as String?,

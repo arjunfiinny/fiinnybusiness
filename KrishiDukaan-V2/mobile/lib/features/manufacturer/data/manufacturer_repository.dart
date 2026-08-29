@@ -510,21 +510,31 @@ class ManufacturerRepository {
       String manufacturerPhone) {
     final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
 
-    // Query all sources: legacy catalog collection, products by phone,
-    // products by manufacturerId (legacy uid field), and products by ownerId
-    // (web new schema: ownerId == uid AND ownerType == "manufacturer").
+    // Query all sources: legacy catalog collection, products by phone
+    // (scoped to ownerType=='manufacturer'), and products by ownerId (web
+    // new schema: ownerId == uid AND ownerType == "manufacturer").
+    //
+    // The manufacturerPhone/manufacturerId branches used to be unscoped raw
+    // matches. Every retailer-assignment copy of this manufacturer's
+    // products also stamps manufacturerPhone/manufacturerId with the
+    // manufacturer's own identity for traceability, even though the copy is
+    // owned by the retailer (ownerType: 'retailer') — so an unscoped match
+    // pulled in every retailer's copy of every assigned product and rendered
+    // them as phantom duplicate rows in "My Catalog". ownerType=='manufacturer'
+    // is only ever true on the manufacturer's own doc. The manufacturerId==uid
+    // branch is dropped entirely: it's redundant with the ownerId==uid stream
+    // below, since the writer that creates a manufacturer's own product
+    // always sets both fields to the same value.
     final streams = <Stream<QuerySnapshot>>[
       _db.collection('catalog')
           .where('createdByPhone', isEqualTo: manufacturerPhone)
           .snapshots(),
       _db.collection('products')
           .where('manufacturerPhone', isEqualTo: manufacturerPhone)
+          .where('ownerType', isEqualTo: 'manufacturer')
           .snapshots(),
     ];
     if (uid.isNotEmpty) {
-      streams.add(_db.collection('products')
-          .where('manufacturerId', isEqualTo: uid)
-          .snapshots());
       streams.add(_db.collection('products')
           .where('ownerId', isEqualTo: uid)
           .where('ownerType', isEqualTo: 'manufacturer')
@@ -725,8 +735,16 @@ class ManufacturerRepository {
       'store': storeName,
       'stock': 'In Stock',
       'stockQuantity': 0,
-      'sellMode': src['sellMode'] ?? 'offline_store_only',
-      'isOnline': src['isOnline'] ?? false,
+      // Assigned copies start OFFLINE regardless of the manufacturer's own
+      // sellMode/isOnline — inheriting it here meant every retailer a
+      // manufacturer assigned a product to instantly showed up as an
+      // online-orderable store, even ones who never touched their own
+      // Inventory → Online Delivery setting (or aren't active on the
+      // platform yet). Online delivery is a per-shop decision the retailer
+      // must make themselves. Mirrors the fix already applied on web
+      // (app/dashboard/_lib/product-assignment-firestore.ts).
+      'sellMode': 'offline_store_only',
+      'isOnline': false,
       'variants': src['variants'] ?? [],
       'createdAt': now,
       'updatedAt': now,
@@ -783,6 +801,10 @@ class ManufacturerRepository {
         'storeName': storeName,
         'stockLevel': 'In Stock',
         'sellingPrice': price,
+        // Explicit false, matching the copy's sellMode above — some readers
+        // treat a MISSING isOnline as "not blocked", which would advertise
+        // online delivery for a shop that never enabled it.
+        'isOnline': false,
       }]),
       'updatedAt': now,
     });
@@ -867,18 +889,24 @@ class ManufacturerRepository {
           .where('createdByPhone', isEqualTo: manufacturerPhone)
           .count()
           .get(),
-      // Products by phone field
+      // Products by phone field — scoped to ownerType=='manufacturer'.
+      //
+      // Without that scope, this counted every retailer-assignment copy of
+      // this manufacturer's products too: a copy always stamps the original
+      // manufacturer's phone into manufacturerPhone for traceability even
+      // though the retailer owns it (ownerType: 'retailer'), so a manufacturer
+      // with 5 real products assigned out to 100+ retailers was reporting
+      // 600+ "catalog products" here. ownerType=='manufacturer' is only ever
+      // true on the manufacturer's own doc. (No manufacturerId==uid count is
+      // needed — it would be redundant with the ownerId==uid+ownerType count
+      // below, since the writer that creates a manufacturer's own product
+      // always sets both id fields to the same uid.)
       _db
           .collection('products')
           .where('manufacturerPhone', isEqualTo: manufacturerPhone)
+          .where('ownerType', isEqualTo: 'manufacturer')
           .count()
           .get(),
-      if (uid.isNotEmpty)
-        _db
-            .collection('products')
-            .where('manufacturerId', isEqualTo: uid)
-            .count()
-            .get(),
       // Web new schema: ownerId + ownerType
       if (uid.isNotEmpty)
         _db
@@ -898,11 +926,15 @@ class ManufacturerRepository {
     final baseIdx = uid.isNotEmpty ? 2 : 1;
     final catalogCount    = results[baseIdx].count ?? 0;
     final productsByPhone = results[baseIdx + 1].count ?? 0;
-    final productsByUid   = uid.isNotEmpty ? (results[baseIdx + 2].count ?? 0) : 0;
-    final productsByOwner = uid.isNotEmpty ? (results[baseIdx + 3].count ?? 0) : 0;
-    // Use max across all product-count queries (can't deduplicate counts)
-    final maxProductCount = [productsByPhone, productsByUid, productsByOwner]
-        .reduce((a, b) => a > b ? a : b);
+    final productsByOwner = uid.isNotEmpty ? (results[baseIdx + 2].count ?? 0) : 0;
+    // Both queries are now correctly scoped to ownerType=='manufacturer', so
+    // they describe (mostly) the same doc set under two different identity
+    // keys (phone vs uid) — max() still guards against one identity being
+    // stale/partial without needing doc-level dedup (count() gives no doc
+    // ids to dedup with).
+    final maxProductCount = productsByPhone > productsByOwner
+        ? productsByPhone
+        : productsByOwner;
     final catalogProducts = catalogCount + maxProductCount;
 
     return {

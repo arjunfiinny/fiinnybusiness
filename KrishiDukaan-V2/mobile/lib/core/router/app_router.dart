@@ -19,11 +19,14 @@ import '../../features/orders/screens/order_detail_screen.dart';
 import '../../features/hubs/screens/hubs_screen.dart';
 import '../../features/hubs/screens/hub_detail_screen.dart';
 import '../../features/brand/screens/brand_screen.dart';
-import '../../features/dashboard/screens/dashboard_home_screen.dart';
 import '../../features/dashboard/screens/inventory_screen.dart';
 import '../../features/dashboard/screens/seller_orders_screen.dart';
 import '../../features/dashboard/screens/delivery_settings_screen.dart';
 import '../../features/dashboard/screens/subscription_screen.dart';
+import '../../features/dashboard/screens/dashboard_profile_screen.dart';
+import '../../features/dashboard/screens/dashboard_analytics_screen.dart';
+import '../../features/dashboard/screens/dashboard_reviews_screen.dart';
+import '../../features/dashboard/screens/dashboard_reels_screen.dart';
 import '../../features/manufacturer/screens/manufacturer_dashboard_screen.dart';
 import '../../features/manufacturer/screens/retailer_network_screen.dart';
 import '../../features/manufacturer/screens/manufacturer_catalog_screen.dart';
@@ -31,13 +34,17 @@ import '../../features/manufacturer/screens/assign_product_screen.dart';
 import '../../features/manufacturer/screens/brand_editor_screen.dart';
 import '../../features/profile/screens/profile_screen.dart';
 import '../../features/profile/screens/profile_edit_screen.dart';
+import '../../features/profile/screens/settings_screen.dart';
 import '../../features/notifications/notifications.dart';
+import '../../features/notifications/engagement_group_screen.dart';
 import '../../features/support/screens/support_screen.dart';
 import '../../features/welcome/screens/splash_screen.dart';
 import '../../features/welcome/screens/welcome_screen.dart';
 import '../../features/reels/screens/reels_feed_screen.dart';
+import '../../features/reels/screens/reel_deep_link_screen.dart';
 import '../../features/reels/screens/reel_upload_screen.dart';
 import '../../features/reels/screens/shop_profile_screen.dart';
+import '../../features/reels/screens/followers_screen.dart';
 import '../../features/reels/providers/reels_provider.dart';
 
 final _rootKey = GlobalKey<NavigatorState>(debugLabel: 'root');
@@ -224,13 +231,23 @@ final routerProvider = Provider<GoRouter>((ref) {
         }
       }
 
+      // "/dashboard" itself is now just an alias for the seller's Overview,
+      // which lives on Profile — Profile already renders the same read-only
+      // overview/nav-hub content (and its own paywall-free access for unpaid
+      // sellers), so having a second, different "Overview" screen reachable
+      // both from the Profile tab and from this URL was confusing users who
+      // saw two different pages for what the sidebar calls one destination.
+      // Sub-routes (/dashboard/analytics, /dashboard/orders, etc.) are real,
+      // distinct screens and keep the paywall gate below untouched.
+      if (path == '/dashboard') return '/profile';
+
       if (isLoggedIn && path.startsWith('/dashboard')) {
         final canAccess = ref.read(canAccessDashboardProvider);
         if (!canAccess) return '/subscription?reason=paywall';
       }
 
       if (isLoggedIn && path.startsWith('/dashboard/manufacturer')) {
-        if (!ref.read(isManufacturerProvider)) return '/dashboard';
+        if (!ref.read(isManufacturerProvider)) return '/profile';
       }
 
       return null;
@@ -323,6 +340,12 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (_, state) => _RootBackFallback(
           child: SubscriptionScreen(
             reason: state.uri.queryParameters['reason'],
+            // A subscription_expiry notification passes the user's current
+            // plan so renewal is one tap on Pay.
+            initialSeats: int.tryParse(
+                state.uri.queryParameters['seats'] ?? ''),
+            initialMonths: int.tryParse(
+                state.uri.queryParameters['months'] ?? ''),
           ),
         ),
       ),
@@ -330,6 +353,27 @@ final routerProvider = Provider<GoRouter>((ref) {
         path: '/notifications',
         parentNavigatorKey: _rootKey,
         builder: (_, _) => const _RootBackFallback(child: NotificationsScreen()),
+      ),
+      // Followers list — where a `reel_follow` notification lands. Without a
+      // :phone it means the signed-in user's own followers.
+      GoRoute(
+        path: '/followers',
+        parentNavigatorKey: _rootKey,
+        builder: (_, state) => _RootBackFallback(
+          child: FollowersScreen(
+            shopPhone: state.uri.queryParameters['phone'],
+          ),
+        ),
+      ),
+      // The actor list behind one grouped engagement notification.
+      GoRoute(
+        path: '/activity/:groupId',
+        parentNavigatorKey: _rootKey,
+        builder: (_, state) => _RootBackFallback(
+          child: EngagementGroupScreen(
+            groupId: state.pathParameters['groupId']!,
+          ),
+        ),
       ),
       GoRoute(
         path: '/support',
@@ -349,14 +393,32 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (_, state) => _RootBackFallback(
           child: ProfileEditScreen(
             reason: state.uri.queryParameters['reason'],
+            // Set by a profile_incomplete notification — turns on the
+            // "still missing" banner and outlines the empty required fields.
+            highlight: state.uri.queryParameters['highlight'],
           ),
         ),
+      ),
+      GoRoute(
+        path: '/profile/settings',
+        parentNavigatorKey: _rootKey,
+        builder: (_, _) => const _RootBackFallback(child: SettingsScreen()),
       ),
       // ── Reels upload + shop profile (outside shell) ───────────────────
       GoRoute(
         path: '/reels/upload',
         parentNavigatorKey: _rootKey,
         builder: (_, _) => const _RootBackFallback(child: ReelUploadScreen()),
+      ),
+      // Shared reel links: the deep-link redirect above maps
+      // /reels/{slug}-{id} to /reel/{id}, which was never registered — shared
+      // links fell through to a 404 until this route existed.
+      GoRoute(
+        path: '/reel/:id',
+        parentNavigatorKey: _rootKey,
+        builder: (_, state) => _RootBackFallback(
+          child: ReelDeepLinkScreen(reelId: state.pathParameters['id'] ?? ''),
+        ),
       ),
       GoRoute(
         path: '/shop/:phone',
@@ -368,15 +430,19 @@ final routerProvider = Provider<GoRouter>((ref) {
         ),
       ),
       // ── Dashboard routes ─────────────────────────────────────────────────
-      GoRoute(
-        path: '/dashboard',
-        parentNavigatorKey: _rootKey,
-        builder: (_, _) => const _RootBackFallback(child: DashboardHomeScreen()),
-      ),
+      // "/dashboard" (Overview) has no route of its own — it redirects to
+      // /profile in the redirect callback above.
       GoRoute(
         path: '/dashboard/inventory',
         parentNavigatorKey: _rootKey,
-        builder: (_, _) => const _RootBackFallback(child: InventoryScreen()),
+        builder: (_, state) => _RootBackFallback(
+          child: InventoryScreen(
+            autoOpenAdd: state.uri.queryParameters['autoAdd'] == '1',
+            // Set by inventory_added / low_stock notifications so the product
+            // they are about opens for editing straight away.
+            focusProductId: state.uri.queryParameters['product'],
+          ),
+        ),
       ),
       GoRoute(
         path: '/dashboard/orders',
@@ -387,6 +453,31 @@ final routerProvider = Provider<GoRouter>((ref) {
         path: '/dashboard/delivery',
         parentNavigatorKey: _rootKey,
         builder: (_, _) => const _RootBackFallback(child: DeliverySettingsScreen()),
+      ),
+      GoRoute(
+        path: '/dashboard/profile',
+        parentNavigatorKey: _rootKey,
+        builder: (_, _) => const _RootBackFallback(child: DashboardProfileScreen()),
+      ),
+      GoRoute(
+        path: '/dashboard/analytics',
+        parentNavigatorKey: _rootKey,
+        builder: (_, state) => _RootBackFallback(
+          child: DashboardAnalyticsScreen(
+            // 'week' | 'month' | 'year', from an analytics_digest notification.
+            initialPeriod: state.uri.queryParameters['period'],
+          ),
+        ),
+      ),
+      GoRoute(
+        path: '/dashboard/reviews',
+        parentNavigatorKey: _rootKey,
+        builder: (_, _) => const _RootBackFallback(child: DashboardReviewsScreen()),
+      ),
+      GoRoute(
+        path: '/dashboard/reels',
+        parentNavigatorKey: _rootKey,
+        builder: (_, _) => const _RootBackFallback(child: DashboardReelsScreen()),
       ),
       // ── Manufacturer routes ───────────────────────────────────────────────
       GoRoute(
@@ -402,7 +493,11 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/dashboard/manufacturer/catalog',
         parentNavigatorKey: _rootKey,
-        builder: (_, _) => const _RootBackFallback(child: ManufacturerCatalogScreen()),
+        builder: (_, state) => _RootBackFallback(
+          child: ManufacturerCatalogScreen(
+            autoOpenAdd: state.uri.queryParameters['autoAdd'] == '1',
+          ),
+        ),
       ),
       GoRoute(
         path: '/dashboard/manufacturer/assign',

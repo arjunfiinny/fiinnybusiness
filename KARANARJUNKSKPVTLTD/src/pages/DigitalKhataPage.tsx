@@ -1,16 +1,24 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import {
-    query, onSnapshot, orderBy, addDoc, updateDoc, deleteDoc, setDoc, serverTimestamp, Timestamp, writeBatch,
+    query, onSnapshot, orderBy, addDoc, updateDoc, setDoc, serverTimestamp, Timestamp, writeBatch,
+    where, limit, getDocs,
 } from 'firebase/firestore';
+import * as XLSX from 'xlsx';
 import { db } from '../firebase';
 import { useAuth } from '../contexts/AuthContext';
+import { softDelete } from '../utils/softDelete';
 import { getTenantCollection, getTenantDoc } from '../utils/tenantPath';
 import { useToast } from '../contexts/ToastContext';
+import { resolveDateRange } from '../utils/dateRanges';
 import {
     BookOpen, Search, IndianRupee, Clock, CheckCircle2, AlertCircle, Phone, User, Calendar, ArrowUpRight,
     ArrowLeft, FileText, Printer, Pencil, Plus, Receipt, X, Trash2, Wallet, AlertTriangle, Ban,
+    Download, ChevronUp, ChevronDown,
 } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
+
+const PAYMENT_METHODS = ['Cash', 'UPI', 'NEFT', 'RTGS', 'Bank Transfer', 'Cheque', 'Other'] as const;
 
 interface KhataEntry {
     id: string;
@@ -53,14 +61,19 @@ const billNo = (e: KhataEntry) => e.invoiceNumber || e.orderNumber || e.id.slice
 // Digits-only phone, matching the normaliser used in POS and the B2B invoice.
 const phoneKey = (v: unknown): string => String(v ?? '').replace(/\D/g, '');
 
-// A customer is identified by phone where we have one; otherwise by name, so a
-// named walk-in like "Surve Agro" keeps its own ledger instead of collapsing
-// into a single anonymous bucket.
+// A customer is identified primarily by normalized name — matches the POS
+// identity-resolution priority (name is the primary key, phone optional), so
+// a person billed once without a phone and again with one still rolls up to
+// a single Khata row instead of splitting into "sai · 98…" and "sai · —".
+// Only a genuinely anonymous entry (no name at all) falls back to phone, and
+// a phone-only entry with neither falls back to a shared walk-in bucket —
+// both exactly as before.
 const customerKeyOf = (e: KhataEntry): string => {
+    const nm = entryName(e).trim().toLowerCase();
+    if (nm) return `n:${nm}`;
     const ph = phoneKey(entryPhone(e));
     if (ph) return `p:${ph.slice(-10)}`;
-    const nm = entryName(e).trim().toLowerCase();
-    return nm ? `n:${nm}` : 'n:walk-in';
+    return 'n:walk-in';
 };
 
 const fmtINR = (n: number) => `₹${Math.round(n).toLocaleString('en-IN')}`;
@@ -78,12 +91,45 @@ const modalOverlayStyle: React.CSSProperties = {
     padding: '1rem', background: 'hsla(220, 30%, 4%, 0.72)', backdropFilter: 'blur(4px)', WebkitBackdropFilter: 'blur(4px)',
 };
 
+function SuggestionItem({
+    c, style, onSelect,
+}: {
+    c: { name: string; phone: string; outstanding: number };
+    style: (hover: boolean) => React.CSSProperties;
+    onSelect: () => void;
+}) {
+    const [hover, setHover] = useState(false);
+    return (
+        <div
+            style={style(hover)}
+            onMouseEnter={() => setHover(true)}
+            onMouseLeave={() => setHover(false)}
+            onMouseDown={e => { e.preventDefault(); onSelect(); }}
+        >
+            <span style={{ fontWeight: 600, fontSize: '0.85rem', color: '#f1f5f9' }}>{c.name}</span>
+            {c.phone && <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>{c.phone} · Outstanding: ₹{Math.round(c.outstanding).toLocaleString('en-IN')}</span>}
+        </div>
+    );
+}
+
 export default function DigitalKhataPage() {
-    const { tenantId } = useAuth();
+    const { tenantId, currentUser, userName, userRole } = useAuth();
     const [entries, setEntries] = useState<KhataEntry[]>([]);
     const [loading, setLoading] = useState(true);
     const [search, setSearch] = useState('');
     const [tab, setTab] = useState<FilterTab>('all');
+    // Date filter — scoped to the customer-list toolbar only (does not touch
+    // exportPendingCustomers, which intentionally always exports every
+    // pending/partial customer regardless of the toolbar filters).
+    type DateFilterKey = 'all' | 'today' | 'yesterday' | 'last7' | 'last30' | 'custom';
+    const [dateFilter, setDateFilter] = useState<DateFilterKey>('all');
+    const [customFrom, setCustomFrom] = useState('');
+    const [customTo, setCustomTo] = useState('');
+    type SortCol = 'name' | 'outstanding' | 'total' | 'paid' | 'lastTs';
+    // Default to most-recent-first: the rows people need are the ones just
+    // billed, not the largest balances. Both columns stay sortable.
+    const [sortCol, setSortCol] = useState<SortCol>('lastTs');
+    const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
     // Which customer's ledger is open (master/detail within this page).
     const [selectedKey, setSelectedKey] = useState<string | null>(null);
     const navigate = useNavigate();
@@ -108,7 +154,7 @@ export default function DigitalKhataPage() {
         const unsub = onSnapshot(q, snap => {
             const b2cEntries = snap.docs
                 .map(d => ({ id: d.id, ...d.data() }) as KhataEntry)
-                .filter(e => e.invoiceType !== 'B2B_GST'); // keep POS + undefined (walk-in)
+                .filter(e => e.invoiceType !== 'B2B_GST' && !(e as any).deleted); // keep POS + undefined (walk-in), exclude soft-deleted
             setEntries(b2cEntries);
             setLoading(false);
         }, err => {
@@ -201,9 +247,19 @@ export default function DigitalKhataPage() {
     const [editError, setEditError] = useState<string | null>(null);
 
     const [paymentFor, setPaymentFor] = useState<CustomerRow | null>(null);
-    const [paymentAmount, setPaymentAmount] = useState('');
+    // linkedBillId: '' = unallocated, falls back to the original FIFO-across-all-
+    // bills behavior (oldest outstanding first) for backward compatibility. A
+    // specific bill id restricts the payment to that one invoice only.
+    const emptyPaymentForm = () => ({ amount: '', method: 'Cash', date: new Date().toISOString().slice(0, 10), ref: '', notes: '', linkedBillId: '' });
+    const [paymentForm, setPaymentForm] = useState(emptyPaymentForm());
     const [paymentSaving, setPaymentSaving] = useState(false);
     const [paymentError, setPaymentError] = useState<string | null>(null);
+
+    // Autocomplete state for Add modal
+    const [nameSuggestions, setNameSuggestions] = useState<typeof customers>([]);
+    const [phoneSuggestions, setPhoneSuggestions] = useState<typeof customers>([]);
+    const addNameRef = useRef<HTMLDivElement>(null);
+    const addPhoneRef = useRef<HTMLDivElement>(null);
 
     const [deleteTarget, setDeleteTarget] = useState<BillRow | null>(null);
     const [deleting, setDeleting] = useState(false);
@@ -215,17 +271,39 @@ export default function DigitalKhataPage() {
     const [cancelTarget, setCancelTarget] = useState<BillRow | null>(null);
     const [cancelling, setCancelling] = useState(false);
 
+    const isAddFormDirty = (f: EntryForm) =>
+        !!(f.name || f.phone || f.billAmount || f.paidAmount || f.note);
+
     const openAddForNew = () => {
         setAddLocked(false);
         setAddForm(emptyEntryForm());
         setAddError(null);
+        setNameSuggestions([]);
+        setPhoneSuggestions([]);
         setAddOpen(true);
     };
     const openAddForCustomer = (c: CustomerRow) => {
         setAddLocked(true);
         setAddForm({ ...emptyEntryForm(), name: c.name, phone: c.phone, address: c.address, pin: c.pin });
         setAddError(null);
+        setNameSuggestions([]);
+        setPhoneSuggestions([]);
         setAddOpen(true);
+    };
+
+    const tryCloseAdd = () => {
+        if (addSaving) return;
+        if (isAddFormDirty(addForm)) {
+            if (!window.confirm('You have unsaved data. Close and discard it?')) return;
+        }
+        setAddOpen(false);
+    };
+
+    const selectCustomerSuggestion = (c: CustomerRow) => {
+        setAddLocked(true);
+        setAddForm(f => ({ ...f, name: c.name, phone: c.phone, address: c.address, pin: c.pin }));
+        setNameSuggestions([]);
+        setPhoneSuggestions([]);
     };
 
     const submitAdd = async () => {
@@ -235,7 +313,11 @@ export default function DigitalKhataPage() {
         if (!name) { setAddError('Customer name is required.'); return; }
         if (billAmount <= 0) { setAddError('Bill amount must be greater than 0.'); return; }
         const paidAmount = Math.min(Number(addForm.paidAmount) || 0, billAmount);
-        const phone = phoneKey(addForm.phone);
+        // Defensive layer — the input already sanitizes on every keystroke/paste,
+        // this just guards against a stale/programmatic form.phone value. Capped
+        // locally (not inside phoneKey itself, which is also used to match
+        // against already-stored numbers of unknown length elsewhere).
+        const phone = phoneKey(addForm.phone).slice(0, 10);
         setAddSaving(true);
         setAddError(null);
         try {
@@ -258,8 +340,56 @@ export default function DigitalKhataPage() {
                     name, phone, updatedAt: serverTimestamp(),
                 }, { merge: true });
             }
+            // Also upsert into `retailers` — the collection POS Billing's buyer
+            // suggestion dropdown queries. Without this, a customer added only via
+            // Khata (never billed through POS) would never appear there. Same
+            // identity priority POS itself uses when saving a walk-in: match by
+            // phone first, else by normalized name, else create a new record —
+            // so this never forks a duplicate for a customer who already has one.
+            try {
+                let existingRef: ReturnType<typeof getTenantDoc> | null = null;
+                if (phone) {
+                    const snap = await getDocs(query(getTenantCollection(db, tenantId, 'retailers'), where('number', '==', phone), limit(1)));
+                    if (!snap.empty) existingRef = snap.docs[0].ref;
+                }
+                if (!existingRef) {
+                    const nameKey = name.toLowerCase();
+                    const allSnap = await getDocs(getTenantCollection(db, tenantId, 'retailers'));
+                    const match = allSnap.docs.find(d => (d.data().name || '').trim().toLowerCase() === nameKey);
+                    if (match) existingRef = match.ref;
+                }
+                if (existingRef) {
+                    await updateDoc(existingRef, {
+                        ...(name ? { name } : {}),
+                        ...(phone ? { number: phone } : {}),
+                        ...(addForm.address.trim() ? { atPost: addForm.address.trim() } : {}),
+                        ...(addForm.pin.trim() ? { pin: addForm.pin.trim() } : {}),
+                        lastOrderedAt: serverTimestamp(),
+                    });
+                } else {
+                    // totalSales/outstandingAmount/totalPaid seed at 0, not the bill's
+                    // amount — this doc exists purely so the customer is findable in
+                    // POS suggestions. The actual balance the invoice shows is always
+                    // computed live from salesOrders (see POSPage.fetchLiveOutstanding),
+                    // so this cached counter is informational only and never read for
+                    // that calculation — keeping it at 0 avoids a second, divergent
+                    // source of truth for the same figure.
+                    await addDoc(getTenantCollection(db, tenantId, 'retailers'), {
+                        name, number: phone, atPost: addForm.address.trim(), pin: addForm.pin.trim(),
+                        taluka: '', district: '',
+                        status: 'active', channel: 'pos',
+                        totalSales: 0, outstandingAmount: 0, totalPaid: 0,
+                        createdAt: serverTimestamp(),
+                        lastOrderedAt: serverTimestamp(),
+                    });
+                }
+            } catch (err) {
+                // Never block the udhari entry itself on this best-effort sync.
+                console.error('Khata → retailers sync failed:', err);
+            }
             showToast('Udhari entry added.', 'success');
             setAddOpen(false);
+            setAddLocked(false);
         } catch (e) {
             console.error('Add udhari failed:', e);
             setAddError('Could not save. Please try again.');
@@ -285,7 +415,8 @@ export default function DigitalKhataPage() {
         if (!name) { setEditError('Customer name is required.'); return; }
         if (billAmount <= 0) { setEditError('Bill amount must be greater than 0.'); return; }
         const paidAmount = Math.min(Number(editForm.paidAmount) || 0, billAmount);
-        const phone = phoneKey(editForm.phone);
+        // Defensive layer — see the matching comment in submitAdd.
+        const phone = phoneKey(editForm.phone).slice(0, 10);
         setEditSaving(true);
         setEditError(null);
         try {
@@ -316,28 +447,59 @@ export default function DigitalKhataPage() {
         }
     };
 
-    // Payment is allocated FIFO across the customer's outstanding bills (oldest
-    // first) so a partial payment settles the longest-standing dues first.
+    // With a specific invoice linked, the payment applies only to that one
+    // salesOrders document. Without one (linkedBillId === ''), falls back to
+    // the original behavior — FIFO across the customer's outstanding bills
+    // (oldest first) — unchanged, for backward compatibility.
     const submitPayment = async () => {
         if (!tenantId || !paymentFor) return;
-        let remaining = Math.min(Number(paymentAmount) || 0, paymentFor.outstanding);
+        const enteredAmount = Number(paymentForm.amount) || 0;
+        const linkedBill = paymentForm.linkedBillId
+            ? paymentFor.bills.find(b => b.id === paymentForm.linkedBillId)
+            : null;
+
+        if (paymentForm.linkedBillId && !linkedBill) { setPaymentError('Selected invoice could not be found.'); return; }
+        if (linkedBill && linkedBill.outstanding <= 0) { setPaymentError('That invoice is already fully paid.'); return; }
+
+        const cap = linkedBill ? linkedBill.outstanding : paymentFor.outstanding;
+        const remaining = Math.min(enteredAmount, cap);
         if (remaining <= 0) { setPaymentError('Enter a valid amount.'); return; }
         setPaymentSaving(true);
         setPaymentError(null);
         try {
-            const batch = writeBatch(db);
-            const ordered = [...paymentFor.bills].sort((a, b) => a.ts.getTime() - b.ts.getTime());
-            for (const b of ordered) {
-                if (remaining <= 0) break;
-                if (b.outstanding <= 0) continue;
-                const apply = Math.min(remaining, b.outstanding);
-                batch.update(getTenantDoc(db, tenantId, 'salesOrders', b.id), { amountPaid: b.paid + apply, updatedAt: serverTimestamp() });
-                remaining -= apply;
+            if (linkedBill) {
+                // Single-invoice allocation — updates only the selected document.
+                await updateDoc(getTenantDoc(db, tenantId, 'salesOrders', linkedBill.id), {
+                    amountPaid: linkedBill.paid + remaining,
+                    paymentMethod: paymentForm.method,
+                    paymentDate: paymentForm.date,
+                    transactionRef: paymentForm.ref.trim() || null,
+                    paymentNotes: paymentForm.notes.trim() || null,
+                    updatedAt: serverTimestamp(),
+                });
+            } else {
+                let toApply = remaining;
+                const batch = writeBatch(db);
+                const ordered = [...paymentFor.bills].sort((a, b) => a.ts.getTime() - b.ts.getTime());
+                for (const b of ordered) {
+                    if (toApply <= 0) break;
+                    if (b.outstanding <= 0) continue;
+                    const apply = Math.min(toApply, b.outstanding);
+                    batch.update(getTenantDoc(db, tenantId, 'salesOrders', b.id), {
+                        amountPaid: b.paid + apply,
+                        paymentMethod: paymentForm.method,
+                        paymentDate: paymentForm.date,
+                        transactionRef: paymentForm.ref.trim() || null,
+                        paymentNotes: paymentForm.notes.trim() || null,
+                        updatedAt: serverTimestamp(),
+                    });
+                    toApply -= apply;
+                }
+                await batch.commit();
             }
-            await batch.commit();
             showToast('Payment recorded.', 'success');
             setPaymentFor(null);
-            setPaymentAmount('');
+            setPaymentForm(emptyPaymentForm());
         } catch (e) {
             console.error('Record payment failed:', e);
             setPaymentError('Could not save payment. Please try again.');
@@ -350,7 +512,16 @@ export default function DigitalKhataPage() {
         if (!tenantId || !deleteTarget) return;
         setDeleting(true);
         try {
-            await deleteDoc(getTenantDoc(db, tenantId, 'salesOrders', deleteTarget.id));
+            await softDelete({
+                db, tenantId,
+                collectionName: 'salesOrders',
+                docId: deleteTarget.id,
+                userId: currentUser?.uid || '',
+                userName: userName || currentUser?.email || 'Unknown',
+                userRole: userRole || 'unknown',
+                module: 'Digital Khata',
+                entityName: (deleteTarget as any).billNumber || deleteTarget.id,
+            });
             showToast('Udhari entry deleted.', 'success');
             setDeleteTarget(null);
         } catch (e) {
@@ -378,6 +549,27 @@ export default function DigitalKhataPage() {
         }
     };
 
+    // Lock background scroll whenever any modal is open.
+    const anyModalOpen = addOpen || !!editingBill || !!paymentFor || !!deleteTarget || !!cancelTarget;
+    useEffect(() => {
+        if (anyModalOpen) {
+            const prev = document.body.style.overflow;
+            document.body.style.overflow = 'hidden';
+            return () => { document.body.style.overflow = prev; };
+        }
+    }, [anyModalOpen]);
+
+    // Close suggestions when clicking outside their containers.
+    useEffect(() => {
+        if (!nameSuggestions.length && !phoneSuggestions.length) return;
+        const handler = (e: MouseEvent) => {
+            if (addNameRef.current && !addNameRef.current.contains(e.target as Node)) setNameSuggestions([]);
+            if (addPhoneRef.current && !addPhoneRef.current.contains(e.target as Node)) setPhoneSuggestions([]);
+        };
+        document.addEventListener('mousedown', handler);
+        return () => document.removeEventListener('mousedown', handler);
+    }, [nameSuggestions.length, phoneSuggestions.length]);
+
     // KPIs — now counted per customer, not per bill.
     const kpi = useMemo(() => {
         const totalOutstanding = customers.reduce((s, c) => s + c.outstanding, 0);
@@ -401,8 +593,69 @@ export default function DigitalKhataPage() {
                 c.bills.some(b => billNo(b).toLowerCase().includes(q))
             );
         }
+        // Filters on lastTs — the same "Last Bill" timestamp already shown in
+        // the customer-list column, so this uses the one authoritative date
+        // the page already computes rather than introducing a second source.
+        if (dateFilter !== 'all') {
+            let range: { start: Date | null; end: Date };
+            if (dateFilter === 'last30') {
+                const from = new Date(); from.setDate(from.getDate() - 29); from.setHours(0, 0, 0, 0);
+                const to = new Date(); to.setHours(23, 59, 59, 999);
+                range = { start: from, end: to };
+            } else if (dateFilter === 'custom') {
+                range = resolveDateRange('customRange', undefined, customFrom, customTo);
+            } else {
+                range = resolveDateRange(dateFilter === 'last7' ? 'last7days' : dateFilter);
+            }
+            list = list.filter(c => (!range.start || c.lastTs >= range.start) && c.lastTs <= range.end);
+        }
         return list;
-    }, [customers, tab, search]);
+    }, [customers, tab, search, dateFilter, customFrom, customTo]);
+
+    const sorted = useMemo(() => {
+        const mult = sortDir === 'asc' ? 1 : -1;
+        return [...filtered].sort((a, b) => {
+            switch (sortCol) {
+                case 'name': return mult * a.name.localeCompare(b.name);
+                case 'outstanding': return mult * (a.outstanding - b.outstanding);
+                case 'total': return mult * (a.total - b.total);
+                case 'paid': return mult * (a.paid - b.paid);
+                case 'lastTs': return mult * (a.lastTs.getTime() - b.lastTs.getTime());
+                default: return 0;
+            }
+        });
+    }, [filtered, sortCol, sortDir]);
+
+    const toggleSort = (col: SortCol) => {
+        if (sortCol === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+        else { setSortCol(col); setSortDir('desc'); }
+    };
+
+    const exportPendingCustomers = () => {
+        const rows = customers
+            .filter(c => c.status === 'pending' || c.status === 'partial')
+            .sort((a, b) => b.outstanding - a.outstanding)
+            .map(c => ({
+                'Customer Name': c.name,
+                'Phone': c.phone || '',
+                'Address': c.address || '',
+                'PIN': c.pin || '',
+                'Total Billed (₹)': c.total,
+                'Total Paid (₹)': c.paid,
+                'Outstanding (₹)': c.outstanding,
+                'Last Transaction': c.lastTs.toLocaleDateString('en-IN'),
+                'Status': c.status === 'pending' ? 'Pending' : 'Partial',
+            }));
+        const ws = XLSX.utils.json_to_sheet(rows);
+        const colWidths = [
+            { wch: 28 }, { wch: 14 }, { wch: 32 }, { wch: 8 },
+            { wch: 16 }, { wch: 14 }, { wch: 16 }, { wch: 18 }, { wch: 10 },
+        ];
+        ws['!cols'] = colWidths;
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Pending Customers');
+        XLSX.writeFile(wb, `pending-customers-${new Date().toISOString().slice(0, 10)}.xlsx`);
+    };
 
     // Selected customer for the details view (re-derived so it stays live).
     const selected: CustomerRow | null = selectedKey
@@ -456,17 +709,81 @@ export default function DigitalKhataPage() {
 
     // ── Add / Edit / Payment / Delete modals — shared across both the list and
     // customer-detail views below. ───────────────────────────────────────────
+    const suggestionListStyle: React.CSSProperties = {
+        position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 2000,
+        background: '#1e2535',
+        border: '1px solid rgba(255,255,255,0.12)',
+        borderRadius: '10px', marginTop: '4px', maxHeight: '220px', overflowY: 'auto',
+        boxShadow: '0 12px 32px rgba(0,0,0,0.55)',
+    };
+    const suggestionItemStyle = (hover: boolean): React.CSSProperties => ({
+        padding: '0.6rem 0.9rem', cursor: 'pointer',
+        background: hover ? 'rgba(255,255,255,0.08)' : 'transparent',
+        display: 'flex', flexDirection: 'column', gap: '0.15rem',
+        borderBottom: '1px solid rgba(255,255,255,0.06)',
+        transition: 'background 0.1s',
+    });
+
     const entryFormFields = (form: EntryForm, setForm: React.Dispatch<React.SetStateAction<EntryForm>>, locked: boolean) => (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem' }}>
-            <div>
+            <div ref={locked ? undefined : addNameRef} style={{ position: 'relative' }}>
                 <label style={labelStyle}>Customer Name *</label>
                 <input className="input-field" style={{ width: '100%', margin: 0 }} value={form.name} disabled={locked}
-                    onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. Ramesh Patil" />
+                    onChange={e => {
+                        const val = e.target.value;
+                        setForm(f => ({ ...f, name: val }));
+                        if (!locked && val.length >= 1) {
+                            const q = val.toLowerCase();
+                            setNameSuggestions(customers.filter(c => c.name.toLowerCase().includes(q)).slice(0, 6));
+                        } else {
+                            setNameSuggestions([]);
+                        }
+                    }}
+                    onFocus={() => {
+                        if (!locked && form.name.length >= 1) {
+                            const q = form.name.toLowerCase();
+                            setNameSuggestions(customers.filter(c => c.name.toLowerCase().includes(q)).slice(0, 6));
+                        }
+                    }}
+                    placeholder="e.g. Ramesh Patil" autoComplete="off" />
+                {!locked && nameSuggestions.length > 0 && (
+                    <div style={suggestionListStyle}>
+                        {nameSuggestions.map(c => (
+                            <SuggestionItem key={c.key} c={c} style={suggestionItemStyle} onSelect={() => selectCustomerSuggestion(c)} />
+                        ))}
+                    </div>
+                )}
             </div>
-            <div>
+            <div ref={locked ? undefined : addPhoneRef} style={{ position: 'relative' }}>
                 <label style={labelStyle}>Phone</label>
                 <input className="input-field" style={{ width: '100%', margin: 0 }} value={form.phone} disabled={locked}
-                    onChange={e => setForm(f => ({ ...f, phone: e.target.value }))} placeholder="10-digit mobile" />
+                    inputMode="numeric" maxLength={10}
+                    onChange={e => {
+                        // Digits only, capped at 10 — applies to typed input, IME
+                        // composition, and paste alike, since paste fires this same
+                        // onChange with the full pasted string as e.target.value.
+                        const val = e.target.value.replace(/\D/g, '').slice(0, 10);
+                        setForm(f => ({ ...f, phone: val }));
+                        if (!locked && val.length >= 3) {
+                            setPhoneSuggestions(customers.filter(c => c.phone.includes(val)).slice(0, 6));
+                        } else {
+                            setPhoneSuggestions([]);
+                        }
+                    }}
+                    onFocus={() => {
+                        if (!locked && form.phone.replace(/\D/g, '').length >= 3) {
+                            const q = form.phone.replace(/\D/g, '');
+                            setPhoneSuggestions(customers.filter(c => c.phone.includes(q)).slice(0, 6));
+                        }
+                    }}
+                    placeholder="10-digit mobile" autoComplete="off" />
+                {!locked && phoneSuggestions.length > 0 && (
+                    <div style={suggestionListStyle}>
+                        {phoneSuggestions.map(c => (
+                            <SuggestionItem key={c.key} c={c} style={suggestionItemStyle} onSelect={() => selectCustomerSuggestion(c)} />
+                        ))}
+                    </div>
+                )}
             </div>
             <div style={{ display: 'flex', gap: '0.75rem' }}>
                 <div style={{ flex: 1 }}>
@@ -505,21 +822,31 @@ export default function DigitalKhataPage() {
         </div>
     );
 
+    const modalPortal = (content: React.ReactNode) => createPortal(content, document.body);
+
     const modals = (
         <>
-            {addOpen && (
-                <div onMouseDown={e => { if (e.target === e.currentTarget && !addSaving) setAddOpen(false); }} style={modalOverlayStyle} role="dialog" aria-modal="true" aria-label="Add Udhari">
+            {addOpen && modalPortal(
+                <div onMouseDown={e => { if (e.target === e.currentTarget) tryCloseAdd(); }} style={modalOverlayStyle} role="dialog" aria-modal="true" aria-label="Add Udhari">
                     <div className="glass-panel" style={{ width: '100%', maxWidth: '480px', maxHeight: '90vh', overflowY: 'auto', padding: '1.75rem', borderRadius: '16px', position: 'relative' }}>
-                        <button onClick={() => !addSaving && setAddOpen(false)} style={{ position: 'absolute', top: '1rem', right: '1rem', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)' }} aria-label="Close">
+                        <button onClick={tryCloseAdd} style={{ position: 'absolute', top: '1rem', right: '1rem', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)' }} aria-label="Close">
                             <X size={20} />
                         </button>
                         <h2 style={{ fontSize: '1.2rem', fontWeight: 800, marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                             <Plus size={18} className="primary-gradient-text" /> Add Udhari
                         </h2>
+                        {addLocked && (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem', padding: '0.5rem 0.75rem', background: 'var(--primary)11', borderRadius: '8px', fontSize: '0.8rem', color: 'var(--primary-light)' }}>
+                                <User size={13} /> Adding bill for existing customer — name &amp; phone locked.
+                                <button onClick={() => { setAddLocked(false); setAddForm(f => f); }} style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', fontSize: '0.75rem', fontFamily: 'inherit' }}>
+                                    Change
+                                </button>
+                            </div>
+                        )}
                         {entryFormFields(addForm, setAddForm, addLocked)}
                         {addError && <div style={errStyle}><AlertCircle size={13} /> {addError}</div>}
                         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.6rem', marginTop: '1.1rem' }}>
-                            <button onClick={() => setAddOpen(false)} className="btn btn-secondary" disabled={addSaving} style={{ padding: '0.55rem 1.1rem', fontSize: '0.85rem' }}>Cancel</button>
+                            <button onClick={tryCloseAdd} className="btn btn-secondary" disabled={addSaving} style={{ padding: '0.55rem 1.1rem', fontSize: '0.85rem' }}>Cancel</button>
                             <button onClick={submitAdd} className="btn btn-primary" disabled={addSaving} style={{ padding: '0.55rem 1.1rem', fontSize: '0.85rem' }}>
                                 {addSaving ? 'Saving...' : 'Save Udhari'}
                             </button>
@@ -528,7 +855,7 @@ export default function DigitalKhataPage() {
                 </div>
             )}
 
-            {editingBill && (
+            {editingBill && modalPortal(
                 <div onMouseDown={e => { if (e.target === e.currentTarget && !editSaving) setEditingBill(null); }} style={modalOverlayStyle} role="dialog" aria-modal="true" aria-label="Edit Udhari">
                     <div className="glass-panel" style={{ width: '100%', maxWidth: '480px', maxHeight: '90vh', overflowY: 'auto', padding: '1.75rem', borderRadius: '16px', position: 'relative' }}>
                         <button onClick={() => !editSaving && setEditingBill(null)} style={{ position: 'absolute', top: '1rem', right: '1rem', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)' }} aria-label="Close">
@@ -549,33 +876,98 @@ export default function DigitalKhataPage() {
                 </div>
             )}
 
-            {paymentFor && (
-                <div onMouseDown={e => { if (e.target === e.currentTarget && !paymentSaving) setPaymentFor(null); }} style={modalOverlayStyle} role="dialog" aria-modal="true" aria-label="Record Payment">
-                    <div className="glass-panel" style={{ width: '100%', maxWidth: '380px', padding: '1.75rem', borderRadius: '16px', position: 'relative' }}>
-                        <button onClick={() => !paymentSaving && setPaymentFor(null)} style={{ position: 'absolute', top: '1rem', right: '1rem', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)' }} aria-label="Close">
+            {paymentFor && modalPortal(
+                <div onMouseDown={e => { if (e.target === e.currentTarget && !paymentSaving) { setPaymentFor(null); setPaymentForm(emptyPaymentForm()); } }} style={modalOverlayStyle} role="dialog" aria-modal="true" aria-label="Record Payment">
+                    <div className="glass-panel" style={{ width: '100%', maxWidth: '440px', padding: '1.75rem', borderRadius: '16px', position: 'relative' }}>
+                        <button onClick={() => { if (!paymentSaving) { setPaymentFor(null); setPaymentForm(emptyPaymentForm()); } }} style={{ position: 'absolute', top: '1rem', right: '1rem', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)' }} aria-label="Close">
                             <X size={20} />
                         </button>
                         <h2 style={{ fontSize: '1.2rem', fontWeight: 800, marginBottom: '0.25rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                             <Wallet size={18} className="primary-gradient-text" /> Record Payment
                         </h2>
-                        <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '1rem' }}>
-                            {paymentFor.name} &middot; Outstanding {fmtINR(paymentFor.outstanding)}
+                        <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '1.25rem' }}>
+                            <strong>{paymentFor.name}</strong> &middot; Outstanding <strong style={{ color: '#ef4444' }}>{fmtINR(paymentFor.outstanding)}</strong>
                         </p>
-                        <label style={labelStyle}>Amount Received (₹)</label>
-                        <input type="number" className="input-field" style={{ width: '100%', margin: 0 }} value={paymentAmount}
-                            onChange={e => setPaymentAmount(e.target.value)} placeholder="0" autoFocus />
-                        {paymentError && <div style={errStyle}><AlertCircle size={13} /> {paymentError}</div>}
-                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.6rem', marginTop: '1.1rem' }}>
-                            <button onClick={() => setPaymentFor(null)} className="btn btn-secondary" disabled={paymentSaving} style={{ padding: '0.55rem 1.1rem', fontSize: '0.85rem' }}>Cancel</button>
-                            <button onClick={submitPayment} className="btn btn-primary" disabled={paymentSaving} style={{ padding: '0.55rem 1.1rem', fontSize: '0.85rem' }}>
-                                {paymentSaving ? 'Saving...' : 'Record Payment'}
+                        {(() => {
+                            const outstandingBills = paymentFor.bills.filter(b => b.outstanding > 0);
+                            const linkedBill = paymentForm.linkedBillId ? paymentFor.bills.find(b => b.id === paymentForm.linkedBillId) : null;
+                            const enteredAmount = Number(paymentForm.amount) || 0;
+                            return (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem' }}>
+                                    {outstandingBills.length > 0 && (
+                                        <div>
+                                            <label style={labelStyle}>Link to Invoice</label>
+                                            <select className="input-field" style={{ width: '100%', margin: 0 }} value={paymentForm.linkedBillId}
+                                                onChange={e => setPaymentForm(f => ({ ...f, linkedBillId: e.target.value }))}>
+                                                <option value="">Unallocated — settle oldest dues first</option>
+                                                {outstandingBills.map(b => (
+                                                    <option key={b.id} value={b.id}>
+                                                        {billNo(b)} · Bill {fmtINR(b.total)} · Paid {fmtINR(b.paid)} · Due {fmtINR(b.outstanding)}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                            {linkedBill && (
+                                                <div style={{ marginTop: '0.5rem', padding: '0.55rem 0.75rem', borderRadius: '8px', background: 'var(--surface-raised)', fontSize: '0.78rem', color: 'var(--text-secondary)', display: 'flex', flexWrap: 'wrap', gap: '0.4rem 0.9rem' }}>
+                                                    <span>Invoice: <strong style={{ color: 'var(--text-primary)' }}>{billNo(linkedBill)}</strong></span>
+                                                    <span>Bill: <strong style={{ color: 'var(--text-primary)' }}>{fmtINR(linkedBill.total)}</strong></span>
+                                                    <span>Paid: <strong style={{ color: '#10b981' }}>{fmtINR(linkedBill.paid)}</strong></span>
+                                                    <span>Outstanding: <strong style={{ color: '#ef4444' }}>{fmtINR(linkedBill.outstanding)}</strong></span>
+                                                    {enteredAmount > 0 && (
+                                                        <span style={{ width: '100%', borderTop: '1px dashed var(--surface-border)', paddingTop: '0.4rem', marginTop: '0.1rem' }}>
+                                                            After this payment — Paid: <strong style={{ color: '#10b981' }}>{fmtINR(linkedBill.paid + Math.min(enteredAmount, linkedBill.outstanding))}</strong>
+                                                            {' · '}Outstanding: <strong style={{ color: '#ef4444' }}>{fmtINR(Math.max(0, linkedBill.outstanding - enteredAmount))}</strong>
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+                                        <div>
+                                            <label style={labelStyle}>Amount Received (₹) *</label>
+                                            <input type="number" className="input-field" style={{ width: '100%', margin: 0 }} value={paymentForm.amount}
+                                                onChange={e => setPaymentForm(f => ({ ...f, amount: e.target.value }))} placeholder="0" autoFocus />
+                                        </div>
+                                        <div>
+                                            <label style={labelStyle}>Payment Date</label>
+                                            <input type="date" className="input-field" style={{ width: '100%', margin: 0 }} value={paymentForm.date}
+                                                onChange={e => setPaymentForm(f => ({ ...f, date: e.target.value }))} />
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label style={labelStyle}>Payment Method</label>
+                                        <select className="input-field" style={{ width: '100%', margin: 0 }} value={paymentForm.method}
+                                            onChange={e => setPaymentForm(f => ({ ...f, method: e.target.value }))}>
+                                            {PAYMENT_METHODS.map(m => <option key={m}>{m}</option>)}
+                                        </select>
+                                    </div>
+                                    {paymentForm.method !== 'Cash' && (
+                                        <div>
+                                            <label style={labelStyle}>Transaction Reference / UTR</label>
+                                            <input className="input-field" style={{ width: '100%', margin: 0 }} value={paymentForm.ref}
+                                                onChange={e => setPaymentForm(f => ({ ...f, ref: e.target.value }))} placeholder="UPI Ref / Cheque No / UTR" />
+                                        </div>
+                                    )}
+                                    <div>
+                                        <label style={labelStyle}>Notes (optional)</label>
+                                        <input className="input-field" style={{ width: '100%', margin: 0 }} value={paymentForm.notes}
+                                            onChange={e => setPaymentForm(f => ({ ...f, notes: e.target.value }))} placeholder="e.g. partial payment for July dues" />
+                                    </div>
+                                </div>
+                            );
+                        })()}
+                        {paymentError && <div style={{ ...errStyle, marginTop: '0.75rem' }}><AlertCircle size={13} /> {paymentError}</div>}
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.6rem', marginTop: '1.25rem' }}>
+                            <button onClick={() => { setPaymentFor(null); setPaymentForm(emptyPaymentForm()); }} className="btn btn-secondary" disabled={paymentSaving} style={{ padding: '0.55rem 1.1rem', fontSize: '0.85rem' }}>Cancel</button>
+                            <button onClick={submitPayment} className="btn btn-primary" disabled={paymentSaving} style={{ padding: '0.55rem 1.1rem', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                                <IndianRupee size={14} /> {paymentSaving ? 'Saving...' : 'Record Payment'}
                             </button>
                         </div>
                     </div>
                 </div>
             )}
 
-            {deleteTarget && (
+            {deleteTarget && modalPortal(
                 <div onMouseDown={e => { if (e.target === e.currentTarget && !deleting) setDeleteTarget(null); }} style={modalOverlayStyle} role="dialog" aria-modal="true" aria-label="Delete Udhari">
                     <div className="glass-panel" style={{ width: '100%', maxWidth: '380px', padding: '1.75rem', borderRadius: '16px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.75rem' }}>
@@ -596,7 +988,7 @@ export default function DigitalKhataPage() {
                 </div>
             )}
 
-            {cancelTarget && (
+            {cancelTarget && modalPortal(
                 <div onMouseDown={e => { if (e.target === e.currentTarget && !cancelling) setCancelTarget(null); }} style={modalOverlayStyle} role="dialog" aria-modal="true" aria-label="Cancel Bill">
                     <div className="glass-panel" style={{ width: '100%', maxWidth: '380px', padding: '1.75rem', borderRadius: '16px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.75rem' }}>
@@ -618,19 +1010,6 @@ export default function DigitalKhataPage() {
             )}
         </>
     );
-
-    const tabStyle = (t: FilterTab) => ({
-        padding: '0.45rem 1.2rem',
-        borderRadius: '20px',
-        border: `1px solid ${tab === t ? 'var(--primary-light)' : 'var(--surface-border)'}`,
-        background: tab === t ? 'var(--primary-light)' : 'transparent',
-        color: tab === t ? '#fff' : 'var(--text-secondary)',
-        fontWeight: 600,
-        fontSize: '0.82rem',
-        cursor: 'pointer',
-        fontFamily: 'inherit',
-        transition: 'all 0.15s',
-    });
 
     const statusBadge = (status: string) => {
         const map: Record<string, { bg: string; color: string; label: string }> = {
@@ -693,7 +1072,15 @@ export default function DigitalKhataPage() {
                             style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem', padding: '0.5rem 1rem' }}>
                             <Plus size={15} /> Add Udhari
                         </button>
-                        <button onClick={() => { setPaymentFor(selected); setPaymentAmount(''); setPaymentError(null); }}
+                        <button onClick={() => {
+                            setPaymentFor(selected);
+                            // Default to the oldest outstanding bill (matches the FIFO
+                            // fallback's own settle-oldest-first convention) — still
+                            // fully changeable via the Link to Invoice selector.
+                            const oldestOutstanding = [...selected.bills].filter(b => b.outstanding > 0).sort((a, b) => a.ts.getTime() - b.ts.getTime())[0];
+                            setPaymentForm({ ...emptyPaymentForm(), linkedBillId: oldestOutstanding?.id || '' });
+                            setPaymentError(null);
+                        }}
                             className="btn btn-secondary" disabled={selected.outstanding <= 0}
                             style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem', padding: '0.5rem 1rem', opacity: selected.outstanding <= 0 ? 0.5 : 1, cursor: selected.outstanding <= 0 ? 'not-allowed' : 'pointer' }}>
                             <Wallet size={15} /> Record Payment
@@ -726,7 +1113,7 @@ export default function DigitalKhataPage() {
                         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.875rem' }}>
                             <thead>
                                 <tr style={{ borderBottom: '1px solid var(--surface-border)', background: 'var(--surface-raised)' }}>
-                                    {['Bill No', 'Date', 'Bill Amt', 'Paid', 'Outstanding', 'Status', 'Actions'].map(h => (
+                                    {['Bill No', 'Date', 'Bill Amount', 'Paid', 'Outstanding', 'Status', 'Actions'].map(h => (
                                         <th key={h} style={{ ...cellStyle, fontWeight: 600, color: 'var(--text-secondary)', textAlign: h === 'Actions' ? 'right' : 'left' }}>{h}</th>
                                     ))}
                                 </tr>
@@ -826,26 +1213,65 @@ export default function DigitalKhataPage() {
             </div>
 
             {/* Filters */}
-            <div className="glass-panel" style={{ padding: '1rem 1.25rem', marginBottom: '1.5rem', display: 'flex', gap: '1rem', alignItems: 'center', flexWrap: 'wrap' }}>
-                {/* Tab pills */}
-                <div style={{ display: 'flex', gap: '0.4rem' }}>
-                    <button style={tabStyle('pending')} onClick={() => setTab('pending')}>⏳ Pending</button>
-                    <button style={tabStyle('partial')} onClick={() => setTab('partial')}>🔶 Partial</button>
-                    <button style={tabStyle('all')} onClick={() => setTab('all')}>📋 All</button>
-                </div>
+            <div className="glass-panel" style={{ padding: '1rem 1.25rem', marginBottom: '1.5rem', display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                {/* Status */}
+                <select
+                    value={tab}
+                    onChange={e => setTab(e.target.value as FilterTab)}
+                    className="input-field"
+                    style={{ margin: 0, height: '38px', width: '150px', flexShrink: 0, cursor: 'pointer', padding: '0.4rem 0.6rem' }}
+                >
+                    <option value="pending">⏳ Pending</option>
+                    <option value="partial">🔶 Partial</option>
+                    <option value="all">📋 All</option>
+                </select>
+
+                {/* Date Range */}
+                <select
+                    value={dateFilter}
+                    onChange={e => setDateFilter(e.target.value as DateFilterKey)}
+                    className="input-field"
+                    style={{ margin: 0, height: '38px', width: '170px', flexShrink: 0, cursor: 'pointer', padding: '0.4rem 0.6rem' }}
+                >
+                    <option value="all">All Dates</option>
+                    <option value="today">Today</option>
+                    <option value="yesterday">Yesterday</option>
+                    <option value="last7">Last 7 Days</option>
+                    <option value="last30">Last 30 Days</option>
+                    <option value="custom">Custom Range</option>
+                </select>
+                {dateFilter === 'custom' && (
+                    <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+                        <input type="date" className="input-field" style={{ margin: 0, height: '38px', width: '150px' }}
+                            value={customFrom} onChange={e => setCustomFrom(e.target.value)} />
+                        <span style={{ color: 'var(--text-tertiary)', fontSize: '0.8rem' }}>–</span>
+                        <input type="date" className="input-field" style={{ margin: 0, height: '38px', width: '150px' }}
+                            value={customTo} onChange={e => setCustomTo(e.target.value)} />
+                    </div>
+                )}
+
                 {/* Search */}
-                <div style={{ flex: '1 1 260px', position: 'relative' }}>
+                <div style={{ flex: '1 1 260px', maxWidth: '480px', position: 'relative' }}>
                     <Search size={16} style={{ position: 'absolute', left: '0.85rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-tertiary)' }} />
                     <input
                         type="text"
-                        placeholder="Search by customer name, phone or bill no."
+                        placeholder="Search customer, phone or bill no."
                         className="input-field"
-                        style={{ paddingLeft: '2.2rem', margin: 0, height: '38px' }}
+                        style={{ paddingLeft: '2.2rem', margin: 0, height: '38px', width: '100%' }}
                         value={search}
                         onChange={e => setSearch(e.target.value)}
                     />
                 </div>
-                <span style={{ color: 'var(--text-tertiary)', fontSize: '0.82rem', marginLeft: 'auto' }}>{filtered.length} customers</span>
+                <span style={{ color: 'var(--text-tertiary)', fontSize: '0.82rem' }}>{filtered.length} customers</span>
+                <button
+                    onClick={exportPendingCustomers}
+                    title="Export pending & partial customers to Excel"
+                    style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', padding: '0.45rem 0.85rem', borderRadius: '20px', border: '1px solid #ef4444', background: 'rgba(239,68,68,0.08)', color: '#ef4444', fontWeight: 600, fontSize: '0.78rem', cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap', transition: 'all 0.15s' }}
+                    onMouseOver={e => (e.currentTarget.style.background = 'rgba(239,68,68,0.18)')}
+                    onMouseOut={e => (e.currentTarget.style.background = 'rgba(239,68,68,0.08)')}
+                >
+                    <Download size={13} /> Download Pending Customers
+                </button>
             </div>
 
             {/* Customer list */}
@@ -861,13 +1287,26 @@ export default function DigitalKhataPage() {
                         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.875rem' }}>
                             <thead>
                                 <tr style={{ borderBottom: '1px solid var(--surface-border)', background: 'var(--surface-raised)' }}>
-                                    {['Customer', 'Phone', 'Bills', 'Last Bill', 'Billed', 'Paid', 'Outstanding', 'Status', ''].map(h => (
-                                        <th key={h} style={{ padding: '0.85rem 1rem', fontWeight: 600, color: 'var(--text-secondary)', textAlign: h === '' ? 'center' : 'left', whiteSpace: 'nowrap' }}>{h}</th>
-                                    ))}
+                                    {([['Customer', 'name'], ['Mobile Number', null], ['Total Bills', null], ['Last Bill Date', 'lastTs'], ['Total Billed Amount', 'total'], ['Total Paid Amount', 'paid'], ['Outstanding', 'outstanding'], ['Status', null], ['', null]] as [string, SortCol | null][]).map(([label, col]) => {
+                                        const active = col && sortCol === col;
+                                        return (
+                                            <th key={label}
+                                                onClick={col ? () => toggleSort(col) : undefined}
+                                                style={{ padding: '0.85rem 1rem', fontWeight: 600, color: active ? 'var(--primary-light)' : 'var(--text-secondary)', textAlign: label === '' ? 'center' : 'left', whiteSpace: 'nowrap', cursor: col ? 'pointer' : 'default', userSelect: 'none' }}>
+                                                <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
+                                                    {label}
+                                                    {col && (active
+                                                        ? (sortDir === 'desc' ? <ChevronDown size={13} /> : <ChevronUp size={13} />)
+                                                        : <ChevronDown size={13} style={{ opacity: 0.3 }} />
+                                                    )}
+                                                </div>
+                                            </th>
+                                        );
+                                    })}
                                 </tr>
                             </thead>
                             <tbody>
-                                {filtered.map(c => (
+                                {sorted.map(c => (
                                     <tr key={c.key}
                                         onClick={() => setSelectedKey(c.key)}
                                         style={{ borderBottom: '1px solid var(--surface-border)', cursor: 'pointer', transition: 'background 0.15s' }}

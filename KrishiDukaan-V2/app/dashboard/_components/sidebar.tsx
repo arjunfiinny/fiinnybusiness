@@ -8,6 +8,7 @@ import {
   BarChart3,
   Building2,
   CreditCard,
+  Landmark,
   LayoutDashboard,
   Lock,
   Package,
@@ -16,6 +17,7 @@ import {
   Truck,
   UserCircle2,
   UsersRound,
+  Video,
   X,
 } from "lucide-react";
 import { auth, getUserProfile } from "../../firebase";
@@ -27,10 +29,11 @@ const baseNav = [
   { href: "/dashboard", labelKey: "sideOverview" as const, icon: LayoutDashboard },
   { href: "/dashboard/analytics", labelKey: "sideAnalytics" as const, icon: BarChart3 },
   { href: "/dashboard/inventory", labelKey: "sideInventory" as const, icon: Package },
+  { href: "/dashboard/reels", labelKey: "sideReels" as const, icon: Video },
   { href: "/dashboard/orders", labelKey: "sideOrders" as const, icon: ReceiptText },
+  { href: "/dashboard/payouts", labelKey: "sidePayouts" as const, icon: Landmark },
   { href: "/dashboard/delivery", labelKey: "sideDelivery" as const, icon: Truck },
   { href: "/dashboard/reviews", labelKey: "sideReviews" as const, icon: Star },
-  { href: "/dashboard/profile", labelKey: "sideProfile" as const, icon: UserCircle2 },
 ] as const;
 
 const subscriptionNavKey = {
@@ -55,6 +58,8 @@ function hrefToTourKey(href: string): string {
       return "subscription";
     case "/dashboard/orders":
       return "orders";
+    case "/dashboard/payouts":
+      return "payouts";
     case "/dashboard/reviews":
       return "reviews";
     case "/dashboard/profile":
