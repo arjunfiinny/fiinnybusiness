@@ -1,9 +1,10 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import SellerPricingLine from "../../../../../components/shared/seller-pricing-line";
-import { notFound } from "next/navigation";
+import { notFound, permanentRedirect } from "next/navigation";
 import {
-  findStore,
+  resolveStore,
+  storeUrlPath,
   getStoresInCity,
   getStoreProducts,
   getAllStores,
@@ -32,9 +33,6 @@ export async function generateStaticParams() {
   }));
 }
 
-const storeUrl = (s: SeoStore) =>
-  `/stores/${slugifyGeo(s.state)}/${slugifyGeo(s.city)}/${buildStoreSlug(s.name, s.id)}`;
-
 function describe(store: SeoStore): string {
   const kind =
     store.role === "manufacturer"
@@ -49,12 +47,13 @@ function describe(store: SeoStore): string {
 
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
   const { state, city, store: storeSlug } = await params;
-  const store = await findStore(state, city, storeSlug);
+  const resolved = await resolveStore(state, city, storeSlug);
+  const store = resolved?.store;
   if (!store) return { title: "Store Not Found" };
 
   const title = `${store.name} — Agricultural Shop in ${store.city}, ${store.state}`;
   const description = describe(store);
-  const canonical = `${SITE_URL}${storeUrl(store)}`;
+  const canonical = `${SITE_URL}${storeUrlPath(store)}`;
 
   return {
     title,
@@ -78,8 +77,18 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
 
 export default async function StorePage({ params }: PageProps) {
   const { state, city, store: storeSlug } = await params;
-  const store = await findStore(state, city, storeSlug);
-  if (!store) notFound();
+  const resolved = await resolveStore(state, city, storeSlug);
+  if (!resolved) notFound();
+
+  // The URL carries the shop's state, city and name, all of which change. When
+  // any of them has, send the visitor — and the crawler — to where the shop
+  // lives now, so an indexed URL survives a data correction instead of dying as
+  // a 404 or lingering as a duplicate of the new one. Resolving the canonical
+  // path yields the same store and therefore the same path, so this cannot loop.
+  if (resolved.canonicalPath !== `/stores/${state}/${city}/${storeSlug}`) {
+    permanentRedirect(resolved.canonicalPath);
+  }
+  const store = resolved.store;
 
   const [products, siblings] = await Promise.all([
     getStoreProducts(store),
@@ -87,7 +96,7 @@ export default async function StorePage({ params }: PageProps) {
   ]);
   const others = siblings.filter((s) => s.id !== store.id).slice(0, 8);
 
-  const canonical = `${SITE_URL}${storeUrl(store)}`;
+  const canonical = `${SITE_URL}${storeUrlPath(store)}`;
   const addressLine = [store.line1, store.city, store.state, store.pincode]
     .filter(Boolean)
     .join(", ");
@@ -290,7 +299,7 @@ export default async function StorePage({ params }: PageProps) {
               {others.map((s) => (
                 <li key={s.id}>
                   <Link
-                    href={storeUrl(s)}
+                    href={storeUrlPath(s)}
                     className="block rounded-2xl border border-surface-container bg-white p-4 transition-colors hover:border-primary"
                   >
                     <p className="text-sm font-black text-on-surface">{s.name}</p>

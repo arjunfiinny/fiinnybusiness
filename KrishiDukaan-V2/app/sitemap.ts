@@ -16,8 +16,7 @@ import { getReelsForSitemap, buildReelSlug } from "./lib/seo/reels-server";
 import {
   getAllStores,
   getStoreGeography,
-  buildStoreSlug,
-  slugifyGeo,
+  storeUrlPath,
 } from "./lib/seo/stores-server";
 import { HELP_SECTIONS } from "./views/helpContent";
 
@@ -162,9 +161,10 @@ async function storeEntries(now: Date): Promise<MetadataRoute.Sitemap> {
     );
 
     const storeUrls = stores.map((s) => ({
-      url: `${SITE_URL}/stores/${slugifyGeo(s.state)}/${slugifyGeo(
-        s.city,
-      )}/${buildStoreSlug(s.name, s.id)}`,
+      // storeUrlPath, not a second copy of the formula: what is submitted here
+      // has to be byte-identical to the canonical tag the page emits, or the
+      // sitemap advertises URLs that disown themselves.
+      url: `${SITE_URL}${storeUrlPath(s)}`,
       lastModified: now,
       changeFrequency: "weekly" as const,
       priority: 0.7,
