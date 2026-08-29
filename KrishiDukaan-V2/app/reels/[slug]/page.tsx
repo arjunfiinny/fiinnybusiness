@@ -79,7 +79,15 @@ export default async function ReelPage({ params }: PageProps) {
   const others = (await getAllReels(13)).filter((r) => r.id !== reel.id).slice(0, 12);
 
   // ── JSON-LD: VideoObject — Google's video rich-result format.
-  const videoLd: Record<string, unknown> = {
+  //
+  // Only when the reel has a poster. thumbnailUrl is REQUIRED, and shipping a
+  // VideoObject without one is not a partial win: Search Console rejects the
+  // video outright with "No thumbnail URL provided", which is worse than
+  // staying silent because it reports as a broken video rather than no video.
+  // Reels predating the transcode function have no poster and will get one
+  // from the backfill; until then this page renders normally, keeps its
+  // breadcrumbs, and simply makes no video claim.
+  const videoLd: Record<string, unknown> | null = !reel.thumbnailUrl ? null : {
     "@context": "https://schema.org",
     "@type": "VideoObject",
     name: reel.title || `${reel.shopName} on AgriReels`,
@@ -87,7 +95,7 @@ export default async function ReelPage({ params }: PageProps) {
       reel.caption || reel.title || `Farming video by ${reel.shopName} on KrishiDukan.`,
     contentUrl: reel.videoUrl,
     url: canonical,
-    ...(reel.thumbnailUrl ? { thumbnailUrl: reel.thumbnailUrl } : {}),
+    thumbnailUrl: reel.thumbnailUrl,
     ...(reel.createdAtMs
       ? { uploadDate: new Date(reel.createdAtMs).toISOString() }
       : {}),
@@ -123,10 +131,12 @@ export default async function ReelPage({ params }: PageProps) {
 
   return (
     <main className="min-h-screen bg-surface">
-      <script
-        type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(videoLd) }}
-      />
+      {videoLd ? (
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{ __html: JSON.stringify(videoLd) }}
+        />
+      ) : null}
       <script
         type="application/ld+json"
         dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbLd) }}

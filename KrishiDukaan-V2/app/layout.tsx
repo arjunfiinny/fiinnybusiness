@@ -55,6 +55,20 @@ export const metadata: Metadata = {
   authors: [{ name: "KrishiDukan" }],
   creator: "KrishiDukan",
   publisher: "KrishiDukan",
+  /**
+   * Root canonical, INHERITED by every page that does not set its own.
+   *
+   * It is load-bearing rather than boilerplate: the homepage is a client
+   * component that cannot export metadata of its own, and the SPA is reachable
+   * at /?view=market, /?view=hub and friends. This tag is what collapses all of
+   * those query-string variants onto "/" instead of letting each one be crawled
+   * as a separate page. Removing it would be actively harmful.
+   *
+   * The cost is that a new public page which forgets `alternates` silently
+   * claims the homepage as its canonical and can never be indexed — which is
+   * exactly what happened to /blog and /privacy. EVERY new public, indexable
+   * route must set its own alternates.canonical.
+   */
   alternates: {
     canonical: "/",
   },
