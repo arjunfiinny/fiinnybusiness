@@ -82,6 +82,53 @@ function sellerKeyOf(order: FirebaseFirestore.DocumentData): string | null {
   return id || null;
 }
 
+/**
+ * Current state of the payouts kill-switch.
+ *
+ * Exposed through this route because settings/* is `allow write: if false` for
+ * clients (firestore.rules) — the flag can only be read and set server-side,
+ * so the admin UI has no way to manage it directly.
+ */
+export async function GET(req: NextRequest) {
+  const auth = await requireAdmin(req);
+  if (!auth.ok) return auth.response;
+  try {
+    const snap = await getAdminDb().collection("settings").doc("payouts").get();
+    return NextResponse.json({
+      transfersEnabled: snap.data()?.transfersEnabled === true,
+      holdDays: PAYOUT_HOLD_DAYS,
+      updatedAt: snap.data()?.updatedAt ?? null,
+      updatedBy: snap.data()?.updatedBy ?? null,
+    });
+  } catch {
+    return NextResponse.json({ error: "Could not read payout settings" }, { status: 500 });
+  }
+}
+
+/** Turns live transfers on or off. Recorded with who changed it and when,
+ *  because enabling this is what lets real money leave the account. */
+export async function PATCH(req: NextRequest) {
+  const auth = await requireAdmin(req);
+  if (!auth.ok) return auth.response;
+  try {
+    const { transfersEnabled } = (await req.json()) as { transfersEnabled?: boolean };
+    if (typeof transfersEnabled !== "boolean") {
+      return NextResponse.json({ error: "transfersEnabled must be true or false" }, { status: 400 });
+    }
+    await getAdminDb().collection("settings").doc("payouts").set(
+      {
+        transfersEnabled,
+        updatedAt: new Date().toISOString(),
+        updatedBy: auth.uid,
+      },
+      { merge: true },
+    );
+    return NextResponse.json({ ok: true, transfersEnabled });
+  } catch {
+    return NextResponse.json({ error: "Could not update payout settings" }, { status: 500 });
+  }
+}
+
 export async function POST(req: NextRequest) {
   const auth = await requireAdmin(req);
   if (!auth.ok) return auth.response;

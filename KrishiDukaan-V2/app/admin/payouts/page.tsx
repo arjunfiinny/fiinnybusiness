@@ -487,6 +487,59 @@ function PayoutRunPanel() {
   const [result, setResult] = useState<RunResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirm, setConfirm] = useState("");
+  // The kill-switch lives in settings/payouts, which clients cannot write
+  // (firestore.rules: settings is write:false), so it is read and set through
+  // the same admin route.
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [togglingFlag, setTogglingFlag] = useState(false);
+
+  const authHeaders = useCallback(async () => {
+    const token = await getAuth().currentUser?.getIdToken();
+    return {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token ?? ""}`,
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch("/api/admin/payout-transfer", {
+          headers: await authHeaders(),
+        });
+        const json = await res.json();
+        if (!cancelled && res.ok) setEnabled(json.transfersEnabled === true);
+      } catch {
+        /* leave unknown; the toggle shows a neutral state */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [authHeaders]);
+
+  const toggleFlag = async (next: boolean) => {
+    setTogglingFlag(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/admin/payout-transfer", {
+        method: "PATCH",
+        headers: await authHeaders(),
+        body: JSON.stringify({ transfersEnabled: next }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        setError(json.error ?? "Could not update the setting.");
+        return;
+      }
+      setEnabled(next);
+    } catch {
+      setError("Could not reach the server.");
+    } finally {
+      setTogglingFlag(false);
+    }
+  };
 
   const run = async (dryRun: boolean) => {
     setBusy(true);
@@ -520,6 +573,35 @@ function PayoutRunPanel() {
 
   return (
     <section className="mb-5 rounded-2xl border border-outline-variant/40 bg-surface-container-lowest p-4">
+      {/* Kill-switch. Off means a live run is refused server-side, so this is
+          the real gate, not just a UI affordance. */}
+      <div className="mb-3 flex flex-wrap items-center gap-3 rounded-xl border border-outline-variant/40 bg-surface-container-low/60 px-3 py-2">
+        <span className="text-sm font-semibold text-on-surface">Live transfers</span>
+        <span
+          className={`rounded-md px-2 py-0.5 text-xs font-bold ${
+            enabled === null
+              ? "bg-surface-container text-on-surface-variant"
+              : enabled
+                ? "bg-green-50 text-green-700"
+                : "bg-amber-50 text-amber-800"
+          }`}
+        >
+          {enabled === null ? "Checking…" : enabled ? "Enabled" : "Disabled"}
+        </span>
+        <span className="text-xs text-on-surface-variant">
+          {enabled
+            ? "Payout runs can move real money."
+            : "Preview works; a live run will be refused."}
+        </span>
+        <button
+          disabled={togglingFlag || enabled === null}
+          onClick={() => void toggleFlag(!enabled)}
+          className="ml-auto rounded-lg border border-outline-variant/50 px-3 py-1.5 text-xs font-semibold hover:bg-surface-container disabled:opacity-60"
+        >
+          {togglingFlag ? "Saving…" : enabled ? "Disable" : "Enable"}
+        </button>
+      </div>
+
       <div className="flex flex-wrap items-center gap-3">
         <Banknote className="h-5 w-5 text-primary" />
         <div className="min-w-0 flex-1">
