@@ -74,6 +74,21 @@ export const LEGAL_EFFECTIVE_DATE = "26 August 2026";
  */
 export const TERMS_VERSION = "2026-08-26";
 
+/**
+ * Version of the Online Delivery commercial terms a seller accepts before
+ * switching Online Delivery on (components/shared/online-delivery-terms-dialog).
+ *
+ * Separate from TERMS_VERSION on purpose: these terms cover the listing fee and
+ * the per-transaction split, and they will change on a different clock from the
+ * site-wide Terms. Recording one version string for both would make it
+ * impossible to answer "which fee schedule did this seller actually agree to".
+ *
+ * BUMP THIS whenever the substance of that dialog changes. Sellers who accepted
+ * an older version keep that version on their account, which is the record of
+ * what they were shown.
+ */
+export const DELIVERY_TERMS_VERSION = "2026-08-26";
+
 /** "1%" / "1.5%" — trims a trailing ".0" so whole rates read cleanly. */
 export function pct(value: number): string {
   return `${Number(value.toFixed(2))}%`;

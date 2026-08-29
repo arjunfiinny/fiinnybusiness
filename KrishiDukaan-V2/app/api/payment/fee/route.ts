@@ -7,6 +7,12 @@
  * settings/route, the same document app/lib/route-split.ts splits the payment
  * with, so the figure shown to the seller is the figure actually deducted.
  *
+ * "Actually deducted" is meant literally: a fee is reported only for an order
+ * Razorpay really split. Seller onboarding onto Route is lazy, so most orders
+ * still settle whole to the platform with nothing taken from the seller, and
+ * quoting the configured rate on those would show a deduction that never
+ * happened.
+ *
  * Showing the gateway charge honestly needs Razorpay's ACTUAL fee, which is not
  * in the payment-success payload the client sees — it only appears on the
  * payment entity after capture. So it is fetched here with the key secret and
@@ -54,6 +60,28 @@ async function platformFeeFor(order: Record<string, any>): Promise<number | null
   } catch (e) {
     console.error("[api/payment/fee] platform fee unavailable:", e);
     return null;
+  }
+}
+
+/**
+ * Whether this payment was actually split with Razorpay Route.
+ *
+ * Razorpay is the only honest source. The order document does not record the
+ * split — create-cart-order returns the summary to the client but never stores
+ * it — and re-deriving it from the seller's razorpayAccountId would be wrong
+ * for exactly the orders that matter: a seller onboarded last week would have
+ * every earlier order retro-labelled with a fee nobody took.
+ *
+ * A lookup failure returns false. Understating a deduction invites a question;
+ * showing one that never happened looks like money quietly removed.
+ */
+async function orderWasRouted(paymentId: string): Promise<boolean> {
+  try {
+    const res = await razorpay.payments.fetchTransfer(paymentId);
+    return (res?.items?.length ?? 0) > 0;
+  } catch (e) {
+    console.error("[api/payment/fee] transfer lookup failed:", e);
+    return false;
   }
 }
 
@@ -105,23 +133,31 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Not your order" }, { status: 403 });
     }
 
-    const platformFee = await platformFeeFor(order);
-
-    // Already cached — Razorpay's fee never changes once captured.
-    if (typeof order.payment?.gatewayFee === "number") {
+    // Both figures are cached together, so an order cached before the platform
+    // fee was reported this way falls through and is refreshed rather than
+    // replaying the older number.
+    if (
+      typeof order.payment?.gatewayFee === "number" &&
+      typeof order.payment?.platformFee === "number"
+    ) {
       return NextResponse.json({
         gatewayFee: order.payment.gatewayFee,
         gatewayTax: order.payment.gatewayTax ?? 0,
-        platformFee,
+        platformFee: order.payment.platformFee,
         cached: true,
       });
     }
 
     const paymentId = String(order.payment?.razorpayPaymentId ?? "").trim();
     if (!paymentId) {
-      // Legacy or unpaid order — no gateway charge to report.
-      return NextResponse.json({ gatewayFee: null, gatewayTax: null, platformFee });
+      // Legacy, cash-on-delivery or unpaid: nothing was captured and nothing
+      // was split, so the platform fee on it is genuinely zero.
+      return NextResponse.json({ gatewayFee: null, gatewayTax: null, platformFee: 0 });
     }
+
+    const platformFee = (await orderWasRouted(paymentId))
+      ? await platformFeeFor(order)
+      : 0;
 
     const payment = await razorpay.payments.fetch(paymentId);
 
@@ -137,6 +173,9 @@ export async function POST(req: NextRequest) {
     await orderRef.update({
       "payment.gatewayFee": gatewayFee,
       "payment.gatewayTax": gatewayTax,
+      // null means the rate was unreadable, not that no fee applies. Caching it
+      // would freeze "unavailable" onto the order permanently.
+      ...(typeof platformFee === "number" ? { "payment.platformFee": platformFee } : {}),
       "payment.feeFetchedAt": new Date().toISOString(),
     });
 
