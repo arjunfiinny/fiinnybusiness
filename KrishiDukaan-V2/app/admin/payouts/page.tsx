@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { collection, getDocs } from "firebase/firestore";
 import { getAuth } from "firebase/auth";
-import { CheckCircle2, ExternalLink, Loader2, RefreshCw, ShieldAlert } from "lucide-react";
+import { Banknote, CheckCircle2, ExternalLink, Loader2, RefreshCw, ShieldAlert } from "lucide-react";
 import { db } from "../../firebase";
 
 /**
@@ -134,6 +134,8 @@ export default function AdminPayoutsPage() {
           <RefreshCw className="h-3.5 w-3.5" /> Refresh
         </button>
       </div>
+
+      <PayoutRunPanel />
 
       {loading ? (
         <div className="flex items-center gap-2 p-8 text-sm text-on-surface-variant">
@@ -444,5 +446,191 @@ function Field({
         {value || "—"}
       </p>
     </div>
+  );
+}
+
+
+type RunResult = {
+  seller: string;
+  orders: string[];
+  amount: number;
+  status: "transferred" | "skipped" | "failed" | "preview";
+  reason?: string;
+  transferId?: string;
+};
+
+type RunResponse = {
+  dryRun: boolean;
+  holdDays: number;
+  totals: {
+    transferred: number;
+    transferredCount: number;
+    payable: number;
+    payableCount: number;
+    failedCount: number;
+    skippedCount: number;
+  };
+  results: RunResult[];
+  error?: string;
+};
+
+/**
+ * Runs a payout batch.
+ *
+ * Preview is always available; the live run is deliberately behind a typed
+ * confirmation, because it moves real money to real bank accounts and cannot
+ * be undone from this screen — reversing a Route transfer is a separate
+ * operation on Razorpay's side.
+ */
+function PayoutRunPanel() {
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<RunResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState("");
+
+  const run = async (dryRun: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const token = await getAuth().currentUser?.getIdToken();
+      const res = await fetch("/api/admin/payout-transfer", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token ?? ""}`,
+        },
+        body: JSON.stringify({ dryRun }),
+      });
+      const json = (await res.json()) as RunResponse;
+      if (!res.ok) {
+        setError(json.error ?? "Payout run failed.");
+        setResult(null);
+        return;
+      }
+      setResult(json);
+      if (!dryRun) setConfirm("");
+    } catch {
+      setError("Could not reach the server.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const inr = (n: number) => `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
+
+  return (
+    <section className="mb-5 rounded-2xl border border-outline-variant/40 bg-surface-container-lowest p-4">
+      <div className="flex flex-wrap items-center gap-3">
+        <Banknote className="h-5 w-5 text-primary" />
+        <div className="min-w-0 flex-1">
+          <h2 className="text-sm font-bold text-on-surface">Release due payouts</h2>
+          <p className="text-xs text-on-surface-variant">
+            Pays verified sellers for orders delivered more than{" "}
+            {result?.holdDays ?? 7} days ago. Preview first — a live run cannot
+            be undone here.
+          </p>
+        </div>
+        <button
+          onClick={() => void run(true)}
+          disabled={busy}
+          className="rounded-lg border border-outline-variant/50 px-3 py-1.5 text-sm font-semibold hover:bg-surface-container disabled:opacity-60"
+        >
+          {busy ? "Working…" : "Preview"}
+        </button>
+      </div>
+
+      {error && (
+        <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>
+      )}
+
+      {result && (
+        <div className="mt-4">
+          <div className="flex flex-wrap gap-4 text-sm">
+            {result.dryRun ? (
+              <span className="font-semibold text-on-surface">
+                {result.totals.payableCount} seller
+                {result.totals.payableCount === 1 ? "" : "s"} payable ·{" "}
+                {inr(result.totals.payable)}
+              </span>
+            ) : (
+              <span className="font-semibold text-green-700">
+                Paid {result.totals.transferredCount} seller
+                {result.totals.transferredCount === 1 ? "" : "s"} ·{" "}
+                {inr(result.totals.transferred)}
+              </span>
+            )}
+            {result.totals.skippedCount > 0 && (
+              <span className="text-on-surface-variant">
+                {result.totals.skippedCount} skipped
+              </span>
+            )}
+            {result.totals.failedCount > 0 && (
+              <span className="font-semibold text-red-700">
+                {result.totals.failedCount} failed
+              </span>
+            )}
+          </div>
+
+          {result.results.length > 0 && (
+            <ul className="mt-3 flex flex-col gap-1.5">
+              {result.results.map((r) => (
+                <li
+                  key={r.seller}
+                  className="flex flex-wrap items-center gap-2 rounded-lg border border-outline-variant/30 px-3 py-2 text-xs"
+                >
+                  <span className="font-mono text-on-surface-variant">{r.seller}</span>
+                  <span className="font-semibold text-on-surface">{inr(r.amount)}</span>
+                  <span className="text-on-surface-variant">
+                    {r.orders.length} order{r.orders.length === 1 ? "" : "s"}
+                  </span>
+                  <span
+                    className={
+                      r.status === "failed"
+                        ? "font-semibold text-red-700"
+                        : r.status === "transferred"
+                          ? "font-semibold text-green-700"
+                          : "text-on-surface-variant"
+                    }
+                  >
+                    {r.status}
+                    {r.reason ? ` · ${r.reason}` : ""}
+                    {r.transferId ? ` · ${r.transferId}` : ""}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {result.dryRun && result.totals.payableCount > 0 && (
+            <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3">
+              <p className="text-sm font-semibold text-red-800">
+                Transfer {inr(result.totals.payable)} to{" "}
+                {result.totals.payableCount} seller
+                {result.totals.payableCount === 1 ? "" : "s"}?
+              </p>
+              <p className="mt-0.5 text-xs text-red-700">
+                This moves real money and cannot be undone from this screen.
+                Type <strong>TRANSFER</strong> to confirm.
+              </p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <input
+                  value={confirm}
+                  onChange={(e) => setConfirm(e.target.value.toUpperCase())}
+                  placeholder="TRANSFER"
+                  className="rounded-lg border border-red-300 px-3 py-1.5 text-sm outline-none"
+                />
+                <button
+                  disabled={busy || confirm !== "TRANSFER"}
+                  onClick={() => void run(false)}
+                  className="rounded-lg bg-red-600 px-4 py-1.5 text-sm font-bold text-white disabled:opacity-50"
+                >
+                  Release payouts
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </section>
   );
 }
