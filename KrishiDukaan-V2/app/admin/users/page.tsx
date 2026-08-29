@@ -419,11 +419,14 @@ export default function AdminUsersPage() {
       if (!password || password.length < 6) { setCreateError("Password must be at least 6 characters."); return; }
       setCreating(true); setCreateError(null); setCreateSuccess(null);
       try {
-        const callerUid = auth.currentUser?.uid;
+        const idToken = await auth.currentUser?.getIdToken();
         const res = await fetch("/api/admin/create-user", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name, email, password, callerUid, role }),
+          headers: {
+            "Content-Type": "application/json",
+            ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+          },
+          body: JSON.stringify({ name, email, password, role }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || `Failed to create ${label}.`);
