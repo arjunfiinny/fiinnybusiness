@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { useSearchParams, useLocation, Link } from 'react-router-dom';
 import { useHashTab } from '../hooks/useHashTab';
+import { useFeaturePermissions } from '../hooks/useFeaturePermissions';
 import DigitalKhataPage from './DigitalKhataPage';
 import CustomersPage from './CustomersPage';
 import OrderHistoryPage from './OrderHistoryPage';
@@ -196,8 +197,27 @@ const POS_MODULE_TABS: { id: PosModuleTab; label: string }[] = [
 ];
 const VALID_POS_TABS: readonly PosModuleTab[] = ['billing', 'khata', 'customers', 'order-history'];
 
+// Feature-permission id per sub-tab (Super Admin → Feature Permissions).
+const TAB_PERM: Record<PosModuleTab, string> = {
+    billing:         'posBilling.billing.view',
+    khata:           'posBilling.khata.view',
+    customers:       'posBilling.customers.view',
+    'order-history': 'posBilling.orderHistory.view',
+};
+
 export default function POSPage() {
     const [posModuleTab, setPosModuleTab] = useHashTab<PosModuleTab>(VALID_POS_TABS, 'billing', 'fiinny-tab-pos');
+    const can = useFeaturePermissions();
+
+    // Only show sub-tabs the current role is permitted to view.
+    const visiblePosTabs = POS_MODULE_TABS.filter(tab => can(TAB_PERM[tab.id]));
+
+    // If the active tab is not permitted, fall back to the first visible one so
+    // denied content is never shown on load.
+    const activeAllowed = visiblePosTabs.some(t => t.id === posModuleTab);
+    useEffect(() => {
+        if (!activeAllowed && visiblePosTabs.length > 0) setPosModuleTab(visiblePosTabs[0].id);
+    }, [activeAllowed, visiblePosTabs, setPosModuleTab]);
     const { t, i18n } = useTranslation();
     const [searchParams] = useSearchParams();
     const location = useLocation();
@@ -337,6 +357,8 @@ export default function POSPage() {
     const [showVPayDialog, setShowVPayDialog] = useState(false);
     const [transportCharges, setTransportCharges] = useState(0);
     const [laborCharges, setLaborCharges] = useState(0);
+    // Manual bill-level discount (₹) — distinct from the auto loyalty discount.
+    const [manualDiscount, setManualDiscount] = useState(0);
     const [creditPaidNow, setCreditPaidNow] = useState(0);
     const [khataNote, setKhataNote] = useState('');
 
@@ -565,6 +587,7 @@ export default function POSPage() {
             if (draft.billLang) setBillLang(draft.billLang);
             if (typeof draft.transportCharges === 'number') setTransportCharges(draft.transportCharges);
             if (typeof draft.laborCharges === 'number') setLaborCharges(draft.laborCharges);
+            if (typeof draft.manualDiscount === 'number') setManualDiscount(draft.manualDiscount);
             if (typeof draft.creditPaidNow === 'number') setCreditPaidNow(draft.creditPaidNow);
             if (typeof draft.khataNote === 'string') setKhataNote(draft.khataNote);
             if (typeof draft.redeemPoints === 'number') setRedeemPoints(draft.redeemPoints);
@@ -580,14 +603,14 @@ export default function POSPage() {
             try {
                 localStorage.setItem(`pos_draft_${tenantId}`, JSON.stringify({
                     billTabs, activeTabId, modeOfPayment, billFormat, billLang,
-                    transportCharges, laborCharges, creditPaidNow, khataNote, redeemPoints, rowMeta,
+                    transportCharges, laborCharges, manualDiscount, creditPaidNow, khataNote, redeemPoints, rowMeta,
                     invoiceCategories,
                 }));
             } catch { /* storage quota exceeded — ignore */ }
         }, 500);
         return () => clearTimeout(timer);
     }, [tenantId, billTabs, activeTabId, modeOfPayment, billFormat, billLang,
-        transportCharges, laborCharges, creditPaidNow, khataNote, redeemPoints, rowMeta,
+        transportCharges, laborCharges, manualDiscount, creditPaidNow, khataNote, redeemPoints, rowMeta,
         invoiceCategories]);
 
     // Reset dropdown highlight when the active search row changes.
@@ -644,7 +667,7 @@ export default function POSPage() {
     // the discount must not apply — no partial/stale redemption should reach checkout.
     const effectiveRedeemPoints = loyaltyIsActive ? redeemPoints : 0;
     const loyaltyDiscount = effectiveRedeemPoints * ((loyaltyConfig?.pointsValue) || 0.1);
-    const grandTotal = Math.max(0, cartSubtotal + transportCharges + laborCharges - loyaltyDiscount);
+    const grandTotal = Math.max(0, cartSubtotal + transportCharges + laborCharges - loyaltyDiscount - manualDiscount);
 
     // Partial credit: how much of this credit bill the customer pays now vs. owes.
     const isCreditBill = modeOfPayment === 'Credit' || modeOfPayment === 'Khata';
@@ -662,7 +685,12 @@ export default function POSPage() {
     }, 0);
     const totalSgst = totalCgst;
     const totalTax = totalCgst + totalSgst;
-    const invNetAmount = Math.round(computedTaxable + totalTax + transportCharges + laborCharges - loyaltyDiscount);
+    // NET AMOUNT = Bill Total + Transport + Labor − Discount (loyalty + manual).
+    // This is exactly grandTotal — the same figure used for payment and saving.
+    // Discount is applied here, BEFORE Net Amount; it is not subtracted again
+    // when Previous Outstanding is added to reach Total Payable. No rounding —
+    // the POS bill has no Round Off adjustment.
+    const invNetAmount = grandTotal;
     const invFmt = (n: number) => (Number.isFinite(n) ? n : 0).toFixed(2);
 
     // Tracks which phone number (if any) the currently-displayed name/address/pin
@@ -825,7 +853,9 @@ export default function POSPage() {
                 subtotal: cartSubtotal,
                 transportCharges,
                 laborCharges,
-                discount: loyaltyDiscount,
+                manualDiscount,
+                // Total discount shown on the (re)printed bill = loyalty + manual.
+                discount: loyaltyDiscount + manualDiscount,
                 grandTotal,
                 paymentStatus: paymentMethod === 'Khata' && effectiveCreditAmount > 0
                     ? (effectiveCreditPaidNow > 0 ? 'Partial' : 'Pending')
@@ -1111,6 +1141,7 @@ export default function POSPage() {
                 autoFilledBatchesRef.current.clear();
                 setTransportCharges(0);
                 setLaborCharges(0);
+                setManualDiscount(0);
                 setCreditPaidNow(0);
                 setKhataNote('');
                 const wasEditing = !!editingOrder;
@@ -1212,6 +1243,7 @@ export default function POSPage() {
         autoFilledBatchesRef.current.clear();
         setTransportCharges(0);
         setLaborCharges(0);
+        setManualDiscount(0);
         setCreditPaidNow(0);
         setKhataNote('');
         setEditingOrder(null);
@@ -1227,16 +1259,21 @@ export default function POSPage() {
 
     return (
         <>
-        {/* ── Module Tab Bar ── */}
+        {/* ── Module Tab Bar (matches the Worklist sub-navbar: breaks out of the
+            2rem page padding to sit flush against the main navbar) ── */}
         <div className="no-print" style={{
+            position: 'sticky', top: 0, zIndex: 50,
+            background: 'var(--surface-base)',
+            backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)',
             display: 'flex', gap: '0.25rem',
             borderBottom: '2px solid var(--surface-border)',
-            background: 'var(--surface-base)',
             overflowX: 'auto', scrollbarWidth: 'none',
-            paddingLeft: '1.5rem', paddingRight: '1.5rem',
-            paddingTop: '0.5rem',
+            marginLeft: '-2rem', marginRight: '-2rem',
+            paddingLeft: '2rem', paddingRight: '2rem',
+            marginTop: '-2rem', paddingTop: '0.75rem',
+            marginBottom: '1.75rem',
         }}>
-            {POS_MODULE_TABS.map(tab => {
+            {visiblePosTabs.map(tab => {
                 const isActive = posModuleTab === tab.id;
                 return (
                     <button
@@ -1244,15 +1281,15 @@ export default function POSPage() {
                         onClick={() => setPosModuleTab(tab.id)}
                         style={{
                             display: 'flex', alignItems: 'center', gap: '0.5rem',
-                            padding: '0.6rem 1.1rem',
+                            padding: '0.65rem 1.25rem',
                             background: 'transparent', border: 'none',
                             borderBottom: isActive ? '2px solid var(--primary-light)' : '2px solid transparent',
                             marginBottom: '-2px',
                             color: isActive ? 'var(--primary-light)' : 'var(--text-tertiary)',
                             fontWeight: isActive ? 700 : 400,
-                            fontSize: '0.88rem', cursor: 'pointer', fontFamily: 'inherit',
-                            whiteSpace: 'nowrap',
-                            transition: 'color 0.15s ease, border-color 0.15s ease',
+                            fontSize: '0.9rem', cursor: 'pointer', fontFamily: 'inherit',
+                            whiteSpace: 'nowrap', borderRadius: '0',
+                            transition: 'all 0.15s ease',
                         }}
                         onMouseEnter={e => { if (!isActive) (e.currentTarget as HTMLButtonElement).style.color = 'var(--text-primary)'; }}
                         onMouseLeave={e => { if (!isActive) (e.currentTarget as HTMLButtonElement).style.color = 'var(--text-tertiary)'; }}
@@ -1264,9 +1301,9 @@ export default function POSPage() {
         </div>
 
         {/* ── Non-billing sub-pages ── */}
-        {posModuleTab === 'khata'         && <DigitalKhataPage />}
-        {posModuleTab === 'customers'     && <CustomersPage />}
-        {posModuleTab === 'order-history' && <OrderHistoryPage />}
+        {activeAllowed && posModuleTab === 'khata'         && <DigitalKhataPage fullWidth />}
+        {activeAllowed && posModuleTab === 'customers'     && <CustomersPage fullWidth />}
+        {activeAllowed && posModuleTab === 'order-history' && <OrderHistoryPage fullWidth />}
 
         {/* Bill print portal — rendered directly on <body> so body.pos-printing CSS
             can hide everything else (sidebar, nav, app wrapper) without any className
@@ -1291,6 +1328,8 @@ export default function POSPage() {
                         customer={{ name: reprintOrder.retailerName, phone: reprintOrder.phoneNumber, address: reprintOrder.address, pin: reprintOrder.pin, taluka: reprintOrder.taluka, district: reprintOrder.district }}
                         branding={branding}
                         billNumber={reprintOrder.orderNumber}
+                        transportCharges={reprintOrder.transportCharges || 0}
+                        laborCharges={reprintOrder.laborCharges || 0}
                         discount={reprintOrder.discount || 0}
                         grandTotal={reprintOrder.grandTotal || 0}
                         billFormat={billFormat}
@@ -1306,7 +1345,7 @@ export default function POSPage() {
                         billNumber={nextBillNumber}
                         transportCharges={transportCharges}
                         laborCharges={laborCharges}
-                        discount={loyaltyDiscount}
+                        discount={loyaltyDiscount + manualDiscount}
                         grandTotal={grandTotal}
                         creditPaidNow={effectiveCreditPaidNow}
                         creditAmount={effectiveCreditAmount}
@@ -1323,7 +1362,7 @@ export default function POSPage() {
         )}
 
         {/* ── POS Billing (existing content) ── */}
-        {posModuleTab === 'billing' && <div style={{ background: 'var(--bg-color)', minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
+        {activeAllowed && posModuleTab === 'billing' && <div style={{ background: 'var(--bg-color)', minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
 
             {/* Header */}
             <header className="no-print" style={{ background: 'var(--surface-base)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)', borderBottom: '1px solid var(--surface-border)', padding: '0.75rem 1.5rem', display: 'flex', alignItems: 'center', gap: '1.25rem', flexWrap: 'wrap' }}>
@@ -1766,10 +1805,8 @@ export default function POSPage() {
                                     {/* Col 2 – Net Amount + Words + Categories */}
                                     <div style={{ borderRight: '1px solid #aaa', display: 'flex', flexDirection: 'column' }}>
                                         <div style={{ padding: '5px 8px', flex: 1, fontSize: '0.78rem', display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                                            {loyaltyDiscount > 0 && (
-                                                <div style={{ display: 'flex', justifyContent: 'space-between', color: '#2E7D32' }}>
-                                                    <span>{L('discount')} ({effectiveRedeemPoints} pts)</span><span>-{invFmt(loyaltyDiscount)}</span>
-                                                </div>
+                                            {(transportCharges > 0 || laborCharges > 0 || loyaltyDiscount > 0 || manualDiscount > 0) && (
+                                                <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>{L('bill_total')}</span><span>₹{cartSubtotal.toLocaleString('en-IN')}</span></div>
                                             )}
                                             {transportCharges > 0 && (
                                                 <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>{L('transport_charges')}</span><span>+{invFmt(transportCharges)}</span></div>
@@ -1777,10 +1814,16 @@ export default function POSPage() {
                                             {laborCharges > 0 && (
                                                 <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>{L('labor_charges')}</span><span>+{invFmt(laborCharges)}</span></div>
                                             )}
-                                            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                                                <span>Round Off</span>
-                                                <span>{invFmt(invNetAmount - (computedTaxable + totalTax + transportCharges - loyaltyDiscount))}</span>
-                                            </div>
+                                            {loyaltyDiscount > 0 && (
+                                                <div style={{ display: 'flex', justifyContent: 'space-between', color: '#2E7D32' }}>
+                                                    <span>{L('discount')} ({effectiveRedeemPoints} pts)</span><span>-₹{invFmt(loyaltyDiscount)}</span>
+                                                </div>
+                                            )}
+                                            {manualDiscount > 0 && (
+                                                <div style={{ display: 'flex', justifyContent: 'space-between', color: '#2E7D32' }}>
+                                                    <span>{L('discount')}</span><span>-₹{invFmt(manualDiscount)}</span>
+                                                </div>
+                                            )}
                                             <div style={{ borderTop: '2px solid #333', paddingTop: '3px', display: 'flex', justifyContent: 'space-between', fontWeight: 900, fontSize: '0.95rem' }}>
                                                 <span>NET AMOUNT</span><span>₹{invNetAmount.toLocaleString('en-IN')}</span>
                                             </div>
@@ -1797,13 +1840,13 @@ export default function POSPage() {
                                                     <span>{L('previous_outstanding')} (Dr)</span><span>₹{customerOutstanding.toLocaleString('en-IN')}</span>
                                                 </div>
                                                 <div style={{ borderTop: '1.5px solid #333', paddingTop: '2px', display: 'flex', justifyContent: 'space-between', fontWeight: 900 }}>
-                                                    <span>{L('total_payable')}</span><span>₹{(invNetAmount + customerOutstanding).toLocaleString('en-IN')}</span>
+                                                    <span>{L('total_payable')}</span><span>₹{(grandTotal + customerOutstanding).toLocaleString('en-IN')}</span>
                                                 </div>
                                             </>)}
                                         </div>
                                         <div style={{ borderTop: '1px solid #ddd', padding: '3px 8px', fontSize: '0.66rem' }}>
                                             <strong>Amt in Words:</strong>{' '}
-                                            <span style={{ fontStyle: 'italic', fontWeight: 600 }}>INR {numberToWords(invNetAmount)}</span>
+                                            <span style={{ fontStyle: 'italic', fontWeight: 600 }}>INR {numberToWords(grandTotal)}</span>
                                         </div>
                                     </div>
 
@@ -2082,15 +2125,20 @@ export default function POSPage() {
                                     <div style={{ padding: '8px', display: 'flex', flexDirection: 'column', gap: '3px', fontSize: '0.82rem' }}>
                                         <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>{L('output_cgst')}@2.5%</span><span>{invFmt(totalCgst)}</span></div>
                                         <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>{L('output_sgst')}@2.5%</span><span>{invFmt(totalSgst)}</span></div>
-                                        <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>{L('round_off')}</span><span>{invFmt(invNetAmount - (computedTaxable + totalTax + transportCharges - loyaltyDiscount))}</span></div>
-                                        {loyaltyDiscount > 0 && (
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', color: '#2E7D32' }}><span>{L('discount')} ({effectiveRedeemPoints} pts)</span><span>-{invFmt(loyaltyDiscount)}</span></div>
+                                        {(transportCharges > 0 || laborCharges > 0 || loyaltyDiscount > 0 || manualDiscount > 0) && (
+                                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>{L('bill_total')}</span><span>₹{cartSubtotal.toLocaleString('en-IN')}</span></div>
                                         )}
                                         {transportCharges > 0 && (
                                             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>{L('transport_charges')}</span><span>+{invFmt(transportCharges)}</span></div>
                                         )}
                                         {laborCharges > 0 && (
                                             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>{L('labor_charges')}</span><span>+{invFmt(laborCharges)}</span></div>
+                                        )}
+                                        {loyaltyDiscount > 0 && (
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', color: '#2E7D32' }}><span>{L('discount')} ({effectiveRedeemPoints} pts)</span><span>-₹{invFmt(loyaltyDiscount)}</span></div>
+                                        )}
+                                        {manualDiscount > 0 && (
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', color: '#2E7D32' }}><span>{L('discount')}</span><span>-₹{invFmt(manualDiscount)}</span></div>
                                         )}
                                         <div style={{ borderTop: '2px solid #111', marginTop: '4px', paddingTop: '4px', display: 'flex', justifyContent: 'space-between', fontWeight: 900, fontSize: '1rem' }}>
                                             <span>{L('net_amount')}</span><span>₹{invNetAmount.toLocaleString('en-IN')}</span>
@@ -2105,23 +2153,21 @@ export default function POSPage() {
                                                 </div>
                                             </>
                                         )}
-                                        {customerOutstanding > 0 && (
-                                            <>
-                                                <div style={{ display: 'flex', justifyContent: 'space-between', color: '#c62828', marginTop: '3px' }}>
-                                                    <span>{L('previous_outstanding')} (Dr)</span><span>₹{customerOutstanding.toLocaleString('en-IN')}</span>
-                                                </div>
-                                                <div style={{ borderTop: '1px solid #111', paddingTop: '3px', display: 'flex', justifyContent: 'space-between', fontWeight: 900 }}>
-                                                    <span>{L('total_payable')}</span><span>₹{(invNetAmount + customerOutstanding).toLocaleString('en-IN')}</span>
-                                                </div>
-                                            </>
-                                        )}
+                                        {customerOutstanding > 0 && (<>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', color: '#c62828', marginTop: '3px' }}>
+                                                <span>{L('previous_outstanding')} (Dr)</span><span>₹{customerOutstanding.toLocaleString('en-IN')}</span>
+                                            </div>
+                                            <div style={{ borderTop: '1px solid #111', paddingTop: '3px', display: 'flex', justifyContent: 'space-between', fontWeight: 900 }}>
+                                                <span>{L('total_payable')}</span><span>₹{(grandTotal + customerOutstanding).toLocaleString('en-IN')}</span>
+                                            </div>
+                                        </>)}
                                     </div>
                                 </div>
 
                                 {/* AMOUNT IN WORDS */}
                                 <div style={{ border: '1px solid #222', marginBottom: '10px', display: 'grid', gridTemplateColumns: '100px 1fr', alignItems: 'stretch' }}>
                                     <div style={{ borderRight: '1px solid #222', padding: '6px', fontWeight: 700, display: 'flex', alignItems: 'center', fontSize: '0.82rem' }}>{L('amount_in_words')}</div>
-                                    <div style={{ padding: '6px', fontWeight: 600, fontSize: '0.85rem', fontStyle: 'italic' }}>INR {numberToWords(invNetAmount)}</div>
+                                    <div style={{ padding: '6px', fontWeight: 600, fontSize: '0.85rem', fontStyle: 'italic' }}>INR {numberToWords(grandTotal)}</div>
                                 </div>
 
                                 {/* Category intentionally omitted from printed invoice — tracked internally for analytics only */}
@@ -2192,6 +2238,18 @@ export default function POSPage() {
                                         min={0}
                                         value={laborCharges || ''}
                                         onChange={e => setLaborCharges(Math.max(0, Number(e.target.value) || 0))}
+                                        onWheel={e => e.currentTarget.blur()}
+                                        placeholder="0"
+                                        style={{ width: '110px', border: '1px solid var(--surface-border)', borderRadius: '8px', padding: '0.4rem 0.6rem', fontSize: '0.9rem', background: 'var(--surface-raised)', color: 'var(--text-primary)' }}
+                                    />
+                                </div>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                    <label style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>{L('discount')} (₹)</label>
+                                    <input
+                                        type="number"
+                                        min={0}
+                                        value={manualDiscount || ''}
+                                        onChange={e => setManualDiscount(Math.max(0, Number(e.target.value) || 0))}
                                         onWheel={e => e.currentTarget.blur()}
                                         placeholder="0"
                                         style={{ width: '110px', border: '1px solid var(--surface-border)', borderRadius: '8px', padding: '0.4rem 0.6rem', fontSize: '0.9rem', background: 'var(--surface-raised)', color: 'var(--text-primary)' }}

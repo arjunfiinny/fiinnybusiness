@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import Razorpay from 'razorpay';
 import { getAdminDb, getAdminAuth } from '../../../lib/firebase-admin';
+import { allocateShares, assertTransfersFit, computeSellerSplit, type SellerSplit } from '../../../lib/route-split';
+import { loadRouteConfig, resolveSellerAccount } from '../../../lib/route-server';
 
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID!,
@@ -87,9 +89,14 @@ export async function POST(request: Request) {
     // ── Server-side price verification ────────────────────────────────────────
     const db = getAdminDb();
     let serverSubtotal = 0;
+    // Per-seller subtotals, keyed the same way orders are: phone first, falling
+    // back to the id. Route pays a linked account, so an ambiguous seller key
+    // here is not a mismatched dashboard query - it is money to the wrong shop.
+    const subtotalBySeller = new Map<string, number>();
 
     for (const item of items) {
       const qty = Math.max(1, Math.floor(Number(item.qty) || 1));
+      const sellerKey = String(item.sellerPhone ?? '').trim() || String(item.sellerId ?? '').trim();
 
       // Try multiple query strategies to find the inventory doc:
       //   1. ownerId == sellerId (UID-keyed, most common for new accounts)
@@ -197,7 +204,11 @@ export async function POST(request: Request) {
         }
       }
 
-      serverSubtotal += Math.round(finalPrice * qty * 100) / 100;
+      const lineTotal = Math.round(finalPrice * qty * 100) / 100;
+      serverSubtotal += lineTotal;
+      if (sellerKey) {
+        subtotalBySeller.set(sellerKey, (subtotalBySeller.get(sellerKey) ?? 0) + lineTotal);
+      }
     }
 
     serverSubtotal = Math.round(serverSubtotal * 100) / 100;
@@ -237,6 +248,11 @@ export async function POST(request: Request) {
     console.log('[create-cart-order] creating Razorpay order | ₹', totalForPayment,
       '| paise:', amountPaise);
 
+    const { transfers, splitSummary } = await buildRouteTransfers(
+      amountPaise,
+      subtotalBySeller,
+    );
+
     const order = await razorpay.orders.create({
       amount:   amountPaise,
       currency: 'INR',
@@ -247,7 +263,9 @@ export async function POST(request: Request) {
         itemCount:       String(items.length),
         serverSubtotal:  String(serverSubtotal),
         deliveryCharge:  String(safeClientDelivery),
+        routedSellers:   String(splitSummary.length),
       },
+      ...(transfers.length > 0 ? { transfers } : {}),
     });
 
     return NextResponse.json({
@@ -255,6 +273,7 @@ export async function POST(request: Request) {
       serverSubtotal,
       deliveryCharge: safeClientDelivery,
       serverTotal:    totalForPayment,
+      splitSummary,
       // Return the key used to create this order so the mobile client
       // always opens Razorpay with the matching key (prevents key-mismatch errors).
       key_id: process.env.RAZORPAY_KEY_ID,
@@ -262,5 +281,102 @@ export async function POST(request: Request) {
   } catch (error) {
     console.error('[create-cart-order] unhandled error:', error);
     return NextResponse.json({ error: 'Failed to create payment order' }, { status: 500 });
+  }
+}
+
+interface SplitSummaryRow {
+  sellerKey: string;
+  accountId: string;
+  grossPaise: number;
+  commissionPaise: number;
+  gatewayFeePaise: number;
+  transferPaise: number;
+}
+
+/**
+ * Turn per-seller subtotals into Razorpay Route transfers.
+ *
+ * Two properties this has to guarantee, because Razorpay enforces the first at
+ * checkout in front of the customer and nobody enforces the second:
+ *
+ *  1. Transfers never exceed the order amount.
+ *  2. Every paise of the order is accounted for - the seller shares are
+ *     allocated by largest remainder rather than independent rounding, so three
+ *     sellers on a Rs 100.01 order cannot silently lose a paise between them.
+ *
+ * Sellers WITHOUT a linked account are skipped, not failed. Onboarding is lazy:
+ * a seller is asked to set up payouts when they get their first order, so most
+ * orders early on will have no transfer at all and settle exactly as they do
+ * today. An unroutable seller must never block a customer's payment.
+ */
+async function buildRouteTransfers(
+  orderAmountPaise: number,
+  subtotalBySeller: Map<string, number>,
+): Promise<{
+  transfers: Array<{ account: string; amount: number; currency: string; on_hold: boolean; notes: Record<string, string> }>;
+  splitSummary: SplitSummaryRow[];
+}> {
+  const empty = { transfers: [], splitSummary: [] };
+  if (subtotalBySeller.size === 0 || orderAmountPaise <= 0) return empty;
+
+  try {
+    const config = await loadRouteConfig();
+
+    // Allocate the ACTUAL captured amount across sellers in proportion to their
+    // subtotals. Deriving each share from the order total rather than summing
+    // per-seller figures means delivery charges and any client/server rounding
+    // difference are distributed rather than left stranded.
+    const shares = allocateShares(orderAmountPaise, Array.from(subtotalBySeller.entries()));
+    if (shares.length === 0) return empty;
+
+    const accounts = await Promise.all(
+      shares.map(async (sh) => ({ ...sh, seller: await resolveSellerAccount(sh.key) })),
+    );
+
+    const transfers: Array<{ account: string; amount: number; currency: string; on_hold: boolean; notes: Record<string, string> }> = [];
+    const splitSummary: SplitSummaryRow[] = [];
+    const splits: SellerSplit[] = [];
+
+    for (const row of accounts) {
+      const accountId = row.seller?.razorpayAccountId;
+      if (!accountId || row.paise <= 0) continue;
+
+      let split: SellerSplit;
+      try {
+        split = computeSellerSplit(row.paise, config);
+      } catch (e) {
+        // A share too small to survive the deductions is left with the platform
+        // rather than sent as an invalid transfer that would fail the payment.
+        console.warn('[create-cart-order] skipping transfer for', row.key, String(e));
+        continue;
+      }
+
+      splits.push(split);
+      transfers.push({
+        account: accountId,
+        amount: split.transferPaise,
+        currency: 'INR',
+        on_hold: config.holdTransfers,
+        notes: { sellerKey: row.key, commissionPaise: String(split.commissionPaise) },
+      });
+      splitSummary.push({
+        sellerKey: row.key,
+        accountId,
+        grossPaise: split.grossPaise,
+        commissionPaise: split.commissionPaise,
+        gatewayFeePaise: split.gatewayFeePaise,
+        transferPaise: split.transferPaise,
+      });
+    }
+
+    if (transfers.length === 0) return empty;
+    assertTransfersFit(orderAmountPaise, splits);
+    return { transfers, splitSummary };
+  } catch (e) {
+    // Route is an improvement on settlement, not a prerequisite for selling.
+    // If anything here fails the order is created without transfers and the
+    // money settles the way it does today.
+    console.error('[create-cart-order] transfer build failed, creating order unsplit:', e);
+    return empty;
   }
 }

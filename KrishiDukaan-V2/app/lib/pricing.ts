@@ -32,12 +32,49 @@
 export const PRICING_DOC_PATH = { collection: "settings", doc: "pricing" } as const;
 
 export interface DurationPrice {
+  /**
+   * Stable identifier, unique across the ladder. Optional: rows without one are
+   * keyed by their period, which is how the ladder worked when a period could
+   * only mean one price.
+   *
+   * It exists because a bundle and a per-listing rate can share a period — a
+   * Rs 144/listing year and a Rs 4,999-for-50-listings year are different
+   * products sold for the same twelve months. Keying on `months` alone forced
+   * one of them out of the ladder.
+   */
+  id?: string;
   /** Billing period in months. Also the key the checkout sends up. */
   months: number;
   /** Rupees per listing (per "seat") for the WHOLE period, not per month. */
   pricePerSeat: number;
   /** Optional marketing badge, e.g. "Save 14%". Display only. */
   badge?: string;
+  /**
+   * Flat rupee price for the WHOLE period, independent of how many listings the
+   * seller selects. When present it overrides pricePerSeat entirely.
+   *
+   * A bundle ("Rs 4,999 for 50 listings") is not expressible as a per-listing
+   * price: multiplying it by the seat count would charge 50x the intended
+   * amount. So flat plans are their own shape, and every amount in the system
+   * goes through computeAmount() rather than doing the multiplication inline.
+   */
+  flatPrice?: number;
+  /**
+   * Listings a flat plan includes. Seats beyond this are clamped, never billed
+   * as extra — an upsell is a separate plan, not a silent overage charge.
+   * Meaningless (and rejected) without flatPrice.
+   */
+  includedListings?: number;
+  /**
+   * Account roles allowed to buy this plan. Absent or empty means everyone.
+   *
+   * A retailer bundle priced for a shop with a handful of listings is not the
+   * same product as a manufacturer contract, and without this a manufacturer
+   * could buy the cheap plan instead of the one their volume warrants. The
+   * check that matters is the server-side one in create-order — this field only
+   * declares the rule; the client filtering it drives is a courtesy.
+   */
+  roles?: string[];
 }
 
 /**
@@ -61,6 +98,9 @@ export function parseDurations(raw: unknown): DurationPrice[] | null {
 
   const out: DurationPrice[] = [];
   for (const item of list) {
+    const rawId = (item as DurationPrice)?.id;
+    const id =
+      typeof rawId === "string" && rawId.trim() ? rawId.trim() : undefined;
     const months = Number((item as DurationPrice)?.months);
     const price = Number((item as DurationPrice)?.pricePerSeat);
     // Money must be a whole, non-negative number of rupees: Razorpay is charged
@@ -68,21 +108,86 @@ export function parseDurations(raw: unknown): DurationPrice[] | null {
     if (!Number.isInteger(months) || months <= 0) return null;
     if (!Number.isInteger(price) || price < 0) return null;
     const badge = (item as DurationPrice)?.badge;
+
+    // Flat plans are optional, but a half-specified one is a data error: a
+    // flatPrice with no listing cap would grant unlimited listings for a flat
+    // fee, which is exactly how a retailer plan cannibalises an enterprise one.
+    const rawFlat = (item as DurationPrice)?.flatPrice;
+    const rawIncl = (item as DurationPrice)?.includedListings;
+    const hasFlat = rawFlat !== undefined && rawFlat !== null;
+    const hasIncl = rawIncl !== undefined && rawIncl !== null;
+    if (hasFlat !== hasIncl) return null;
+    let flat: number | undefined;
+    let incl: number | undefined;
+    if (hasFlat) {
+      flat = Number(rawFlat);
+      incl = Number(rawIncl);
+      if (!Number.isInteger(flat) || flat < 0) return null;
+      if (!Number.isInteger(incl) || incl <= 0) return null;
+    }
+
+    const rawRoles = (item as DurationPrice)?.roles;
+    let roles: string[] | undefined;
+    if (rawRoles !== undefined && rawRoles !== null) {
+      if (!Array.isArray(rawRoles)) return null;
+      const cleaned = rawRoles
+        .map((r) => String(r ?? "").trim().toLowerCase())
+        .filter((r) => r.length > 0);
+      // An empty restriction list would mean "nobody can buy this", which is
+      // never what an admin means — treat it as unrestricted.
+      roles = cleaned.length ? Array.from(new Set(cleaned)) : undefined;
+    }
+
     out.push({
+      ...(id ? { id } : {}),
       months,
       pricePerSeat: price,
+      ...(roles ? { roles } : {}),
       ...(typeof badge === "string" && badge.trim() ? { badge: badge.trim() } : {}),
+      ...(flat !== undefined ? { flatPrice: flat, includedListings: incl } : {}),
     });
   }
 
-  // Duplicate periods would make the charged price depend on array order.
-  const seen = new Set<number>();
+  // Duplicate keys would make the charged price depend on array order.
+  const seen = new Set<string>();
   for (const d of out) {
-    if (seen.has(d.months)) return null;
-    seen.add(d.months);
+    const k = planKey(d);
+    if (seen.has(k)) return null;
+    seen.add(k);
   }
 
   return out.sort((a, b) => a.months - b.months);
+}
+
+/** The ladder-unique key for a plan: its id, or its period when it has none. */
+export function planKey(d: DurationPrice): string {
+  return d.id ?? String(d.months);
+}
+
+/**
+ * Resolve what the client asked for to a plan on the ladder.
+ *
+ * Prefers an explicit key so a bundle and a per-listing rate sharing a period
+ * stay distinguishable; falls back to matching on period for older clients
+ * (including the mobile app) that only ever send `durationMonths`.
+ */
+export function planFor(
+  durations: DurationPrice[],
+  key: string | number | undefined | null,
+): DurationPrice | null {
+  const k = String(key ?? "").trim();
+  if (k) {
+    const byKey = durations.find((d) => planKey(d) === k);
+    if (byKey) return byKey;
+  }
+  const months = Number(key);
+  if (Number.isFinite(months)) {
+    // Period match must never silently pick a bundle: a client that only knows
+    // about per-listing pricing would show one price and be charged another.
+    const byMonths = durations.find((d) => d.months === months && !isFlatPlan(d));
+    if (byMonths) return byMonths;
+  }
+  return null;
 }
 
 /** Look up the price for a period. Returns null when the period isn't offered. */
@@ -96,6 +201,32 @@ export function priceFor(
 /** Per-month equivalent, for display only ("₹12/month" on a yearly plan). */
 export function perMonthLabel(d: DurationPrice): string {
   return `₹${Math.round(d.pricePerSeat / d.months)}/month`;
+}
+
+// ─── Seat quantity rule ─────────────────────────────────────────────────────
+
+/** Seats are sold in blocks of this size, and this is also the minimum buy. */
+export const SEAT_STEP = 10;
+
+/** One-tap seat quantities offered next to the input. */
+export const SEAT_PRESETS = [10, 100, 500] as const;
+
+/**
+ * Snap a requested seat count to the sale rule: at least [SEAT_STEP], and
+ * always a whole multiple of it.
+ *
+ * Rounds UP rather than to nearest, so a seller who needs 15 listing slots
+ * gets 20 and never silently ends up with fewer slots than they asked for.
+ *
+ * The purchase UIs (mobile subscription screen, web SubscriptionView) and
+ * /api/payment/create-order all run requests through this, so the seat count
+ * the seller sees priced is exactly the one the server charges for — a client
+ * that skipped the rule can't be billed on a different number than it showed.
+ */
+export function normalizeSeatCount(raw: unknown): number {
+  const n = Math.floor(Number(raw));
+  if (!Number.isFinite(n) || n <= SEAT_STEP) return SEAT_STEP;
+  return Math.ceil(n / SEAT_STEP) * SEAT_STEP;
 }
 
 // ─── Promo codes ────────────────────────────────────────────────────────────
@@ -125,6 +256,58 @@ export function parsePromo(raw: unknown): PromoCode | null {
     return null;
   }
   return { code, discountPercent, active: d.active !== false };
+}
+
+/**
+ * THE single place a rupee amount is derived from a plan and a seat count.
+ *
+ * Everything that needs to know what something costs — checkout, the seller UI,
+ * the admin activation path, the record written after payment — calls this. The
+ * old code multiplied seats by a price inline in five places against three
+ * different hardcoded tables, so the amount charged and the amount recorded
+ * could differ (and did: purchases at unlisted durations recorded Rs 21).
+ */
+export function computeAmount(d: DurationPrice, seats: number): number {
+  if (typeof d.flatPrice === "number") return d.flatPrice;
+  return billableSeats(d, seats) * d.pricePerSeat;
+}
+
+/**
+ * Seats actually granted for a plan. Flat plans cap at their included listings;
+ * per-listing plans grant what was asked for.
+ */
+export function billableSeats(d: DurationPrice, seats: number): number {
+  const n = Math.max(1, Math.floor(Number(seats)) || 1);
+  if (typeof d.flatPrice === "number" && typeof d.includedListings === "number") {
+    return Math.min(n, d.includedListings);
+  }
+  return n;
+}
+
+/**
+ * Whether an account role may buy a plan.
+ *
+ * An unknown role (no signed-in user, or a role the ladder does not mention) is
+ * allowed only on unrestricted plans — a restricted plan fails closed rather
+ * than falling back to "probably fine".
+ */
+export function isPlanAllowed(d: DurationPrice, role: string | null | undefined): boolean {
+  if (!d.roles?.length) return true;
+  const r = String(role ?? "").trim().toLowerCase();
+  return r.length > 0 && d.roles.includes(r);
+}
+
+/** The subset of the ladder a given role may buy. */
+export function plansForRole(
+  durations: DurationPrice[],
+  role: string | null | undefined,
+): DurationPrice[] {
+  return durations.filter((d) => isPlanAllowed(d, role));
+}
+
+/** True when the plan is a fixed-price bundle rather than a per-listing rate. */
+export function isFlatPlan(d: DurationPrice): boolean {
+  return typeof d.flatPrice === "number";
 }
 
 /** Apply a percentage discount to a rupee subtotal. */

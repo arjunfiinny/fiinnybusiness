@@ -66,6 +66,11 @@ function staticEntries(now: Date): MetadataRoute.Sitemap {
     { url: `${SITE_URL}/blog`, lastModified: now, changeFrequency: "weekly", priority: 0.8 },
     { url: `${SITE_URL}/app`, lastModified: now, changeFrequency: "monthly", priority: 0.8 },
     { url: `${SITE_URL}/privacy`, lastModified: now, changeFrequency: "yearly", priority: 0.3 },
+    { url: `${SITE_URL}/terms`, lastModified: now, changeFrequency: "yearly", priority: 0.3 },
+    // Indexed deliberately, and at a higher priority than the other two legal
+    // pages: this is the document a manufacturer is pointed at when told that
+    // KrishiDukan has no company-specific agreements, so it has to be findable.
+    { url: `${SITE_URL}/seller-terms`, lastModified: now, changeFrequency: "monthly", priority: 0.6 },
   ];
 }
 

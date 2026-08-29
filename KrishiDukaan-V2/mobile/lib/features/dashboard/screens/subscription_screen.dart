@@ -1,9 +1,13 @@
+import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:http/http.dart' as http;
+import 'package:url_launcher/url_launcher.dart';
 import '../../../core/payments/app_razorpay.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -13,24 +17,176 @@ import '../../../core/constants/app_config.dart';
 import '../../../core/constants/app_text_styles.dart';
 import '../../../core/providers/user_provider.dart';
 import '../../../core/utils/currency_utils.dart';
+import '../../cart/data/payment_service.dart' show PaymentService;
 import '../providers/dashboard_provider.dart';
 
-// Server-side price per seat (matches API: PRICE_PER_SEAT in create-order/route.ts)
-const _pricePerSeat = {1: 21, 3: 54, 6: 90, 12: 144};
+/// Firestore document holding the live pricing ladder — the same one the web
+/// admin Pricing screen writes and `api/payment/create-order` charges from.
+const _pricingCollection = 'settings';
+const _pricingDoc = 'pricing';
 
-const _durations = [
-  _Duration(months: 1, label: '1 Month'),
-  _Duration(months: 3, label: '3 Months', badge: 'SAVE 14%'),
-  _Duration(months: 6, label: '6 Months', badge: 'SAVE 29%'),
-  _Duration(months: 12, label: '1 Year', badge: 'BEST VALUE'),
+/// Seats are sold in blocks of this size, and this is also the minimum buy.
+/// Must stay in sync with SEAT_STEP in app/lib/pricing.ts, which
+/// /api/payment/create-order enforces server-side.
+const _seatStep = 10;
+
+/// One-tap seat quantities offered under the input.
+const _seatPresets = [10, 100, 500];
+
+/// Snaps a requested seat count to the sale rule: at least [_seatStep], and
+/// always a whole multiple of it. Rounds UP rather than to nearest so a seller
+/// who needs 15 slots gets 20 and never ends up with fewer than they asked for.
+/// Mirrors normalizeSeatCount in app/lib/pricing.ts — the server runs the same
+/// rule, so the seat count priced here is the one actually charged.
+int _normalizeSeats(int raw) {
+  if (raw <= _seatStep) return _seatStep;
+  return ((raw + _seatStep - 1) ~/ _seatStep) * _seatStep;
+}
+
+/// The published legal documents a subscription is sold under.
+///
+/// Mirrors `app/lib/legal-constants.ts` on the web. Both checkouts must show and
+/// record the same thing — the whole point of the standard Seller &
+/// Manufacturer Subscription Terms is that there is one deal, not one per
+/// client. Keep [_termsVersion] in step with TERMS_VERSION over there.
+const _termsPath = '/terms';
+const _sellerTermsPath = '/seller-terms';
+const _termsVersion = '2026-08-26';
+
+/// Fallback ladder, used only when the settings doc is missing or unreadable.
+///
+/// These are the values that used to be hardcoded here, so a failed read
+/// behaves exactly like the old build rather than showing the seller nothing.
+/// Anything else — including every price change made in admin — comes from
+/// Firestore at runtime. This screen must never be the reason a price the
+/// seller sees differs from the amount Razorpay captures.
+const _defaultPlans = [
+  _Duration(months: 1, label: '1 Month', pricePerSeat: 21),
+  _Duration(months: 3, label: '3 Months', pricePerSeat: 54, badge: 'SAVE 14%'),
+  _Duration(months: 6, label: '6 Months', pricePerSeat: 90, badge: 'SAVE 29%'),
+  _Duration(months: 12, label: '1 Year', pricePerSeat: 144, badge: 'BEST VALUE'),
 ];
 
+String _durationLabel(int months) {
+  if (months == 12) return '1 Year';
+  if (months % 12 == 0) return '${months ~/ 12} Years';
+  return months == 1 ? '1 Month' : '$months Months';
+}
+
 class _Duration {
+  /// Ladder-unique key. A bundle and a per-listing rate can share a period, so
+  /// the period alone cannot identify a plan; this is what gets sent to
+  /// create-order as `planId`.
+  final String? id;
   final int months;
   final String label;
   final String? badge;
-  const _Duration({required this.months, required this.label, this.badge});
-  int totalPrice(int seats) => seats * (_pricePerSeat[months] ?? months * 21);
+  final int pricePerSeat;
+
+  /// Flat price for the whole period, overriding [pricePerSeat] when set.
+  final int? flatPrice;
+
+  /// Listings a flat plan includes. Seats above this are clamped, not billed.
+  final int? includedListings;
+
+  /// Account roles allowed to buy this plan. Empty means everyone.
+  final List<String> roles;
+
+  const _Duration({
+    required this.months,
+    required this.label,
+    required this.pricePerSeat,
+    this.id,
+    this.badge,
+    this.flatPrice,
+    this.includedListings,
+    this.roles = const [],
+  });
+
+  /// Mirror of isPlanAllowed() in app/lib/pricing.ts. The binding check is the
+  /// server-side one in create-order; this only decides what to display.
+  bool allowsRole(String? role) {
+    if (roles.isEmpty) return true;
+    final r = (role ?? '').trim().toLowerCase();
+    return r.isNotEmpty && roles.contains(r);
+  }
+
+  String get key => id ?? '$months';
+
+  bool get isFlat => flatPrice != null;
+
+  /// Seats actually granted. Mirrors billableSeats() in app/lib/pricing.ts.
+  int billableSeats(int seats) {
+    final n = seats < 1 ? 1 : seats;
+    if (flatPrice != null && includedListings != null) {
+      return n < includedListings! ? n : includedListings!;
+    }
+    return n;
+  }
+
+  /// Mirrors computeAmount() in app/lib/pricing.ts. Display only — the amount
+  /// actually recorded after payment comes back from verify/.
+  int totalPrice(int seats) =>
+      flatPrice ?? billableSeats(seats) * pricePerSeat;
+}
+
+/// Parse the settings/pricing document. Returns null (never a partial ladder)
+/// so callers fall back cleanly to [_defaultPlans].
+List<_Duration>? _parsePlans(Map<String, dynamic>? data) {
+  final raw = data?['durations'];
+  if (raw is! List || raw.isEmpty) return null;
+
+  final out = <_Duration>[];
+  final seen = <String>{};
+  for (final item in raw) {
+    if (item is! Map) return null;
+    final months = (item['months'] as num?)?.toInt();
+    final price = (item['pricePerSeat'] as num?)?.toInt();
+    if (months == null || months <= 0) return null;
+    if (price == null || price < 0) return null;
+
+    final flat = (item['flatPrice'] as num?)?.toInt();
+    final incl = (item['includedListings'] as num?)?.toInt();
+    // A flat price with no listing cap would sell unlimited listings for a flat
+    // fee. Reject the ladder rather than guess a cap.
+    if ((flat == null) != (incl == null)) return null;
+    if (flat != null && flat < 0) return null;
+    if (incl != null && incl <= 0) return null;
+
+    final rawId = item['id'];
+    final id = rawId is String && rawId.trim().isNotEmpty ? rawId.trim() : null;
+    final rawRoles = item['roles'];
+    var roles = const <String>[];
+    if (rawRoles != null) {
+      if (rawRoles is! List) return null;
+      final cleaned = rawRoles
+          .map((r) => (r ?? '').toString().trim().toLowerCase())
+          .where((r) => r.isNotEmpty)
+          .toSet()
+          .toList();
+      roles = cleaned;
+    }
+
+    final rawBadge = item['badge'];
+    final badge =
+        rawBadge is String && rawBadge.trim().isNotEmpty ? rawBadge.trim() : null;
+
+    final plan = _Duration(
+      id: id,
+      months: months,
+      label: _durationLabel(months),
+      pricePerSeat: price,
+      badge: badge,
+      flatPrice: flat,
+      includedListings: incl,
+      roles: roles,
+    );
+    if (!seen.add(plan.key)) return null;
+    out.add(plan);
+  }
+
+  out.sort((a, b) => a.months.compareTo(b.months));
+  return out;
 }
 
 class SubscriptionScreen extends ConsumerStatefulWidget {
@@ -57,10 +213,15 @@ class SubscriptionScreen extends ConsumerStatefulWidget {
 
 class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
   late final AppRazorpay _razorpay;
-  int _seats = 1;
-  _Duration _duration = _durations[0];
+  int _seats = _seatStep;
+  late final TextEditingController _seatCtrl;
+  List<_Duration> _plans = _defaultPlans;
+  _Duration _duration = _defaultPlans[0];
   bool _loading = false;
   String? _error;
+  String? _razorpayOrderId;
+  /// Order amount in PAISE — see checkout_screen for why this is retained.
+  int? _razorpayAmount;
 
   @override
   void initState() {
@@ -70,24 +231,98 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
     // Preselect the expiring plan on a renewal. An unrecognised month count
     // (an old or admin-set plan length) falls back to the default rather than
     // leaving the screen with no duration selected.
+    //
+    // A legacy subscription may carry a seat count from before the 10-seat
+    // blocks rule (e.g. 1 or 5), so it is normalized too — otherwise renewal
+    // would show a price the server won't honour.
     final seats = widget.initialSeats;
-    if (seats != null && seats > 0) _seats = seats;
+    if (seats != null && seats > 0) _seats = _normalizeSeats(seats);
+    _seatCtrl = TextEditingController(text: '$_seats');
 
     final months = widget.initialMonths;
     if (months != null) {
-      for (final d in _durations) {
+      for (final d in _plans) {
         if (d.months == months) {
           _duration = d;
           break;
         }
       }
     }
+
+    _loadPlans();
+  }
+
+  /// Pull the live ladder from settings/pricing.
+  ///
+  /// Prices used to be a const map in this file, so changing them in admin
+  /// updated what Razorpay charged while the app kept displaying — and
+  /// recording — the old number. Reading them at runtime is what keeps a price
+  /// change a config change instead of a store release.
+  Future<void> _loadPlans() async {
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection(_pricingCollection)
+          .doc(_pricingDoc)
+          .get();
+      final all = _parsePlans(snap.data());
+      if (all == null || all.isEmpty || !mounted) return;
+      // Don't show a plan checkout would refuse: create-order rejects a plan the
+      // account's role isn't allowed to buy.
+      final role = ref.read(currentUserProvider).value?.role;
+      final parsed = all.where((p) => p.allowsRole(role)).toList();
+      if (parsed.isEmpty) return;
+      setState(() {
+        _plans = parsed;
+        // Keep the selection valid if admin removed or renamed the chosen plan.
+        _duration = parsed.firstWhere(
+          (p) => p.key == _duration.key,
+          orElse: () => parsed.firstWhere(
+            (p) => p.months == _duration.months && !p.isFlat,
+            orElse: () => parsed.first,
+          ),
+        );
+      });
+    } catch (_) {
+      /* unreachable settings doc keeps the built-in ladder */
+    }
   }
 
   @override
   void dispose() {
     _razorpay.clear();
+    _seatCtrl.dispose();
     super.dispose();
+  }
+
+  /// Applies a new seat count and keeps the text field in step with it.
+  void _setSeats(int raw) {
+    final next = _normalizeSeats(raw);
+    setState(() => _seats = next);
+    if (_seatCtrl.text != '$next') {
+      _seatCtrl.text = '$next';
+      _seatCtrl.selection =
+          TextSelection.collapsed(offset: _seatCtrl.text.length);
+    }
+  }
+
+  /// What the seller was shown, and therefore accepted, by pressing Pay.
+  Map<String, dynamic> _termsAcceptanceRecord() => {
+        'version': _termsVersion,
+        'documents': [_termsPath, _sellerTermsPath],
+        'acceptedAt': DateTime.now().toUtc().toIso8601String(),
+        'surface': 'mobile:subscription-checkout',
+      };
+
+  Future<void> _openLegalDoc(String path) async {
+    final uri = Uri.parse('${AppConfig.apiBaseUrl}$path');
+    // An external browser, not an in-app webview: the seller should be able to
+    // read the terms without losing the checkout they are part-way through.
+    final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!opened && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not open ${uri.toString()}')),
+      );
+    }
   }
 
   Future<void> _startPayment() async {
@@ -101,19 +336,38 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
 
     try {
       // Create Razorpay order server-side so amount is tamper-proof.
+      // The token is what the server resolves the buyer's role from — a
+      // role-restricted plan cannot be bought without it.
+      final idToken = await FirebaseAuth.instance.currentUser?.getIdToken();
       final res = await http
           .post(
             Uri.parse('${AppConfig.apiBaseUrl}/api/payment/create-order'),
-            headers: {'Content-Type': 'application/json'},
+            headers: {
+              'Content-Type': 'application/json',
+              if (idToken != null) 'Authorization': 'Bearer $idToken',
+            },
             body: jsonEncode({
               'seatCount': _seats,
               'durationMonths': _duration.months,
+              'planId': _duration.key,
               'userId': user.uid,
             }),
           )
           .timeout(const Duration(seconds: 15));
 
       if (res.statusCode != 200) {
+        // 403 is a deliberate refusal (e.g. a plan this account type may not
+        // buy) and carries a message worth showing verbatim.
+        String? serverMessage;
+        try {
+          serverMessage =
+              (jsonDecode(res.body) as Map<String, dynamic>)['error'] as String?;
+        } catch (_) {
+          /* non-JSON body */
+        }
+        if (serverMessage != null && serverMessage.isNotEmpty) {
+          throw Exception(serverMessage);
+        }
         throw Exception('Payment server error (${res.statusCode}). '
             'Check that RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET are set '
             'in your production environment.');
@@ -124,12 +378,14 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
 
       // Use the key the backend used to create the order so they always match.
       final razorpayKey = order['key_id'] as String? ?? AppConfig.razorpayKeyId;
+      _razorpayOrderId = order['id'] as String?;
+      _razorpayAmount = (order['amount'] as num?)?.toInt();
 
       _razorpay.open({
         'key': razorpayKey,
         'amount': order['amount'],
         'currency': order['currency'] ?? 'INR',
-        'order_id': order['id'],
+        'order_id': _razorpayOrderId,
         'name': 'KrishiDukan',
         'description':
             '$_seats seat${_seats != 1 ? 's' : ''} · ${_duration.label}',
@@ -139,6 +395,13 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
           if (user.email != null) 'email': user.email,
         },
         'theme': {'color': '#2E7D32'},
+        // See checkout_screen.dart's identical option for the full story:
+        // the checkout SDK's own completion wait (default 3 minutes) is
+        // tight for a UPI collect approval, and giving up on that wait is
+        // not the same as Razorpay not having captured the payment.
+        // _onError still reconciles against Razorpay directly for whatever
+        // slips past this wider window.
+        'timeout': 300,
       });
     } catch (e) {
       setState(() {
@@ -152,7 +415,7 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
     setState(() => _loading = true);
 
     try {
-      // 1. Verify payment signature with backend API
+      // Verify payment signature with backend API
       final token = await FirebaseAuth.instance.currentUser?.getIdToken();
       final verifyRes = await http.post(
         Uri.parse('${AppConfig.apiBaseUrl}/api/payment/verify'),
@@ -178,92 +441,12 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
 
       final verifiedSeatCount = (verifyData['seatCount'] as num?)?.toInt() ?? _seats;
 
-      // 2. Update Subscription Status in Firestore directly (matches web SDK updateSubscriptionStatus)
-      final user = ref.read(currentUserProvider).value!;
-      final firebaseUser = FirebaseAuth.instance.currentUser!;
-
-      final userDocRef = FirebaseFirestore.instance.collection('users').doc(user.phone);
-      final currentSeats = user.totalSeats;
-      final seatsToAdd = verifiedSeatCount;
-
-      final batch = FirebaseFirestore.instance.batch();
-
-      // If user is still 'consumer', upgrade to 'retailer' so canAccessDashboard
-      // returns true after payment (consumers who pay should get seller access).
-      final roleUpdate = user.role == 'consumer' ? {'role': 'retailer'} : <String, dynamic>{};
-      batch.update(userDocRef, {
-        'isPaid': true,
-        'subscriptionStatus': 'paid',
-        'paymentDetails': {
-          'orderId': response.orderId,
-          'paymentId': response.paymentId,
-        },
-        'totalSeats': currentSeats + seatsToAdd,
-        'updatedAt': FieldValue.serverTimestamp(),
-        ...roleUpdate,
-      });
-
-      final pricePerSeat = _pricePerSeat[_duration.months] ?? 21;
-      final totalAmount = seatsToAdd * pricePerSeat;
-
-      final now = DateTime.now();
-      final expiry = DateTime.now().add(Duration(days: _duration.months * 30));
-
-      final paymentRef = FirebaseFirestore.instance.collection('payments').doc();
-      batch.set(paymentRef, {
-        'userId': firebaseUser.uid,
-        'userPhone': user.phone,
-        'amount': totalAmount,
-        'seatCount': seatsToAdd,
-        'durationMonths': _duration.months,
-        'currency': 'INR',
-        'razorpayOrderId': response.orderId,
-        'razorpayPaymentId': response.paymentId,
-        'timestamp': FieldValue.serverTimestamp(),
-        'status': 'success',
-      });
-
-      final subRef = FirebaseFirestore.instance.collection('subscriptions').doc();
-      batch.set(subRef, {
-        'ownerId': firebaseUser.uid,
-        'ownerPhone': user.phone,
-        'ownerType': user.role == 'manufacturer' ? 'manufacturer' : 'retailer',
-        'planName': 'Standard',
-        'seatsPurchased': seatsToAdd,
-        'durationMonths': _duration.months,
-        'amountPaid': totalAmount,
-        'currency': 'INR',
-        'razorpayOrderId': response.orderId,
-        'razorpayPaymentId': response.paymentId,
-        'subscriptionStatus': 'active',
-        'startDate': Timestamp.fromDate(now),
-        'expiryDate': Timestamp.fromDate(expiry),
-        'createdAt': FieldValue.serverTimestamp(),
-        'updatedAt': FieldValue.serverTimestamp(),
-      });
-
-      await batch.commit();
-
-      // Refresh the user state so changes propagate to dashboard and shell
-      ref.invalidate(currentUserProvider);
-      // Refresh seat counts so "X left · used/total" updates immediately.
-      ref.invalidate(seatStatsProvider);
-
-      setState(() => _loading = false);
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Subscription activated!'),
-            backgroundColor: AppColors.success,
-          ),
-        );
-        // New sellers complete their shop profile before landing on the
-        // dashboard; existing users buying more seats go straight back.
-        context.go(widget.reason == 'new_account'
-            ? '/profile/edit?reason=new_account'
-            : '/dashboard');
-      }
+      await _activateSubscription(
+        razorpayOrderId: response.orderId,
+        razorpayPaymentId: response.paymentId,
+        seatCount: verifiedSeatCount,
+        amountPaid: (verifyData['amountPaid'] as num?)?.toInt(),
+      );
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -274,10 +457,175 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
     }
   }
 
-  void _onError(AppPaymentError r) {
+  /// Writes the subscription to Firestore, shared by the normal success
+  /// callback and [_onError]'s reconciliation path. [seatCount] comes from
+  /// the order's own server-set `notes` either way — via /verify on success,
+  /// or via /api/payment/order-status when reconciling a payment the
+  /// checkout SDK reported as failed but Razorpay actually captured.
+  Future<void> _activateSubscription({
+    required String razorpayOrderId,
+    required String razorpayPaymentId,
+    required int seatCount,
+    int? amountPaid,
+  }) async {
+    final user = ref.read(currentUserProvider).value!;
+    final firebaseUser = FirebaseAuth.instance.currentUser!;
+
+    final userDocRef = FirebaseFirestore.instance.collection('users').doc(user.phone);
+    final currentSeats = user.totalSeats;
+    final seatsToAdd = seatCount;
+
+    final batch = FirebaseFirestore.instance.batch();
+
+    // If user is still 'consumer', upgrade to 'retailer' so canAccessDashboard
+    // returns true after payment (consumers who pay should get seller access).
+    final roleUpdate = user.role == 'consumer' ? {'role': 'retailer'} : <String, dynamic>{};
+    batch.update(userDocRef, {
+      'isPaid': true,
+      'subscriptionStatus': 'paid',
+      'paymentDetails': {
+        'orderId': razorpayOrderId,
+        'paymentId': razorpayPaymentId,
+      },
+      'totalSeats': currentSeats + seatsToAdd,
+      'updatedAt': FieldValue.serverTimestamp(),
+      ...roleUpdate,
+    });
+
+    final totalAmount = amountPaid ?? _duration.totalPrice(seatsToAdd);
+
+    final now = DateTime.now();
+    final expiry = DateTime.now().add(Duration(days: _duration.months * 30));
+
+    final paymentRef = FirebaseFirestore.instance.collection('payments').doc();
+    batch.set(paymentRef, {
+      'userId': firebaseUser.uid,
+      'userPhone': user.phone,
+      'amount': totalAmount,
+      'seatCount': seatsToAdd,
+      'durationMonths': _duration.months,
+      'currency': 'INR',
+      'razorpayOrderId': razorpayOrderId,
+      'razorpayPaymentId': razorpayPaymentId,
+      'timestamp': FieldValue.serverTimestamp(),
+      'status': 'success',
+      'termsAcceptance': _termsAcceptanceRecord(),
+    });
+
+    final subRef = FirebaseFirestore.instance.collection('subscriptions').doc();
+    batch.set(subRef, {
+      'ownerId': firebaseUser.uid,
+      'ownerPhone': user.phone,
+      'ownerType': user.role == 'manufacturer' ? 'manufacturer' : 'retailer',
+      'planName': 'Standard',
+      'seatsPurchased': seatsToAdd,
+      'durationMonths': _duration.months,
+      'amountPaid': totalAmount,
+      'currency': 'INR',
+      'razorpayOrderId': razorpayOrderId,
+      'razorpayPaymentId': razorpayPaymentId,
+      'subscriptionStatus': 'active',
+      'startDate': Timestamp.fromDate(now),
+      'expiryDate': Timestamp.fromDate(expiry),
+      'createdAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+      // Which standard terms this subscription was sold under. Same shape the
+      // web checkout writes (app/firebase.ts TermsAcceptance), so a query
+      // across subscriptions does not have to care which client was used.
+      'termsAcceptance': _termsAcceptanceRecord(),
+    });
+
+    await batch.commit();
+
+    // Refresh the user state so changes propagate to dashboard and shell
+    ref.invalidate(currentUserProvider);
+    // Refresh seat counts so "X left · used/total" updates immediately.
+    ref.invalidate(seatStatsProvider);
+
+    setState(() => _loading = false);
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Subscription activated!'),
+          backgroundColor: AppColors.success,
+        ),
+      );
+      // New sellers complete their shop profile before landing on the
+      // dashboard; existing users buying more seats go straight back.
+      context.go(widget.reason == 'new_account'
+          ? '/profile/edit?reason=new_account'
+          : '/dashboard');
+    }
+  }
+
+  /// Fires on both a genuine failure AND on the checkout SDK simply giving up
+  /// waiting ("...could not complete it in time") — not the same thing as
+  /// Razorpay not having captured the payment. Before telling the seller
+  /// their purchase failed, this checks Razorpay's own records for the
+  /// order; if it actually went through, the subscription is activated
+  /// exactly as it would be on success instead of stranding a charged seller
+  /// with no seats. See PaymentService.checkOrderStatus for the full story.
+  void _onError(AppPaymentError r) async {
+    final orderId = _razorpayOrderId;
+    if (orderId == null) {
+      setState(() {
+        _loading = false;
+        _error = r.message;
+      });
+      return;
+    }
+
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+
+    final reconciliation = await PaymentService().checkOrderStatus(orderId);
+
+    if (reconciliation.captured && reconciliation.paymentId != null) {
+      final seatCount =
+          (reconciliation.notes?['seatCount'] as num?)?.toInt() ?? _seats;
+      try {
+        await _activateSubscription(
+          razorpayOrderId: orderId,
+          razorpayPaymentId: reconciliation.paymentId!,
+          seatCount: seatCount,
+        );
+        return; // _activateSubscription already navigated away on success.
+      } catch (e) {
+        if (mounted) {
+          setState(() {
+            _loading = false;
+            _error = 'Payment verification or DB update failed: $e';
+          });
+        }
+        return;
+      }
+    }
+
+    // Log only a CONFIRMED failure so the admin's Failed Payments tab
+    // reflects reality — never log when checkFailed is true, since that
+    // means we genuinely don't know the outcome.
+    if (!reconciliation.checkFailed) {
+      unawaited(PaymentService().logFailedPayment(
+        r.message,
+        orderId: orderId,
+        amount: _razorpayAmount,
+      ));
+    }
+
+    if (!mounted) return;
     setState(() {
       _loading = false;
-      _error = r.message;
+      _error = reconciliation.checkFailed
+          // We genuinely don't know the outcome — never tell a seller who
+          // might have been charged that their payment definitely failed.
+          ? 'We could not confirm your payment status. If any amount was '
+              'deducted, it will be refunded automatically within 5-7 '
+              'business days. Please check back before retrying, or '
+              'contact support.'
+          : r.message;
     });
   }
 
@@ -407,32 +755,86 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
           // ── Seat picker ───────────────────────────────────────────────────
           _SectionCard(
             title: 'Number of Seats',
-            child: Row(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                IconButton(
-                  onPressed:
-                      _seats > 1 ? () => setState(() => _seats--) : null,
-                  icon: const Icon(Icons.remove_circle_outline),
-                  color: AppColors.primary,
+                Row(
+                  children: [
+                    IconButton(
+                      onPressed: _seats > _seatStep
+                          ? () => _setSeats(_seats - _seatStep)
+                          : null,
+                      icon: const Icon(Icons.remove_circle_outline),
+                      color: AppColors.primary,
+                    ),
+                    // Typed entry — buying 100 seats used to mean 100 taps on +.
+                    SizedBox(
+                      width: 76,
+                      child: TextField(
+                        controller: _seatCtrl,
+                        textAlign: TextAlign.center,
+                        keyboardType: TextInputType.number,
+                        inputFormatters: [
+                          FilteringTextInputFormatter.digitsOnly,
+                          LengthLimitingTextInputFormatter(5),
+                        ],
+                        style: AppTextStyles.heading2,
+                        decoration: const InputDecoration(
+                          isDense: true,
+                          contentPadding: EdgeInsets.symmetric(vertical: 8),
+                        ),
+                        // Snap to the 10-block rule only once editing ends, so
+                        // the field stays freely editable while typing (an
+                        // in-progress "1" of "100" must not jump to 10).
+                        onChanged: (v) {
+                          final n = int.tryParse(v);
+                          if (n != null) setState(() => _seats = _normalizeSeats(n));
+                        },
+                        onEditingComplete: () {
+                          _setSeats(int.tryParse(_seatCtrl.text) ?? _seatStep);
+                          FocusScope.of(context).unfocus();
+                        },
+                        onTapOutside: (_) {
+                          _setSeats(int.tryParse(_seatCtrl.text) ?? _seatStep);
+                          FocusScope.of(context).unfocus();
+                        },
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () => _setSeats(_seats + _seatStep),
+                      icon: const Icon(Icons.add_circle_outline),
+                      color: AppColors.primary,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        '$_seats product listing slots',
+                        style: AppTextStyles.body
+                            .copyWith(color: AppColors.onSurfaceVariant),
+                      ),
+                    ),
+                  ],
                 ),
-                SizedBox(
-                  width: 48,
-                  child: Text('$_seats',
-                      textAlign: TextAlign.center,
-                      style: AppTextStyles.heading2),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    for (final n in _seatPresets) ...[
+                      Expanded(
+                        child: ChoiceChip(
+                          label: Text('$n seats'),
+                          selected: _seats == n,
+                          onSelected: (_) => _setSeats(n),
+                        ),
+                      ),
+                      if (n != _seatPresets.last) const SizedBox(width: 8),
+                    ],
+                  ],
                 ),
-                IconButton(
-                  onPressed: () => setState(() => _seats++),
-                  icon: const Icon(Icons.add_circle_outline),
-                  color: AppColors.primary,
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    '$_seats product listing slot${_seats != 1 ? 's' : ''}',
-                    style: AppTextStyles.body
-                        .copyWith(color: AppColors.onSurfaceVariant),
-                  ),
+                const SizedBox(height: 8),
+                Text(
+                  'Sold in blocks of $_seatStep · minimum $_seatStep seats',
+                  style: AppTextStyles.bodySmall
+                      .copyWith(color: AppColors.onSurfaceVariant),
                 ),
               ],
             ),
@@ -443,8 +845,8 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
           _SectionCard(
             title: 'Duration',
             child: Column(
-              children: _durations.map((d) {
-                final selected = _duration.months == d.months;
+              children: _plans.map((d) {
+                final selected = _duration.key == d.key;
                 return GestureDetector(
                   onTap: () => setState(() => _duration = d),
                   child: Container(
@@ -527,7 +929,9 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      '$_seats seat${_seats != 1 ? 's' : ''} × ${_duration.label}',
+                      _duration.isFlat
+                          ? 'Up to ${_duration.includedListings} listings × ${_duration.label}'
+                          : '$_seats seat${_seats != 1 ? 's' : ''} × ${_duration.label}',
                       style: AppTextStyles.bodySmall,
                     ),
                     Text(
@@ -539,7 +943,10 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    Text('₹${_pricePerSeat[_duration.months]}/seat',
+                    Text(
+                        _duration.isFlat
+                            ? 'bundle price'
+                            : '₹${_duration.pricePerSeat}/seat',
                         style: AppTextStyles.caption),
                     Text('one-time payment',
                         style: AppTextStyles.caption
@@ -604,6 +1011,44 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
               ),
             ),
 
+          Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Text.rich(
+              TextSpan(
+                style: AppTextStyles.caption
+                    .copyWith(color: AppColors.onSurfaceVariant, height: 1.5),
+                children: [
+                  const TextSpan(text: 'By proceeding, you agree to KrishiDukan’s '),
+                  TextSpan(
+                    text: 'Terms & Conditions',
+                    style: AppTextStyles.caption.copyWith(
+                      color: AppColors.primary,
+                      fontWeight: FontWeight.bold,
+                      decoration: TextDecoration.underline,
+                      height: 1.5,
+                    ),
+                    recognizer: TapGestureRecognizer()
+                      ..onTap = () => _openLegalDoc(_termsPath),
+                  ),
+                  const TextSpan(text: ' and '),
+                  TextSpan(
+                    text: 'Seller & Manufacturer Subscription Terms',
+                    style: AppTextStyles.caption.copyWith(
+                      color: AppColors.primary,
+                      fontWeight: FontWeight.bold,
+                      decoration: TextDecoration.underline,
+                      height: 1.5,
+                    ),
+                    recognizer: TapGestureRecognizer()
+                      ..onTap = () => _openLegalDoc(_sellerTermsPath),
+                  ),
+                  const TextSpan(text: '.'),
+                ],
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ),
+
           SizedBox(
             width: double.infinity,
             child: FilledButton(
@@ -619,7 +1064,7 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
                       child: CircularProgressIndicator(
                           strokeWidth: 2, color: Colors.white))
                   : Text(
-                      'Pay ${CurrencyUtils.format(totalPrice.toDouble())} · Unlock $_seats seat${_seats != 1 ? 's' : ''}',
+                      'Pay ${CurrencyUtils.format(totalPrice.toDouble())} · Unlock ${_duration.billableSeats(_seats)} seat${_duration.billableSeats(_seats) != 1 ? 's' : ''}',
                       style: AppTextStyles.button,
                     ),
             ),

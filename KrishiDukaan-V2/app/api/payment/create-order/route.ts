@@ -1,13 +1,18 @@
 import { NextResponse } from 'next/server';
 import Razorpay from 'razorpay';
-import { getAdminDb } from '../../../lib/firebase-admin';
+import { getAdminAuth, getAdminDb } from '../../../lib/firebase-admin';
 import {
   DEFAULT_DURATIONS,
   PRICING_DOC_PATH,
   applyDiscount,
+  billableSeats,
+  computeAmount,
+  isPlanAllowed,
+  normalizeSeatCount,
   parseDurations,
   parsePromo,
-  priceFor,
+  planFor,
+  planKey,
   type DurationPrice,
 } from '../../../lib/pricing';
 
@@ -39,6 +44,47 @@ async function loadDurations(): Promise<DurationPrice[]> {
     console.error('[create-order] pricing read failed, using defaults:', e);
     return DEFAULT_DURATIONS;
   }
+}
+
+/**
+ * The account role behind this request, from a verified Firebase ID token.
+ *
+ * Deliberately NOT taken from the request body. The body already carries a
+ * `userId`, but anyone can put anyone's uid in a body — and since the plan a
+ * seller is allowed to buy now depends on their role, trusting that field would
+ * let a manufacturer claim a retailer's uid, get the retailer bundle price, and
+ * then write the subscription against their own account.
+ *
+ * Returns null when there is no usable token. Callers must treat null as
+ * "unknown role", which isPlanAllowed() denies on any restricted plan — so an
+ * older client that sends no token can still buy the open per-listing plans and
+ * simply cannot buy a role-restricted one.
+ */
+async function resolveCallerRole(request: Request): Promise<string | null> {
+  const authHeader = request.headers.get('Authorization') ?? '';
+  if (!authHeader.startsWith('Bearer ')) return null;
+
+  try {
+    const decoded = await getAdminAuth().verifyIdToken(authHeader.slice(7));
+    const adminDb = getAdminDb();
+
+    // Same uid → uidIndex → phone resolution the rest of the codebase uses:
+    // accounts are keyed by phone, with uid-keyed docs for admin-created ones.
+    const [byUid, idx] = await Promise.all([
+      adminDb.collection('users').doc(decoded.uid).get(),
+      adminDb.collection('uidIndex').doc(decoded.uid).get(),
+    ]);
+    if (byUid.exists && byUid.data()?.role) return String(byUid.data()!.role);
+
+    const phone = idx.exists ? String(idx.data()?.phone ?? '') : '';
+    if (phone) {
+      const byPhone = await adminDb.collection('users').doc(phone).get();
+      if (byPhone.exists && byPhone.data()?.role) return String(byPhone.data()!.role);
+    }
+  } catch (e) {
+    console.error('[create-order] role resolution failed:', e);
+  }
+  return null;
 }
 
 /**
@@ -88,22 +134,55 @@ async function resolveDiscount(rawCode: unknown): Promise<number> {
 
 export async function POST(request: Request) {
   try {
-    const { seatCount, durationMonths, promoCode, userId } = await request.json();
+    const { seatCount, durationMonths, planId, promoCode, userId } = await request.json();
 
     const durations = await loadDurations();
+    const callerRole = await resolveCallerRole(request);
 
-    const seats = Math.max(1, parseInt(String(seatCount), 10) || 1);
+    // Seats sell in blocks of 10 with a 10-seat minimum. Enforced here as well
+    // as in the purchase UIs so the rule holds even for a request that didn't
+    // come from them; both sides use the same helper, so the charged seat count
+    // matches the one the seller was shown.
+    const seats = normalizeSeatCount(seatCount);
 
     // Unknown/absent period falls back to the shortest offered one rather than
     // assuming a literal 1 month — the ladder is admin-editable now and may not
     // contain a 1-month entry.
-    const requested = Number(durationMonths);
-    const months =
-      priceFor(durations, requested) !== null ? requested : durations[0]!.months;
-    const unitPrice = priceFor(durations, months)!;
+    // planId identifies the exact row; durationMonths is the legacy fallback for
+    // clients that predate bundles. Neither is trusted for the price itself.
+    const requestedPlan = planFor(durations, planId ?? durationMonths);
+
+    // A plan the caller may not buy is refused outright rather than quietly
+    // swapped for one they can: silently charging a different price than the
+    // screen showed is the failure this whole path exists to prevent.
+    if (requestedPlan && !isPlanAllowed(requestedPlan, callerRole)) {
+      return NextResponse.json(
+        {
+          error:
+            'This plan is not available for your account type. Please pick another plan or contact support.',
+        },
+        { status: 403 },
+      );
+    }
+
+    // Falling back to the first plan the caller is actually allowed to buy.
+    const allowed = durations.filter((d) => isPlanAllowed(d, callerRole));
+    if (allowed.length === 0) {
+      return NextResponse.json(
+        { error: 'No subscription plan is available for your account type.' },
+        { status: 403 },
+      );
+    }
+    const plan = requestedPlan ?? allowed[0]!;
+    const months = plan.months;
+    const unitPrice = plan.pricePerSeat;
+
+    // Seats are clamped to what the plan includes BEFORE pricing, so a flat plan
+    // cannot be turned into unlimited listings by sending a large seatCount.
+    const grantedSeats = billableSeats(plan, seats);
 
     const discountPercent = await resolveDiscount(promoCode);
-    const subtotal = seats * unitPrice;
+    const subtotal = computeAmount(plan, grantedSeats);
     const baseAmount = discountPercent
       ? applyDiscount(subtotal, discountPercent)
       : subtotal;
@@ -114,20 +193,27 @@ export async function POST(request: Request) {
       receipt: `receipt_${Date.now()}`,
       notes: {
         userId:         userId || '',
-        seatCount:      seats,
+        seatCount:      grantedSeats,
         durationMonths: months,
         promoCode:      promoCode || '',
         unitPrice,
+        planId: planKey(plan),
         discountPercent,
+        // The rupee amount actually charged. verify/ reads this back off the
+        // order so the record written afterwards can never be re-derived from a
+        // stale price table.
+        amountCharged:  baseAmount,
       },
     };
 
     const order = await razorpay.orders.create(options);
     return NextResponse.json({
       ...order,
-      seatCount:      seats,
+      seatCount:      grantedSeats,
       durationMonths: months,
       unitPrice,
+      planId:         planKey(plan),
+      amountCharged:  baseAmount,
       discountPercent,
       // Return the key used to create this order so the mobile always opens
       // Razorpay with the matching key (prevents key-mismatch errors).

@@ -10,9 +10,17 @@ import { db } from '../firebase';
 import {
   DEFAULT_DURATIONS,
   PRICING_DOC_PATH,
+  SEAT_PRESETS,
+  SEAT_STEP,
+  billableSeats,
+  computeAmount,
+  isPlanAllowed,
+  normalizeSeatCount,
+  planKey,
   parseDurations,
   type DurationPrice,
 } from '../lib/pricing';
+import { LEGAL_ROUTES, TERMS_VERSION } from '../lib/legal-constants';
 
 interface SubscriptionViewProps {
   user: any;
@@ -32,6 +40,10 @@ type DurationOption = {
   label: string;
   pricePerSeat: number;
   badge?: string;
+  id?: string;
+  /** Set on bundle plans ("Rs 4,999 for 50 listings"); overrides pricePerSeat. */
+  flatPrice?: number;
+  includedListings?: number;
 };
 
 /** "1 Month" / "3 Months" / "1 Year" from a month count. */
@@ -42,10 +54,14 @@ function durationLabel(months: number): string {
 }
 
 const toOption = (d: DurationPrice): DurationOption => ({
+  id: planKey(d),
   months: d.months,
   label: durationLabel(d.months),
   pricePerSeat: d.pricePerSeat,
   ...(d.badge ? { badge: d.badge } : {}),
+  ...(d.flatPrice !== undefined
+    ? { flatPrice: d.flatPrice, includedListings: d.includedListings }
+    : {}),
 });
 
 /**
@@ -61,8 +77,8 @@ export default function SubscriptionView({ user, role, onSuccess, onLogout }: Su
   const { t } = useI18n();
   const [loading,      setLoading]      = useState(false);
   const [verifying,    setVerifying]    = useState(false);
-  const [seatCount,    setSeatCount]    = useState(1);
-  const [seatInput,    setSeatInput]    = useState('1');
+  const [seatCount,    setSeatCount]    = useState<number>(SEAT_STEP);
+  const [seatInput,    setSeatInput]    = useState(String(SEAT_STEP));
   const [options,      setOptions]      = useState<DurationOption[]>(DURATION_OPTIONS);
   const [duration,     setDuration]     = useState<DurationOption>(DURATION_OPTIONS[0]!);
   const [promoCode,    setPromoCode]    = useState('');
@@ -70,6 +86,9 @@ export default function SubscriptionView({ user, role, onSuccess, onLogout }: Su
   const [promoLoading, setPromoLoading] = useState(false);
   const [promoError,   setPromoError]   = useState<string | null>(null);
   const [error,        setError]        = useState<string | null>(null);
+
+  const premiumRole: PremiumRole = role === 'manufacturer' ? 'manufacturer' : 'retailer';
+  const isRetailer = premiumRole === 'retailer';
 
   // Load the live pricing ladder. Falls back silently to DURATION_OPTIONS on
   // any failure — an unreachable settings doc must not block a seller from
@@ -85,7 +104,11 @@ export default function SubscriptionView({ user, role, onSuccess, onLogout }: Su
         if (cancelled || !snap.exists()) return;
         const parsed = parseDurations(snap.data());
         if (!parsed?.length) return;
-        const next = parsed.map(toOption);
+        // Mirror of the server-side gate in create-order. Showing a plan the
+        // seller would be refused at checkout is worse than not showing it.
+        const visible = parsed.filter((d) => isPlanAllowed(d, premiumRole));
+        if (!visible.length) return;
+        const next = visible.map(toOption);
         setOptions(next);
         // Keep the selection valid if the admin removed the chosen period.
         setDuration((cur) => next.find((o) => o.months === cur.months) ?? next[0]!);
@@ -94,10 +117,8 @@ export default function SubscriptionView({ user, role, onSuccess, onLogout }: Su
       }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [premiumRole]);
 
-  const premiumRole: PremiumRole = role === 'manufacturer' ? 'manufacturer' : 'retailer';
-  const isRetailer = premiumRole === 'retailer';
 
   const content = {
     badge:    isRetailer ? t('retailerPremiumBadge')    : t('manufacturerPremiumBadge'),
@@ -108,20 +129,37 @@ export default function SubscriptionView({ user, role, onSuccess, onLogout }: Su
       : [t('manufacturerBenefit1'), t('manufacturerBenefit2'), t('manufacturerBenefit3'), t('manufacturerBenefit4')],
   };
 
-  const baseTotal   = seatCount * duration.pricePerSeat;
+  // Same function create-order prices the charge with, so what the seller is
+  // shown and what Razorpay bills cannot drift.
+  const grantedSeats = billableSeats(duration, seatCount);
+  const baseTotal   = computeAmount(duration, seatCount);
   const discountAmt = promoApplied ? Math.floor(baseTotal * promoApplied.discountPct / 100) : 0;
   const finalTotal  = baseTotal - discountAmt;
 
+  // Seats sell in blocks of SEAT_STEP with a SEAT_STEP minimum. While typing,
+  // the raw text is kept as-is so the field stays editable (a seller clearing
+  // it to retype shouldn't have "10" jump back in), and only the priced
+  // seatCount is snapped to the rule — the same normalizeSeatCount the server
+  // applies, so the total shown here is the total charged.
   const handleSeatInput = (val: string) => {
     setSeatInput(val);
     const n = parseInt(val, 10);
-    if (!isNaN(n) && n >= 1 && n <= 10000) setSeatCount(n);
+    if (!isNaN(n) && n <= 10000) setSeatCount(normalizeSeatCount(n));
   };
 
+  // Snap the visible text to the real seat count once the seller leaves the
+  // field, so a typed "15" doesn't keep displaying while 20 is being charged.
+  const commitSeatInput = () => setSeatInput(String(seatCount));
+
   const adjustSeats = (delta: number) => {
-    const next = Math.max(1, seatCount + delta);
+    const next = normalizeSeatCount(seatCount + delta * SEAT_STEP);
     setSeatCount(next);
     setSeatInput(String(next));
+  };
+
+  const selectSeatPreset = (n: number) => {
+    setSeatCount(n);
+    setSeatInput(String(n));
   };
 
   const applyPromo = async () => {
@@ -160,12 +198,19 @@ export default function SubscriptionView({ user, role, onSuccess, onLogout }: Su
       if (typeof window === 'undefined' || !window.Razorpay) {
         throw new Error('Payment gateway is not ready. Please refresh and try again.');
       }
+      // The server resolves the buyer's role from this token, not from userId —
+      // a role-restricted plan cannot be bought without it.
+      const idToken = await user.getIdToken?.();
       const response = await fetch('/api/payment/create-order', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+        },
         body: JSON.stringify({
           seatCount,
           durationMonths: duration.months,
+          planId: duration.id,
           promoCode: promoApplied?.code ?? null,
           userId: user.uid,
         }),
@@ -200,7 +245,17 @@ export default function SubscriptionView({ user, role, onSuccess, onLogout }: Su
             const updateResult = await updateSubscriptionStatus(user.uid, 'paid', {
               orderId:   paymentResponse.razorpay_order_id,
               paymentId: paymentResponse.razorpay_payment_id,
-            }, verifyData.seatCount || seatCount, duration.months);
+            }, verifyData.seatCount || grantedSeats, duration.months, verifyData.amountPaid,
+              // What the seller was shown immediately above the pay button, and
+              // therefore what they accepted by pressing it. Recorded against
+              // the subscription so "which terms did this seller agree to" is
+              // answerable from the data rather than from git history.
+              {
+                version: TERMS_VERSION,
+                documents: [LEGAL_ROUTES.terms, LEGAL_ROUTES.sellerTerms],
+                acceptedAt: new Date().toISOString(),
+                surface: 'web:subscription-checkout',
+              });
 
             if (!updateResult.paymentLogged) {
               setVerifying(false);
@@ -443,32 +498,54 @@ export default function SubscriptionView({ user, role, onSuccess, onLogout }: Su
                 </div>
 
                 {/* Listing count stepper */}
-                <div className="flex justify-between items-center bg-surface-container-lowest p-4 rounded-xl border border-outline-variant/40">
-                  <div>
-                    <p className="text-sm font-bold text-on-surface">{t('numberOfSeats')}</p>
-                    <p className="text-[10px] text-on-surface-variant mt-0.5">आजच 1 listing ने सुरुवात करा</p>
+                <div className="bg-surface-container-lowest p-4 rounded-xl border border-outline-variant/40">
+                  <div className="flex justify-between items-center">
+                    <div>
+                      <p className="text-sm font-bold text-on-surface">{t('numberOfSeats')}</p>
+                      <p className="text-[10px] text-on-surface-variant mt-0.5">
+                        {SEAT_STEP} listings पासून सुरुवात · {SEAT_STEP} च्या पटीत
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-1.5 bg-white rounded-xl p-1 border border-outline-variant/20 shadow-sm">
+                      <button
+                        onClick={() => adjustSeats(-1)}
+                        disabled={seatCount <= SEAT_STEP}
+                        className="w-8 h-8 rounded-lg flex items-center justify-center hover:bg-surface-container transition-colors text-on-surface font-bold disabled:opacity-30 disabled:hover:bg-transparent"
+                      >
+                        −
+                      </button>
+                      <input
+                        type="number"
+                        min={SEAT_STEP}
+                        max={10000}
+                        step={SEAT_STEP}
+                        value={seatInput}
+                        onChange={(e) => handleSeatInput(e.target.value)}
+                        onBlur={commitSeatInput}
+                        className="text-base font-black w-16 text-center bg-transparent h-8 text-on-surface outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                      />
+                      <button
+                        onClick={() => adjustSeats(1)}
+                        className="w-8 h-8 rounded-lg flex items-center justify-center hover:bg-surface-container transition-colors text-on-surface font-bold"
+                      >
+                        +
+                      </button>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-1.5 bg-white rounded-xl p-1 border border-outline-variant/20 shadow-sm">
-                    <button
-                      onClick={() => adjustSeats(-1)}
-                      className="w-8 h-8 rounded-lg flex items-center justify-center hover:bg-surface-container transition-colors text-on-surface font-bold"
-                    >
-                      −
-                    </button>
-                    <input
-                      type="number"
-                      min={1}
-                      max={10000}
-                      value={seatInput}
-                      onChange={(e) => handleSeatInput(e.target.value)}
-                      className="text-base font-black w-12 text-center bg-transparent h-8 text-on-surface outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                    />
-                    <button
-                      onClick={() => adjustSeats(1)}
-                      className="w-8 h-8 rounded-lg flex items-center justify-center hover:bg-surface-container transition-colors text-on-surface font-bold"
-                    >
-                      +
-                    </button>
+                  <div className="flex gap-2 mt-3">
+                    {SEAT_PRESETS.map((n) => (
+                      <button
+                        key={n}
+                        onClick={() => selectSeatPreset(n)}
+                        className={`flex-1 py-2 rounded-lg text-xs font-bold border transition-colors ${
+                          seatCount === n
+                            ? 'bg-primary text-white border-primary'
+                            : 'bg-white text-on-surface border-outline-variant/40 hover:bg-surface-container'
+                        }`}
+                      >
+                        {n} seats
+                      </button>
+                    ))}
                   </div>
                 </div>
 
@@ -509,7 +586,9 @@ export default function SubscriptionView({ user, role, onSuccess, onLogout }: Su
                   <div className="flex items-end justify-between">
                     <span className="text-3xl font-black text-on-surface tracking-tight">₹{finalTotal}.00</span>
                     <span className="text-[10px] text-on-surface-variant bg-white border border-outline-variant/20 rounded-lg px-2 py-1 font-semibold">
-                      ₹{duration.pricePerSeat} × {seatCount} listing{seatCount !== 1 ? 's' : ''} · {duration.label}
+                      {duration.flatPrice !== undefined
+                        ? `₹${duration.flatPrice} · up to ${duration.includedListings} listings · ${duration.label}`
+                        : `₹${duration.pricePerSeat} × ${seatCount} listing${seatCount !== 1 ? 's' : ''} · ${duration.label}`}
                     </span>
                   </div>
                 </div>
@@ -535,6 +614,28 @@ export default function SubscriptionView({ user, role, onSuccess, onLogout }: Su
                       : `List ${seatCount} Products for ₹${finalTotal} · ${duration.label}`
                   }
                 </button>
+
+                <p className="text-[11px] leading-relaxed text-on-surface-variant text-center">
+                  By proceeding, you agree to KrishiDukan&apos;s{' '}
+                  <a
+                    href={LEGAL_ROUTES.terms}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-bold text-primary hover:underline"
+                  >
+                    Terms &amp; Conditions
+                  </a>{' '}
+                  and{' '}
+                  <a
+                    href={LEGAL_ROUTES.sellerTerms}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-bold text-primary hover:underline"
+                  >
+                    Seller &amp; Manufacturer Subscription Terms
+                  </a>
+                  .
+                </p>
 
                 <div className="flex flex-col items-center gap-2">
                   <p className="text-[10px] text-on-surface-variant font-semibold flex items-center gap-1.5 opacity-70">
