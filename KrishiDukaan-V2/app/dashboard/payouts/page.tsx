@@ -29,6 +29,7 @@ import {
 } from "lucide-react";
 import { db } from "../../firebase";
 import { PageHeader } from "../_components/page-header";
+import { KycDocuments } from "../_components/kyc-documents";
 import { useEffectiveUser } from "../_context/effective-user-context";
 
 // ─── validation ───────────────────────────────────────────────────────────────
@@ -447,6 +448,20 @@ export default function PayoutsPage() {
             <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" />
             These details are visible only to you and are used solely to send your order payouts.
           </p>
+        </div>
+      ) : null}
+
+      {/* Supporting evidence for the bank details above. Kept outside the
+          edit/view toggle so a seller can add a missing document without
+          re-opening and re-submitting the whole bank form. */}
+      {phone ? (
+        <div className="mt-6">
+          <KycDocuments
+            phone={phone}
+            // Once verified, the documents are the basis of that decision —
+            // changing them silently would leave the approval unbacked.
+            readOnly={saved?.status === "verified"}
+          />
         </div>
       ) : null}
     </div>
