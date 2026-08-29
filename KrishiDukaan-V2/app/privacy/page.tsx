@@ -15,6 +15,10 @@ import React from 'react';
 export const metadata = {
   title: 'Privacy Policy – KrishiDukan',
   description: 'Privacy Policy and data practices for KrishiDukan mobile app and website.',
+  // Without this the page inherits the root layout's canonical and tells Google
+  // the homepage is the original of this one — a submitted URL disowning itself.
+  // Relative: resolved against metadataBase in app/layout.tsx.
+  alternates: { canonical: '/privacy' },
 };
 
 export default function PrivacyPage() {
