@@ -5,6 +5,10 @@ import '../data/dashboard_repository.dart';
 import '../data/store_analytics.dart';
 import '../../../core/data/product_schema_repository.dart';
 import '../../../core/models/subscription_model.dart';
+import '../../../core/models/payout_account_model.dart';
+import '../data/payout_repository.dart';
+import '../data/seller_earnings.dart';
+import '../../orders/data/order_repository.dart';
 
 final _repo = DashboardRepository();
 
@@ -66,4 +70,30 @@ final subscriptionHistoryProvider =
 final activeSeatListingsProvider =
     FutureProvider.family<List<SeatListingModel>, String>((ref, phone) {
   return _repo.fetchActiveSeatListings(phone);
+});
+
+// ─── Payouts ────────────────────────────────────────────────────────────────
+
+final payoutRepoProvider = Provider((_) => PayoutRepository());
+
+/// The seller's saved bank account, or null if they have not set one up.
+final payoutAccountProvider = FutureProvider<PayoutAccountModel?>((ref) {
+  return ref.watch(payoutRepoProvider).fetch();
+});
+
+/// Live orders where the current user is the seller — the raw input to the
+/// earnings math.
+final sellerPayoutOrdersProvider = StreamProvider<List<OrderModel>>((ref) {
+  return OrderRepository().watchSellerOrders();
+});
+
+/// What the seller is owed, on hold, awaiting delivery, and already paid.
+///
+/// Derived from the same order documents the seller already sees, using the
+/// exact rules the web dashboard and the payout run use, so the app can never
+/// quote a different figure than the money that actually moves.
+final sellerEarningsProvider = Provider<AsyncValue<SellerEarnings>>((ref) {
+  return ref
+      .watch(sellerPayoutOrdersProvider)
+      .whenData((orders) => computeSellerEarnings(orders));
 });
