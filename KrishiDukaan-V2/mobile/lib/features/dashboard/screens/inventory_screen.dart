@@ -18,6 +18,8 @@ import '../../../core/widgets/error_view.dart';
 import '../../marketplace/data/catalog_repository.dart';
 import '../data/dashboard_repository.dart';
 import '../providers/dashboard_provider.dart';
+import '../../../core/data/product_schema_repository.dart';
+import '../widgets/product_form_sections.dart';
 // SeatStats is defined in dashboard_repository.dart
 
 /// Mirrors DEFAULT_LOW_STOCK_THRESHOLD in
@@ -728,6 +730,13 @@ class _AddListingSheetState extends ConsumerState<_AddListingSheet> {
   double _gstRate = 18.0;
   String _sellMode = 'online_delivery';
 
+  // Web-parity product detail fields (see product_form_sections.dart).
+  // categoryInfo values are String, except `chips` fields which are
+  // List<String> — the same shape web writes.
+  final Map<String, dynamic> _categoryInfo = {};
+  List<Map<String, String>> _composition = [];
+  List<Map<String, String>> _customFields = [];
+  String _videoUrl = '';
 
   bool _saving = false;
   final _catalogRepo = CatalogRepository();
@@ -995,29 +1004,43 @@ class _AddListingSheetState extends ConsumerState<_AddListingSheet> {
                   ),
                 ),
                 const SizedBox(height: 8),
-                DropdownButtonFormField<String>(
-                  // ignore: deprecated_member_use
-                  value: _category,
-                  decoration: InputDecoration(
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
-                  items:
-                      [
-                            'Fertilizers',
-                            'Seeds',
-                            'Pesticides',
-                            'Irrigation',
-                            'Tools',
-                            'Organic',
-                            'Herbicides',
-                          ]
+                // Categories come from `settings/productSchema` — the same doc
+                // the web dashboard reads — so the two platforms can never
+                // drift apart again, and a new category doesn't need an app
+                // release. This list used to be hardcoded here and had already
+                // diverged from web's: it offered Irrigation/Organic (which no
+                // product uses) while missing Bio-Stimulants, and neither
+                // platform offered Adjuvants despite 333 products using it.
+                Builder(
+                  builder: (context) {
+                    final schema = ref.watch(productSchemaProvider).value ??
+                        ProductSchemaRepository.fallback;
+                    final categories = schema.categories;
+                    // A product saved under a category no longer in the list
+                    // (legacy 'Irrigation', a free-text value, or a category
+                    // added on web after this build) must still round-trip
+                    // rather than silently resetting the seller's choice.
+                    final options = categories.contains(_category)
+                        ? categories
+                        : [_category, ...categories];
+                    return DropdownButtonFormField<String>(
+                      // ignore: deprecated_member_use
+                      value: _category,
+                      isExpanded: true,
+                      decoration: InputDecoration(
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      items: options
                           .map(
                             (c) => DropdownMenuItem(value: c, child: Text(c)),
                           )
                           .toList(),
-                  onChanged: (v) => setState(() => _category = v ?? _category),
+                      onChanged: (v) =>
+                          setState(() => _category = v ?? _category),
+                    );
+                  },
                 ),
                 const SizedBox(height: 16),
 
@@ -1060,6 +1083,61 @@ class _AddListingSheetState extends ConsumerState<_AddListingSheet> {
                   ),
                 ),
                 const SizedBox(height: 20),
+
+                // ── Web-parity sections ─────────────────────────────────
+                // Order matches the web Add Product form: Category Info →
+                // Composition → Additional Information, between Description
+                // and Pack Sizes.
+                Builder(
+                  builder: (context) {
+                    final schema = ref.watch(productSchemaProvider).value ??
+                        ProductSchemaRepository.fallback;
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        CategoryInfoSection(
+                          schema: schema,
+                          category: _category,
+                          values: _categoryInfo,
+                          onChanged: (key, value) {
+                            // No setState: the editors hold their own text
+                            // state, and rebuilding here would fight the
+                            // cursor position while typing.
+                            _categoryInfo[key] = value;
+                          },
+                        ),
+                        if (schema.showsComposition(_category))
+                          KeyValueRowsSection(
+                            title: 'Composition',
+                            subtitle:
+                                'Ingredients & nutrients shown on the product page',
+                            keyName: 'name',
+                            valueName: 'value',
+                            keyLabel: 'Component / Ingredient',
+                            valueLabel: 'Value / %',
+                            addLabel: 'Add component',
+                            rows: _composition,
+                            onChanged: (rows) => _composition = rows,
+                          ),
+                        KeyValueRowsSection(
+                          title: 'Additional Information',
+                          subtitle: 'Any other detail buyers should see',
+                          keyName: 'title',
+                          valueName: 'value',
+                          keyLabel: 'Title',
+                          valueLabel: 'Value',
+                          addLabel: 'Add information',
+                          rows: _customFields,
+                          onChanged: (rows) => _customFields = rows,
+                        ),
+                        ProductVideoSection(
+                          initialValue: _videoUrl,
+                          onChanged: (v) => _videoUrl = v,
+                        ),
+                      ],
+                    );
+                  },
+                ),
 
                 // Variants list
                 Text(
@@ -1428,6 +1506,20 @@ class _AddListingSheetState extends ConsumerState<_AddListingSheet> {
       return;
     }
 
+    // The video field is optional, but a non-empty value that isn't a
+    // YouTube link renders nothing on the product page — so reject it here
+    // rather than saving something the buyer will never see. Checked
+    // explicitly because this sheet is a plain Column, not a Form, so
+    // TextFormField validators never run on their own.
+    if (_videoUrl.trim().isNotEmpty && extractYouTubeId(_videoUrl) == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Enter a valid YouTube link, or leave the video empty.'),
+        ),
+      );
+      return;
+    }
+
     // Enforce seat limit before writing
     final seatStats = ref.read(seatStatsProvider(widget.sellerPhone)).value;
     if (seatStats != null && seatStats.available <= 0) {
@@ -1523,7 +1615,33 @@ class _AddListingSheetState extends ConsumerState<_AddListingSheet> {
         sellMode: _sellMode,
         gstApplicable: _gstApplicable,
         gstRate: _gstRate,
+        // Drop empty values so a product never carries a blank map/array.
+        categoryInfo: Map<String, dynamic>.fromEntries(
+          _categoryInfo.entries.where((e) {
+            final v = e.value;
+            if (v is List) return v.isNotEmpty;
+            return v != null && v.toString().trim().isNotEmpty;
+          }),
+        ),
+        composition: _composition,
+        customFields: _customFields,
+        videoUrl: _videoUrl,
       );
+
+      // Choosing online delivery for a product must also switch the
+      // ACCOUNT-level flag on, otherwise the web dashboard's Delivery Settings
+      // page stays locked ("Online delivery disabled") and the seller can never
+      // reach their delivery charges — it gates on users/{phone}.onlineDelivery,
+      // which nothing on mobile used to write.
+      if (_sellMode != 'offline_store_only') {
+        await DashboardRepository().setAccountOnlineDelivery(
+          widget.sellerPhone,
+          enabled: true,
+          isManufacturer:
+              ref.read(currentUserProvider).value?.isManufacturer ?? false,
+        );
+      }
+
       if (mounted) Navigator.pop(context);
     } catch (e) {
       if (mounted) {
@@ -2121,8 +2239,16 @@ class _EditListingSheetState extends State<_EditListingSheet> {
         if (imageUrls.isNotEmpty) 'imageUrl': imageUrls.first,
         'variants': variants.map((v) => v.toMap()).toList(),
         // Canonical FLAT discount schema (shared with web).
+        //
+        // `discountType` is deliberately NOT written here. This sheet edits
+        // price/stock/percentage and has no type or fixed-amount control, so
+        // hardcoding 'percentage' — as it used to — silently converted a
+        // seller's fixed-amount (₹) discount set on web into a percentage one
+        // every time they edited anything else about the product, leaving a
+        // stale discountFixedAmt behind and making the ₹ discount vanish for
+        // buyers. Omitting the key leaves whatever type is stored intact; the
+        // Discount sheet is where the type is actually chosen.
         'discountEnabled': _discountActive,
-        'discountType': 'percentage',
         'discountPct': _discountPct,
         'effectiveDiscountPct': effectiveDiscountPct,
         'sellMode': _sellMode,
@@ -2157,6 +2283,20 @@ class _EditListingSheetState extends State<_EditListingSheet> {
           effectiveDiscountPct: effectiveDiscountPct,
         );
       }
+
+      // Switching a product to online delivery must also turn the
+      // ACCOUNT-level flag on — see setAccountOnlineDelivery. Without it the
+      // web Delivery Settings page stays locked and the seller never sees their
+      // delivery charges.
+      if (_sellMode != 'offline_store_only' &&
+          widget.listing.sellerPhone.isNotEmpty) {
+        await repo.setAccountOnlineDelivery(
+          widget.listing.sellerPhone,
+          enabled: true,
+          isManufacturer: widget.listing.sellerType == 'manufacturer',
+        );
+      }
+
       if (mounted) Navigator.pop(context);
     } finally {
       if (mounted) setState(() => _saving = false);
@@ -2199,6 +2339,12 @@ class _DiscountSheet extends StatefulWidget {
 class _DiscountSheetState extends State<_DiscountSheet> {
   late bool _isActive;
   late double _percentage;
+  /// 'percentage' | 'fixed_amount' — matches web's discount-panel type
+  /// selector. The app previously offered percentage only, and its save path
+  /// hardcoded the type, which silently converted a seller's ₹ discount set
+  /// on web into a percentage one.
+  late String _type;
+  late final TextEditingController _fixedCtrl;
   DateTime? _startDate;
   DateTime? _endDate;
   bool _saving = false;
@@ -2206,10 +2352,57 @@ class _DiscountSheetState extends State<_DiscountSheet> {
   @override
   void initState() {
     super.initState();
-    _isActive = widget.listing.discount?.isActive ?? false;
-    _percentage = widget.listing.discount?.percentage ?? 10;
-    _startDate = widget.listing.discount?.startDate;
-    _endDate = widget.listing.discount?.endDate;
+    final d = widget.listing.discount;
+    _isActive = d?.isActive ?? false;
+    _percentage = d?.percentage ?? 10;
+    _type = d?.type ?? 'percentage';
+    _fixedCtrl = TextEditingController(
+      text: (d?.fixedAmount ?? 0) > 0
+          ? (d!.fixedAmount % 1 == 0
+              ? d.fixedAmount.toInt().toString()
+              : d.fixedAmount.toString())
+          : '',
+    );
+    _startDate = d?.startDate;
+    _endDate = d?.endDate;
+  }
+
+  @override
+  void dispose() {
+    _fixedCtrl.dispose();
+    super.dispose();
+  }
+
+  double get _fixedAmount => double.tryParse(_fixedCtrl.text.trim()) ?? 0;
+
+  /// Live preview of what a buyer pays — the same feedback web's panel gives.
+  double get _previewPrice {
+    final base = widget.listing.price;
+    if (!_isActive) return base;
+    final off = _type == 'fixed_amount'
+        ? _fixedAmount.clamp(0, base)
+        : base * _percentage / 100;
+    return (base - off).clamp(0, base);
+  }
+
+  /// Mirrors web's validation so the app can't save a discount web rejects.
+  String? get _validationError {
+    if (!_isActive) return null;
+    if (_type == 'fixed_amount') {
+      final amt = _fixedAmount;
+      if (amt <= 0) return 'Enter a discount amount greater than 0.';
+      if (amt >= widget.listing.price) {
+        return 'Discount must be less than the price '
+            '(₹${widget.listing.price.toStringAsFixed(0)}).';
+      }
+    } else if (_percentage < 1 || _percentage > 99) {
+      return 'Percentage must be between 1 and 99.';
+    }
+    if (_startDate != null && _endDate != null &&
+        !_endDate!.isAfter(_startDate!)) {
+      return 'End date must be after the start date.';
+    }
+    return null;
   }
 
   @override
@@ -2237,25 +2430,92 @@ class _DiscountSheetState extends State<_DiscountSheet> {
           ),
           const SizedBox(height: 12),
 
-          Row(
-            children: [
-              Text(
-                'Discount: ${_percentage.toInt()}%',
-                style: AppTextStyles.bodyMedium,
-              ),
-              Expanded(
-                child: Slider(
-                  value: _percentage,
-                  min: 1,
-                  max: 80,
-                  divisions: 79,
-                  activeColor: AppColors.primary,
-                  onChanged: _isActive
-                      ? (v) => setState(() => _percentage = v)
-                      : null,
+          // Type selector — web offers percentage OR a flat rupee amount.
+          SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(value: 'percentage', label: Text('Percentage')),
+              ButtonSegment(value: 'fixed_amount', label: Text('Fixed ₹')),
+            ],
+            selected: {_type},
+            onSelectionChanged: _isActive
+                ? (sel) => setState(() => _type = sel.first)
+                : null,
+            showSelectedIcon: false,
+          ),
+          const SizedBox(height: 12),
+
+          if (_type == 'percentage')
+            Row(
+              children: [
+                Text(
+                  'Discount: ${_percentage.toInt()}%',
+                  style: AppTextStyles.bodyMedium,
+                ),
+                Expanded(
+                  child: Slider(
+                    value: _percentage.clamp(1, 99),
+                    min: 1,
+                    // Web validates 1–99; the app's old 80 cap silently
+                    // refused discounts web allows.
+                    max: 99,
+                    divisions: 98,
+                    activeColor: AppColors.primary,
+                    onChanged: _isActive
+                        ? (v) => setState(() => _percentage = v)
+                        : null,
+                  ),
+                ),
+              ],
+            )
+          else
+            TextField(
+              controller: _fixedCtrl,
+              enabled: _isActive,
+              keyboardType:
+                  const TextInputType.numberWithOptions(decimal: true),
+              onChanged: (_) => setState(() {}),
+              decoration: InputDecoration(
+                labelText: 'Discount amount (₹)',
+                prefixText: '₹ ',
+                isDense: true,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
                 ),
               ),
-            ],
+            ),
+          const SizedBox(height: 12),
+
+          // Live price preview, same as web's panel.
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: AppColors.surfaceVariant,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Row(
+              children: [
+                Text('Buyer pays', style: AppTextStyles.bodySmall),
+                const Spacer(),
+                if (_isActive && _previewPrice < widget.listing.price) ...[
+                  Text(
+                    '₹${widget.listing.price.toStringAsFixed(0)}',
+                    style: AppTextStyles.bodySmall.copyWith(
+                      color: AppColors.onSurfaceVariant,
+                      decoration: TextDecoration.lineThrough,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                ],
+                Text(
+                  '₹${_previewPrice.toStringAsFixed(0)}',
+                  style: AppTextStyles.bodyMedium.copyWith(
+                    color: AppColors.primary,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
           ),
           const SizedBox(height: 8),
 
@@ -2305,16 +2565,37 @@ class _DiscountSheetState extends State<_DiscountSheet> {
   }
 
   Future<void> _save() async {
+    // Same rules web's panel enforces, so a discount saved here can't be one
+    // web would have rejected.
+    final error = _validationError;
+    if (error != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(error), backgroundColor: AppColors.error),
+      );
+      return;
+    }
+
     setState(() => _saving = true);
     try {
       await DashboardRepository().setDiscount(
         widget.listing.id,
         isActive: _isActive,
         percentage: _percentage,
+        discountType: _type,
+        fixedAmount: _fixedAmount,
         startDate: _startDate,
         endDate: _endDate,
       );
       if (mounted) Navigator.pop(context);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Could not save discount: $e'),
+            backgroundColor: AppColors.error,
+          ),
+        );
+      }
     } finally {
       if (mounted) setState(() => _saving = false);
     }

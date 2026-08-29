@@ -38,8 +38,13 @@ List<DashboardNavItem> buildDashboardNavItems({
       const DashboardNavItem(Icons.groups_outlined, 'Retailer network',
           '/dashboard/manufacturer/retailers'),
     if (isSeller)
-      const DashboardNavItem(
-          Icons.credit_card_outlined, 'Subscription', '/subscription'),
+      // Points at the management dashboard (history + active listings), not
+      // the purchase screen — "Buy more seats" there routes on to
+      // /subscription. Previously this was the only subscription entry point
+      // and went straight to checkout, so a seller could buy seats but never
+      // see what they owned or what was consuming it.
+      const DashboardNavItem(Icons.credit_card_outlined, 'Subscription',
+          '/dashboard/subscription'),
     const DashboardNavItem(
         Icons.video_collection_outlined, 'Reels', '/dashboard/reels'),
     const DashboardNavItem(

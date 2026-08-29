@@ -9,16 +9,22 @@ import 'package:firebase_storage/firebase_storage.dart';
 
 import '../../../core/models/listing_model.dart';
 import '../../../core/models/order_model.dart';
+import '../../../core/models/subscription_model.dart';
 
 class SeatStats {
   final int totalPurchased;
   final int activeUsed;
   final int available;
 
+  /// Active subscriptions expiring within 5 days — the same window web's
+  /// subscription dashboard flags.
+  final int expiringSoon;
+
   const SeatStats({
     required this.totalPurchased,
     required this.activeUsed,
     required this.available,
+    this.expiringSoon = 0,
   });
 }
 
@@ -227,9 +233,20 @@ class DashboardRepository {
     String? sellMode,
     bool? gstApplicable,
     double? gstRate,
+    // Web-parity product detail fields. All optional so existing callers and
+    // older app versions keep working; each is only written when non-empty so
+    // a product never gains a meaningless empty array/map.
+    Map<String, dynamic>? categoryInfo,
+    List<Map<String, String>>? composition,
+    List<Map<String, String>>? customFields,
+    String? videoUrl,
   }) async {
     final uid = FirebaseAuth.instance.currentUser?.uid;
-    await _db.collection('products').add({
+    final productRef = _db.collection('products').doc();
+    final inventoryRef = _db.collection('inventory').doc();
+    final batch = _db.batch();
+
+    batch.set(productRef, {
       // Legacy field names used by security rules for update/delete ownership checks
       'retailerPhone': sellerPhone,
       'retailerId': uid,
@@ -257,9 +274,43 @@ class DashboardRepository {
       'sellMode': sellMode,
       'gstApplicable': gstApplicable,
       'gstRate': gstRate,
+      // Same field names the web dashboard writes (inventory-firestore.ts), so
+      // a product created on either platform renders identically on both.
+      if (categoryInfo != null && categoryInfo.isNotEmpty)
+        'categoryInfo': categoryInfo,
+      if (composition != null && composition.isNotEmpty)
+        'composition': composition,
+      if (customFields != null && customFields.isNotEmpty)
+        'customFields': customFields,
+      if (videoUrl != null && videoUrl.trim().isNotEmpty)
+        'videoUrl': videoUrl.trim(),
       'createdAt': FieldValue.serverTimestamp(),
       'updatedAt': FieldValue.serverTimestamp(),
     });
+
+    // Web's dashboard inventory table joins products <-> inventory by
+    // productId and silently drops any product with no matching inventory
+    // doc (no error shown). This path used to only write the product doc,
+    // so anything added via mobile was invisible on the web dashboard even
+    // though it showed up fine in the marketplace and on mobile itself,
+    // which both read the product doc directly. Mirrors what web's own
+    // createProductAndInventory already does correctly.
+    batch.set(inventoryRef, {
+      'id': inventoryRef.id,
+      'ownerId': uid,
+      'ownerPhone': sellerPhone,
+      'ownerType': 'retailer',
+      'retailerId': uid,
+      'retailerPhone': sellerPhone,
+      'productId': productRef.id,
+      'stockQuantity': stockQuantity,
+      'sellingPrice': price,
+      'reorderThreshold': 5,
+      'isAvailable': stockQuantity > 0,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+
+    await batch.commit();
   }
 
   Future<void> updateListing(
@@ -293,23 +344,42 @@ class DashboardRepository {
   /// `discountStartDate`, `discountEndDate`, `effectiveDiscountPct`), then
   /// mirrors the effective percentage into the marketplace `availability[]`
   /// entry so the product page and web show the same value.
+  /// Saves a seller's discount.
+  ///
+  /// [discountType] is `'percentage'` or `'fixed_amount'`, matching web's
+  /// discount-panel. It used to be hardcoded to `'percentage'` here, which
+  /// silently CORRUPTED a fixed-amount discount set on web: web reads its
+  /// discount state back from the `inventory` doc, so any mobile save flipped
+  /// the type to percentage and left a stale `discountFixedAmt` behind — the
+  /// rupee discount simply disappeared for buyers.
+  ///
+  /// [bulkEnabled]/[bulkTiers] are carried through untouched for the same
+  /// reason: they're web-only fields today, and omitting them from a mobile
+  /// save would wipe a seller's tier table.
   Future<void> setDiscount(
     String listingId, {
     required bool isActive,
     required double percentage,
+    String discountType = 'percentage',
+    double fixedAmount = 0,
     DateTime? startDate,
     DateTime? endDate,
+    bool? bulkEnabled,
+    List<Map<String, dynamic>>? bulkTiers,
   }) async {
     final effective = _effectivePct(isActive, percentage, startDate, endDate);
     await _db.collection('products').doc(listingId).update({
       'discountEnabled': isActive,
-      'discountType': 'percentage',
+      'discountType': discountType,
       'discountPct': percentage,
+      'discountFixedAmt': fixedAmount,
       'discountStartDate': startDate != null
           ? Timestamp.fromDate(startDate)
           : null,
       'discountEndDate': endDate != null ? Timestamp.fromDate(endDate) : null,
       'effectiveDiscountPct': effective,
+      if (bulkEnabled != null) 'bulkDiscountEnabled': bulkEnabled,
+      if (bulkTiers != null) 'bulkDiscountTiers': bulkTiers,
       'updatedAt': FieldValue.serverTimestamp(),
     });
     // Mirror the RAW percentage + validity fields (not the pre-collapsed
@@ -328,9 +398,13 @@ class DashboardRepository {
       listingId,
       discountEnabled: isActive,
       discountPct: percentage,
+      discountType: discountType,
+      discountFixedAmt: fixedAmount,
       effectiveDiscountPct: effective,
       startDate: startDate,
       endDate: endDate,
+      bulkEnabled: bulkEnabled,
+      bulkTiers: bulkTiers,
     );
   }
 
@@ -446,9 +520,15 @@ class DashboardRepository {
     bool? isProductActive,
     bool? discountEnabled,
     double? discountPct,
+    /// 'percentage' | 'fixed_amount'. Null means "leave whatever is stored" —
+    /// see the note in the discount block below for why that matters.
+    String? discountType,
+    double? discountFixedAmt,
     double? effectiveDiscountPct,
     DateTime? startDate,
     DateTime? endDate,
+    bool? bulkEnabled,
+    List<Map<String, dynamic>>? bulkTiers,
   }) async {
     try {
       final snap = await _db
@@ -470,9 +550,24 @@ class DashboardRepository {
       }
       if (discountEnabled != null) {
         data['discountEnabled'] = discountEnabled;
-        data['discountType'] = 'percentage';
         data['discountPct'] = discountPct ?? 0;
         data['effectiveDiscountPct'] = effectiveDiscountPct ?? 0;
+        // `discountType` was hardcoded to 'percentage' here. The web dashboard
+        // reads a product's discount state back OUT of this inventory doc, so
+        // that hardcode silently converted a seller's fixed-amount (₹)
+        // discount into a percentage one on any mobile save — including an
+        // unrelated price/stock edit that happens to pass discountEnabled —
+        // leaving a stale discountFixedAmt behind and making the ₹ discount
+        // vanish for buyers. Only write the type when the caller actually
+        // knows it; otherwise leave whatever is stored untouched.
+        if (discountType != null) data['discountType'] = discountType;
+        if (discountFixedAmt != null) {
+          data['discountFixedAmt'] = discountFixedAmt;
+        }
+        // Same reasoning for bulk tiers: they're web-only fields today, so a
+        // mobile save must carry them through rather than clear them.
+        if (bulkEnabled != null) data['bulkDiscountEnabled'] = bulkEnabled;
+        if (bulkTiers != null) data['bulkDiscountTiers'] = bulkTiers;
         data['discountStartDate'] = startDate != null
             ? Timestamp.fromDate(startDate)
             : null;
@@ -506,6 +601,66 @@ class DashboardRepository {
         .collection('deliverySettings')
         .doc(sellerPhone)
         .set(settings, SetOptions(merge: true));
+  }
+
+  /// Sets the ACCOUNT-level online-delivery flag for a seller.
+  ///
+  /// Distinct from a product's own `sellMode`/`isOnline`: this is the single
+  /// switch that turns the seller's online selling on or off across their
+  /// whole catalogue, so they never have to edit every product one by one.
+  ///
+  /// Writes every mirror web reads, in web's own precedence order (see
+  /// fetchStoreOnlineDelivery in app/firebase.ts: profiles -> users ->
+  /// retailers|manufacturers). users/{phone} is always written and allowed to
+  /// throw; the profile mirrors are best-effort and use update() rather than
+  /// set(merge:) so they never CREATE a near-empty public profile doc for a
+  /// seller who has none — storefront readers would pick that up as a real
+  /// (nameless) profile.
+  Future<void> setAccountOnlineDelivery(
+    String sellerPhone, {
+    required bool enabled,
+    required bool isManufacturer,
+  }) async {
+    if (sellerPhone.isEmpty) return;
+
+    await _db.collection('users').doc(sellerPhone).set({
+      'onlineDelivery': enabled,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    final profileCollection = isManufacturer ? 'manufacturers' : 'retailers';
+    for (final path in [profileCollection, 'profiles']) {
+      try {
+        await _db.collection(path).doc(sellerPhone).update({
+          'onlineDelivery': enabled,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      } catch (_) {
+        // Mirror doesn't exist yet, or isn't writable — the gate reads
+        // users/{phone}, which was already written above.
+      }
+    }
+  }
+
+  /// Reads the seller's account-level online-delivery flag using web's exact
+  /// precedence (profiles -> users -> retailers|manufacturers), so the toggle
+  /// shows the same state the web dashboard would.
+  Future<bool> fetchAccountOnlineDelivery(
+    String sellerPhone, {
+    required bool isManufacturer,
+  }) async {
+    if (sellerPhone.isEmpty) return false;
+    final profileCollection = isManufacturer ? 'manufacturers' : 'retailers';
+    for (final path in ['profiles', 'users', profileCollection]) {
+      try {
+        final snap = await _db.collection(path).doc(sellerPhone).get();
+        final value = snap.data()?['onlineDelivery'];
+        if (value is bool) return value;
+      } catch (_) {
+        // Unreadable mirror — fall through to the next one.
+      }
+    }
+    return false;
   }
 
   // ── Seller orders ─────────────────────────────────────────────────────────
@@ -724,6 +879,7 @@ class DashboardRepository {
     // Deduplicate subscriptions by doc id
     final seenSub = <String>{};
     int totalPurchased = 0;
+    int expiringSoon = 0;
     for (final snap in subSnaps) {
       for (final doc in snap.docs) {
         if (!seenSub.add(doc.id)) continue;
@@ -732,6 +888,10 @@ class DashboardRepository {
         if (expiry != null && expiry.toDate().isBefore(now)) continue;
         final seats = (d['seatsPurchased'] as num?)?.toInt() ?? 0;
         totalPurchased += seats;
+        if (expiry != null &&
+            expiry.toDate().difference(now).inDays <= 5) {
+          expiringSoon++;
+        }
       }
     }
 
@@ -752,6 +912,151 @@ class DashboardRepository {
       totalPurchased: totalPurchased,
       activeUsed: activeUsed,
       available: (totalPurchased - activeUsed).clamp(0, totalPurchased),
+      expiringSoon: expiringSoon,
     );
+  }
+
+  /// Full subscription purchase history, newest first.
+  ///
+  /// Dual-axis on `ownerPhone` + `ownerId` then deduped, because the two
+  /// platforms key ownership differently (and admin grants key by phone).
+  /// Deliberately unfiltered by status — history must show expired and
+  /// revoked rows too, unlike fetchSeatStats which only sums active ones.
+  /// Sorted client-side: an orderBy alongside these equality filters would
+  /// need a composite index, and this repo has been bitten by undeployed
+  /// indexes before.
+  Future<List<SubscriptionModel>> fetchSubscriptionHistory(
+    String ownerPhone,
+  ) async {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+
+    Future<List<QueryDocumentSnapshot>> byField(String field, String value) async {
+      try {
+        final snap = await _db
+            .collection('subscriptions')
+            .where(field, isEqualTo: value)
+            .get();
+        return snap.docs;
+      } catch (_) {
+        return const [];
+      }
+    }
+
+    final results = await Future.wait([
+      if (ownerPhone.isNotEmpty) byField('ownerPhone', ownerPhone),
+      if (uid.isNotEmpty) byField('ownerId', uid),
+    ]);
+
+    final seen = <String>{};
+    final subs = <SubscriptionModel>[];
+    for (final docs in results) {
+      for (final doc in docs) {
+        if (!seen.add(doc.id)) continue;
+        subs.add(SubscriptionModel.fromFirestore(doc));
+      }
+    }
+    subs.sort((a, b) {
+      final av = a.createdAt ?? a.startDate;
+      final bv = b.createdAt ?? b.startDate;
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;
+      if (bv == null) return -1;
+      return bv.compareTo(av);
+    });
+    return subs;
+  }
+
+  /// Seat listings currently consuming this seller's seats, with product
+  /// name/image hydrated from the product docs (seat listings store neither).
+  Future<List<SeatListingModel>> fetchActiveSeatListings(
+    String ownerPhone,
+  ) async {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+
+    Future<List<QueryDocumentSnapshot>> byField(String field, String value) async {
+      try {
+        final snap = await _db
+            .collection('retailerSeatListings')
+            .where(field, isEqualTo: value)
+            .where('status', isEqualTo: 'active')
+            .get();
+        return snap.docs;
+      } catch (_) {
+        return const [];
+      }
+    }
+
+    // Same three axes fetchSeatStats uses, so the list and the seat counter
+    // can never disagree about what is consuming a seat.
+    final results = await Future.wait([
+      if (ownerPhone.isNotEmpty) byField('ownerPhone', ownerPhone),
+      if (uid.isNotEmpty) byField('ownerId', uid),
+      if (ownerPhone.isNotEmpty) byField('manufacturerPhone', ownerPhone),
+    ]);
+
+    final seen = <String>{};
+    var listings = <SeatListingModel>[];
+    for (final docs in results) {
+      for (final doc in docs) {
+        if (!seen.add(doc.id)) continue;
+        final model = SeatListingModel.fromFirestore(doc);
+        if (!model.isCurrentlyActive) continue;
+        listings.add(model);
+      }
+    }
+
+    // Hydrate product names in whereIn chunks (Firestore caps at 30).
+    final ids = listings
+        .map((l) => l.productId)
+        .where((id) => id.isNotEmpty)
+        .toSet()
+        .toList();
+    final products = <String, Map<String, dynamic>>{};
+    for (var i = 0; i < ids.length; i += 30) {
+      final chunk = ids.sublist(i, i + 30 > ids.length ? ids.length : i + 30);
+      try {
+        final snap = await _db
+            .collection('products')
+            .where(FieldPath.documentId, whereIn: chunk)
+            .get();
+        for (final doc in snap.docs) {
+          products[doc.id] = doc.data();
+        }
+      } catch (_) {
+        // A deleted product just leaves the row unnamed.
+      }
+    }
+
+    listings = listings.map((l) {
+      final p = products[l.productId];
+      if (p == null) return l;
+      final images = p['images'];
+      return l.copyWith(
+        productName: (p['name'] ?? '').toString(),
+        productImage: images is List && images.isNotEmpty
+            ? images.first?.toString()
+            : p['imageUrl']?.toString() ?? p['image']?.toString(),
+      );
+    }).toList();
+
+    listings.sort((a, b) {
+      final av = a.assignedAt, bv = b.assignedAt;
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;
+      if (bv == null) return -1;
+      return bv.compareTo(av);
+    });
+    return listings;
+  }
+
+  /// Frees a seat by marking its listing released — mirrors web's per-row
+  /// Release action. The product itself is left alone; only the seat is
+  /// returned to the pool.
+  Future<void> releaseSeatListing(String listingId) async {
+    await _db.collection('retailerSeatListings').doc(listingId).update({
+      'status': 'released',
+      'releasedAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
   }
 }

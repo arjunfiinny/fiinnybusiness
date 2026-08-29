@@ -37,12 +37,43 @@ class _AssignProductScreenState
   static const _kRetailerPageSize = 10;
   int _retailerRevealCount = _kRetailerPageSize;
 
+  /// `retailerDocId|manufacturerProductId` pairs already assigned and active.
+  ///
+  /// Derived from seat listings, exactly as web's assign-product modal does —
+  /// NOT from a product query. Without this the screen let a manufacturer
+  /// re-assign a product a retailer already stocks, with no indication it was
+  /// already theirs; the duplicate was then rejected server-side with a bare
+  /// error.
+  Set<String> _assignedPairs = {};
+  bool _assignedLoading = true;
+
   @override
   void initState() {
     super.initState();
     if (widget.initialRetailerPhone != null) {
       _selectedRetailers.add(widget.initialRetailerPhone!);
     }
+  }
+
+  Future<void> _loadAssigned(String manufacturerPhone) async {
+    final listings =
+        await ManufacturerRepository().fetchActiveAssignedListings(
+      manufacturerPhone,
+    );
+    if (!mounted) return;
+    setState(() {
+      _assignedPairs = listings
+          .map((l) =>
+              '${l['retailerDocId'] ?? ''}|${l['manufacturerProductId'] ?? ''}')
+          .toSet();
+      _assignedLoading = false;
+    });
+  }
+
+  bool _isAssigned(String retailerPhone) {
+    final productId = _selectedProduct?.id;
+    if (productId == null) return false;
+    return _assignedPairs.contains('$retailerPhone|$productId');
   }
 
   @override
@@ -70,6 +101,13 @@ class _AssignProductScreenState
   }
 
   Widget _buildScaffold(String phone, String name) {
+    // Load the already-assigned set once, on the first build that knows the
+    // manufacturer's phone.
+    if (_assignedLoading && _assignedPairs.isEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _assignedLoading) _loadAssigned(phone);
+      });
+    }
     final catalogAsync = ref.watch(manufacturerCatalogProvider(phone));
     final networkAsync = ref.watch(retailerNetworkProvider(phone));
 
@@ -191,6 +229,10 @@ class _AssignProductScreenState
                                 retailer: r,
                                 isSelected:
                                     _selectedRetailers.contains(r.phone),
+                                // Already stocks the selected product — shown
+                                // as such and not re-selectable, matching
+                                // web's assign modal.
+                                isAlreadyAssigned: _isAssigned(r.phone),
                                 onToggle: () => setState(() {
                                   if (_selectedRetailers
                                       .contains(r.phone)) {
@@ -439,16 +481,21 @@ class _ProductSelectionTile extends StatelessWidget {
 class _RetailerSelectionTile extends StatelessWidget {
   final NetworkRetailerModel retailer;
   final bool isSelected;
+  /// This retailer already stocks the selected product.
+  final bool isAlreadyAssigned;
   final VoidCallback onToggle;
   const _RetailerSelectionTile(
       {required this.retailer,
       required this.isSelected,
+      this.isAlreadyAssigned = false,
       required this.onToggle});
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      onTap: onToggle,
+      // Re-assigning is rejected server-side by the duplicate guard, so the
+      // tap is disabled rather than letting it fail with a bare error.
+      onTap: isAlreadyAssigned ? null : onToggle,
       child: Container(
         margin: const EdgeInsets.only(bottom: 8),
         padding: const EdgeInsets.all(12),
@@ -465,12 +512,16 @@ class _RetailerSelectionTile extends StatelessWidget {
         child: Row(
           children: [
             Icon(
-              isSelected
-                  ? Icons.check_box
-                  : Icons.check_box_outline_blank,
-              color: isSelected
-                  ? AppColors.primary
-                  : AppColors.onSurfaceVariant,
+              isAlreadyAssigned
+                  ? Icons.check_circle
+                  : isSelected
+                      ? Icons.check_box
+                      : Icons.check_box_outline_blank,
+              color: isAlreadyAssigned
+                  ? AppColors.success
+                  : isSelected
+                      ? AppColors.primary
+                      : AppColors.onSurfaceVariant,
             ),
             const SizedBox(width: 10),
             Expanded(
@@ -484,6 +535,25 @@ class _RetailerSelectionTile extends StatelessWidget {
                             style: AppTextStyles.bodyMedium,
                             overflow: TextOverflow.ellipsis),
                       ),
+                      if (isAlreadyAssigned) ...[
+                        const SizedBox(width: 6),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 1),
+                          decoration: BoxDecoration(
+                            color: AppColors.success.withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text(
+                            'Assigned',
+                            style: AppTextStyles.caption.copyWith(
+                              color: AppColors.success,
+                              fontWeight: FontWeight.w700,
+                              fontSize: 9,
+                            ),
+                          ),
+                        ),
+                      ],
                       if (!retailer.isActive) ...[
                         const SizedBox(width: 6),
                         Container(
