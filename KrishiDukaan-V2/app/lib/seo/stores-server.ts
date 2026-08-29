@@ -47,6 +47,8 @@ export interface SeoStore {
   role: "retailer" | "manufacturer";
   /** Set only for manufacturers that already have a /brand/[slug] page. */
   brandSlug?: string;
+  /** Last write to the underlying record, for sitemap <lastmod>. */
+  updatedAtMs?: number;
 }
 
 export interface StoreProduct {
@@ -59,6 +61,29 @@ export interface StoreProduct {
 
 function str(v: unknown, fallback = ""): string {
   return v == null ? fallback : String(v);
+}
+
+/**
+ * Firestore Timestamp | Date | ISO string → epoch ms, or undefined.
+ *
+ * undefined rather than Date.now(): this feeds the sitemap's <lastmod>, and a
+ * record with no timestamp must produce no lastmod at all. Substituting "now"
+ * tells Google every page changed on every regeneration, which is how the
+ * signal stops being believed.
+ */
+function millis(v: unknown): number | undefined {
+  try {
+    const d = (v as { toDate?: () => Date })?.toDate?.();
+    if (d instanceof Date && !isNaN(d.getTime())) return d.getTime();
+    if (typeof v === "number" && isFinite(v)) return v;
+    if (v) {
+      const parsed = new Date(v as string);
+      if (!isNaN(parsed.getTime())) return parsed.getTime();
+    }
+  } catch {
+    /* ignore */
+  }
+  return undefined;
 }
 
 function num(v: unknown): number | undefined {
@@ -176,6 +201,7 @@ type Raw = {
   lng?: number;
   logo?: string;
   role: "retailer" | "manufacturer";
+  updatedAtMs?: number;
   /** Richness score — higher wins when the same phone appears twice. */
   score: number;
 };
@@ -245,6 +271,7 @@ export async function getAllStores(): Promise<SeoStore[]> {
         id: d.id, phone, name, ownerName: str(data.ownerName) || undefined,
         line1, city, state, pincode, ...readGeo(data),
         logo: str(data.logo) || undefined, role: "manufacturer",
+        updatedAtMs: millis(data.updatedAt),
         score: 4 + (name ? 2 : 0),
       });
     }
@@ -266,6 +293,7 @@ export async function getAllStores(): Promise<SeoStore[]> {
         ownerName: str(data.ownerName) || undefined,
         line1, city, state, pincode, ...readGeo(data),
         logo: str(data.logo) || undefined, role: "retailer",
+        updatedAtMs: millis(data.updatedAt),
         score: (data.retailerId ? 3 : 0) + (data.userId ? 3 : 0) + 2,
       });
     }
@@ -285,6 +313,7 @@ export async function getAllStores(): Promise<SeoStore[]> {
         ownerName: str(data.ownerName) || undefined,
         line1, city, state, pincode, ...readGeo(data),
         logo: str(data.logo) || undefined, role,
+        updatedAtMs: millis(data.updatedAt),
         score: 4 + (name ? 2 : 0),
       });
     }
@@ -299,6 +328,7 @@ export async function getAllStores(): Promise<SeoStore[]> {
         id: d.id, phone: phoneOf(d.id, data), name,
         line1, city, state, pincode, ...readGeo(data),
         logo: str(data.logo) || undefined, role: "retailer",
+        updatedAtMs: millis(data.updatedAt),
         score: 1,
       });
     }
@@ -311,7 +341,15 @@ export async function getAllStores(): Promise<SeoStore[]> {
       const withGeo = entry.score + (entry.lat && entry.lng ? 1 : 0);
       const existingWithGeo =
         existing ? existing.score + (existing.lat && existing.lng ? 1 : 0) : -1;
-      if (!existing || withGeo > existingWithGeo) byKey.set(key, entry);
+      // The richest record wins the content, but the timestamp is the newest
+      // across every copy: a shop edited through one collection is a shop that
+      // changed, whichever record the merge happens to prefer.
+      const newest = Math.max(entry.updatedAtMs ?? 0, existing?.updatedAtMs ?? 0);
+      if (!existing || withGeo > existingWithGeo) {
+        byKey.set(key, { ...entry, updatedAtMs: newest || undefined });
+      } else if (newest && newest !== existing.updatedAtMs) {
+        byKey.set(key, { ...existing, updatedAtMs: newest });
+      }
     }
 
     _cache = Array.from(byKey.values())
@@ -329,6 +367,7 @@ export async function getAllStores(): Promise<SeoStore[]> {
         pincode: s.pincode, lat: s.lat, lng: s.lng, logo: s.logo,
         role: s.role,
         brandSlug: s.phone ? brandSlugByPhone.get(s.phone) : undefined,
+        updatedAtMs: s.updatedAtMs,
       }))
       .sort((a, b) => a.name.localeCompare(b.name));
 
@@ -347,6 +386,11 @@ export interface CityEntry {
   state: string;
   stateSlug: string;
   count: number;
+  /**
+   * Newest change among this city's stores — the city page IS its list of
+   * stores, so the page changed when the freshest of them did.
+   */
+  updatedAtMs?: number;
 }
 
 export interface StateEntry {
@@ -354,6 +398,8 @@ export interface StateEntry {
   stateSlug: string;
   count: number;
   cities: CityEntry[];
+  /** Newest change among this state's stores. */
+  updatedAtMs?: number;
 }
 
 /** State → city tree, built only from cities that actually contain stores. */
@@ -372,6 +418,9 @@ export async function getStoreGeography(): Promise<StateEntry[]> {
       states.set(stateSlug, st);
     }
     st.count += 1;
+    if (s.updatedAtMs && s.updatedAtMs > (st.updatedAtMs ?? 0)) {
+      st.updatedAtMs = s.updatedAtMs;
+    }
 
     let ct = st.cities.find((c) => c.citySlug === citySlug);
     if (!ct) {
@@ -379,6 +428,9 @@ export async function getStoreGeography(): Promise<StateEntry[]> {
       st.cities.push(ct);
     }
     ct.count += 1;
+    if (s.updatedAtMs && s.updatedAtMs > (ct.updatedAtMs ?? 0)) {
+      ct.updatedAtMs = s.updatedAtMs;
+    }
   }
 
   // Array.from rather than iterating the Map directly — this tsconfig targets
