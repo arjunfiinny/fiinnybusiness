@@ -131,6 +131,24 @@ service cloud.firestore {
         allow read, write: if request.auth != null && getUserData() != null && getUserData().tenantId == tenantId && isAdminOrAnalyst();
       }
 
+      // UI layout schemas — what fields each screen shows, edits and exports.
+      //
+      // Previously fell through to the permissive `match /{document=**}`
+      // catch-all at the bottom of this file, so ANY authenticated user could
+      // rewrite or delete another tenant's screen layouts. Now scoped like the
+      // other tenant settings documents.
+      //
+      // Read stays open to every tenant member: SchemaProvider loads these for
+      // all users so tables and exports can render, not just for admins.
+      // Writing is admin/analyst only, matching the builder's own route guard
+      // in AdminHubPage. Delete is included in `write` and is required — the
+      // builder's "Reset to default" removes the saved doc so the module falls
+      // back to the registry default in src/config/moduleRegistry.ts.
+      match /ui_schemas/{moduleId} {
+        allow read:  if request.auth != null && getUserData() != null && getUserData().tenantId == tenantId;
+        allow write: if request.auth != null && getUserData() != null && getUserData().tenantId == tenantId && isAdminOrAnalyst();
+      }
+
       // Feedback — public create (no auth), tenant members read
       match /feedback/{feedbackId} {
         allow create: if true;
