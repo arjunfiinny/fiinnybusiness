@@ -39,6 +39,45 @@ const RAZORPAY_API = "https://api.razorpay.com/v1";
 /** Hours between "marked delivered" and the money settling to the seller. */
 const RELEASE_DELAY_HOURS = 24;
 
+/**
+ * Firestore path holding the live Route configuration.
+ * Mirrors ROUTE_CONFIG_PATH in app/lib/route-split.ts; functions/ builds
+ * separately from the Next app, so the path is restated rather than imported.
+ */
+const ROUTE_CONFIG = { collection: "settings", doc: "route" } as const;
+
+/**
+ * Whether this trigger is allowed to move money yet.
+ *
+ * Deliberately defaults to FALSE — the opposite of every other value in
+ * settings/route, which fall back to safe live defaults so that a missing
+ * document cannot take checkout down. This one is not a rate, it is a switch on
+ * real transfers: deploying these functions before the document is seeded must
+ * do nothing at all, rather than start settling money to sellers against a
+ * configuration nobody has reviewed.
+ *
+ * Flip settings/route.releaseEnabled to true to turn releases on. It is read per
+ * delivery rather than at deploy time, so enabling and disabling needs no
+ * redeploy — which also means it can be switched off in seconds if a release
+ * goes wrong.
+ */
+async function releaseEnabled(): Promise<boolean> {
+  try {
+    const snap = await admin
+      .firestore()
+      .collection(ROUTE_CONFIG.collection)
+      .doc(ROUTE_CONFIG.doc)
+      .get();
+    return snap.exists && snap.data()?.releaseEnabled === true;
+  } catch (err) {
+    // A failed read is not a reason to act on an unknown configuration.
+    logger.error("[route-release] settings/route unreadable, staying disabled", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}
+
 interface RazorpayTransfer {
   id: string;
   on_hold: boolean;
@@ -111,6 +150,11 @@ export const releaseTransferOnDelivery = onDocumentWritten(
     if (!isDelivered || wasDelivered) return;
 
     const orderId = event.params.orderId;
+
+    if (!(await releaseEnabled())) {
+      logger.info("[route-release] disabled by settings/route.releaseEnabled", { orderId });
+      return;
+    }
 
     // Idempotency guard independent of the before/after check: two writes racing
     // to delivered would both see wasDelivered === false.
