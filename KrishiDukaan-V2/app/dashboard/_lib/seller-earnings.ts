@@ -54,6 +54,12 @@ export type OrderLike = {
     /** Set once a Route transfer exists for this order. */
     transferId?: string;
     transferredAt?: string;
+    /** Rupees already refunded to the customer for this order. A PARTIAL
+     *  refund leaves the order's status unchanged, so without subtracting
+     *  this the seller would be paid the full original amount for goods that
+     *  were partly refunded — the platform absorbing the difference. */
+    refundedAmount?: number;
+    refundId?: string;
   };
 };
 
@@ -97,7 +103,8 @@ function toDate(v: unknown): Date | null {
   return null;
 }
 
-/** The seller's share of an order. Mobile and web disagree on the field name. */
+/** The seller's share of an order, BEFORE refunds. Mobile and web disagree on
+ *  the field name. */
 export function grossFor(order: OrderLike): number {
   const value = order.total ?? order.grandTotal;
   if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -105,6 +112,14 @@ export function grossFor(order: OrderLike): number {
   return (
     (order.subtotal ?? 0) + (order.deliveryCharge ?? 0) + (order.totalGst ?? 0)
   );
+}
+
+/** What the seller is actually owed: their share less anything refunded to the
+ *  customer. A fully refunded order is caught earlier by its 'refunded'
+ *  status; this handles the partial case, which leaves the status untouched. */
+export function payableGrossFor(order: OrderLike): number {
+  const refunded = order.payment?.refundedAmount ?? 0;
+  return Math.max(0, grossFor(order) - refunded);
 }
 
 /** When the order was marked delivered, from its own status history. */
@@ -175,7 +190,7 @@ export function computeSellerEarnings(
     const { state, deliveredAt, releaseOn } = payoutStateFor(order, now);
     if (state === "not_payable") continue;
 
-    const gross = grossFor(order);
+    const gross = payableGrossFor(order);
     // Gateway fee is only known once /api/payment/fee has fetched it from
     // Razorpay; treat unknown as 0 rather than guessing a rate, so the number
     // shown is never a fabricated deduction.
