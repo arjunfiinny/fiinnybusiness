@@ -22,6 +22,7 @@ import '../../features/hubs/screens/hub_detail_screen.dart';
 import '../../features/brand/screens/brand_screen.dart';
 import '../../features/dashboard/screens/inventory_screen.dart';
 import '../../features/dashboard/screens/seller_orders_screen.dart';
+import '../../features/dashboard/screens/subscription_dashboard_screen.dart';
 import '../../features/dashboard/screens/delivery_settings_screen.dart';
 import '../../features/dashboard/screens/subscription_screen.dart';
 import '../../features/dashboard/screens/dashboard_profile_screen.dart';
@@ -481,6 +482,12 @@ final routerProvider = Provider<GoRouter>((ref) {
         path: '/dashboard/orders',
         parentNavigatorKey: _rootKey,
         builder: (_, _) => const _RootBackFallback(child: SellerOrdersScreen()),
+      ),
+      GoRoute(
+        path: '/dashboard/subscription',
+        parentNavigatorKey: _rootKey,
+        builder: (_, _) =>
+            const _RootBackFallback(child: SubscriptionDashboardScreen()),
       ),
       GoRoute(
         path: '/dashboard/delivery',

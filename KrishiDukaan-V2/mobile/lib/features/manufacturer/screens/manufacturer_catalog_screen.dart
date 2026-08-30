@@ -18,7 +18,6 @@ import '../../../core/utils/currency_utils.dart';
 import '../../../core/widgets/empty_state.dart';
 import '../../../core/widgets/error_view.dart';
 import '../../dashboard/data/dashboard_repository.dart';
-import '../../dashboard/providers/dashboard_provider.dart';
 import '../../marketplace/data/catalog_repository.dart';
 import '../data/manufacturer_repository.dart';
 import '../providers/manufacturer_provider.dart';

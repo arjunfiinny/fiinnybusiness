@@ -19,6 +19,53 @@ const int kDefaultAssignedStock = 10;
 class ManufacturerRepository {
   final _db = FirebaseFirestore.instance;
 
+  /// Active "assigned" seat listings for this manufacturer.
+  ///
+  /// Queried on BOTH axes of `ownerId` — the auth uid and the phone — then
+  /// deduped by doc id, mirroring web's fetchSeatListingsForOwner. Admin-
+  /// assigned listings key `ownerId` by phone while the manufacturer's own
+  /// assignments key it by uid, so a single-axis query silently misses half
+  /// of them.
+  Future<List<Map<String, dynamic>>> fetchActiveAssignedListings(
+    String manufacturerPhone,
+  ) async {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final owners = <String>{
+      if (manufacturerPhone.isNotEmpty) manufacturerPhone,
+      if (uid.isNotEmpty) uid,
+    };
+    if (owners.isEmpty) return [];
+
+    // One unreadable axis must not blank the whole result, so each query is
+    // resolved independently.
+    Future<List<QueryDocumentSnapshot<Map<String, dynamic>>>> fetch(
+        String owner) async {
+      try {
+        final snap = await _db
+            .collection('retailerSeatListings')
+            .where('ownerId', isEqualTo: owner)
+            .where('listingType', isEqualTo: 'assigned')
+            .where('status', isEqualTo: 'active')
+            .get();
+        return snap.docs;
+      } catch (_) {
+        return const [];
+      }
+    }
+
+    final results = await Future.wait(owners.map(fetch));
+
+    final seen = <String>{};
+    final out = <Map<String, dynamic>>[];
+    for (final docs in results) {
+      for (final doc in docs) {
+        if (!seen.add(doc.id)) continue;
+        out.add({'id': doc.id, ...doc.data()});
+      }
+    }
+    return out;
+  }
+
   // ── Retailer network ──────────────────────────────────────────────────────
 
   Stream<List<NetworkRetailerModel>> watchNetwork(String manufacturerPhone) {
@@ -203,6 +250,18 @@ class ManufacturerRepository {
     return code;
   }
 
+  /// Updates an existing network retailer.
+  ///
+  /// [phone] is the retailer's EXISTING phone and is never changed — it is the
+  /// id every seat listing and assigned product copy references as
+  /// `retailerDocId`, so rewriting it orphaned all of them (assigned products
+  /// vanished from Assign Products on both platforms). Web's edit modal makes
+  /// it immutable for exactly this reason; the parameter is kept only so the
+  /// value can be written back unchanged.
+  ///
+  /// Writes the address to `retailers/{phone}` as well as the invite doc —
+  /// the address lives on the retailer entity, and this method used to update
+  /// only `manufacturerRetailers`, so an edited address was silently dropped.
   Future<void> updateNetworkRetailer({
     required String inviteDocId,
     required String retailerDocId,
@@ -211,30 +270,53 @@ class ManufacturerRepository {
     required String phone,
     required String email,
     required String manufacturerPhone,
+    String? line1,
+    String? city,
+    String? state,
+    String? pincode,
   }) async {
     final now = FieldValue.serverTimestamp();
-    final newPhone = PhoneUtils.normalize(phone);
+    final normalizedPhone = PhoneUtils.normalize(phone);
+
+    final address = {
+      'line1': line1?.trim() ?? '',
+      'city': city?.trim() ?? '',
+      'state': state?.trim() ?? '',
+      'pincode': pincode?.trim() ?? '',
+    };
+    final hasAddress = address.values.any((v) => v.isNotEmpty);
 
     await _db.collection('manufacturerRetailers').doc(inviteDocId).update({
       'shopName': shopName.trim(),
       'ownerName': ownerName.trim(),
-      'retailerPhone': newPhone,
-      'retailerDocId': newPhone,
+      'retailerPhone': normalizedPhone,
+      'retailerDocId': normalizedPhone,
       'retailerEmail': email.trim().toLowerCase(),
+      if (hasAddress) 'address': address,
       'updatedAt': now,
     });
 
+    // The retailer entity is the doc the storefront, store locator and the
+    // web dashboard all read for name/address.
+    try {
+      await _db.collection('retailers').doc(normalizedPhone).set({
+        'shopName': shopName.trim(),
+        'ownerName': ownerName.trim(),
+        'email': email.trim().toLowerCase(),
+        if (hasAddress) 'address': address,
+        'updatedAt': now,
+      }, SetOptions(merge: true));
+    } catch (_) {
+      // Best-effort: the invite doc above is the manufacturer's own record and
+      // has already been updated.
+    }
+
     if (manufacturerPhone.isNotEmpty) {
-      final oldMirrorRef = _db.doc('manufacturers/$manufacturerPhone/retailers/$retailerDocId');
-      final newMirrorRef = _db.doc('manufacturers/$manufacturerPhone/retailers/$newPhone');
-
-      if (retailerDocId != newPhone) {
-        await oldMirrorRef.delete();
-      }
-
-      await newMirrorRef.set({
-        'retailerDocId': newPhone,
-        'retailerPhone': newPhone,
+      await _db
+          .doc('manufacturers/$manufacturerPhone/retailers/$normalizedPhone')
+          .set({
+        'retailerDocId': normalizedPhone,
+        'retailerPhone': normalizedPhone,
         'manufacturerPhone': manufacturerPhone,
         'shopName': shopName.trim(),
         'ownerName': ownerName.trim(),
