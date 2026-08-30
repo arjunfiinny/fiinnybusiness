@@ -2010,76 +2010,10 @@ import { Hub, INITIAL_HUBS } from './initialHubs';
 
 export type { Hub };
 
-export async function syncInitialData(products: any[], stores: any[], inventory: any[] = []) {
-  // Sync products
-  try {
-    const productsSnap = await getDocs(collection(db, 'products'));
-    if (productsSnap.empty) {
-      console.log('Firebase: Syncing initial products...');
-      for (const product of products) {
-        await addDoc(collection(db, 'products'), {
-          ...product,
-          createdAt: serverTimestamp(),
-          source: 'initial_sync'
-        });
-      }
-    }
-  } catch (error) {
-    console.warn('Firebase: Syncing initial products failed:', error);
-  }
-
-  // Sync stores
-  try {
-    const storesSnap = await getDocs(collection(db, 'stores'));
-    if (storesSnap.empty) {
-      console.log('Firebase: Syncing initial stores...');
-      for (const store of stores) {
-        await addDoc(collection(db, 'stores'), {
-          ...store,
-          createdAt: serverTimestamp(),
-          source: 'initial_sync'
-        });
-      }
-    }
-  } catch (error) {
-    console.warn('Firebase: Syncing initial stores failed:', error);
-  }
-
-  // Sync inventory
-  try {
-    const inventorySnap = await getDocs(collection(db, 'inventory'));
-    if (inventorySnap.empty && inventory.length > 0) {
-      console.log('Firebase: Syncing initial inventory...');
-      for (const item of inventory) {
-        await addDoc(collection(db, 'inventory'), {
-          ...item,
-          createdAt: serverTimestamp(),
-          source: 'initial_sync'
-        });
-      }
-    }
-  } catch (error) {
-    console.warn('Firebase: Syncing initial inventory failed:', error);
-  }
-
-  // Sync hubs
-  try {
-    const hubsSnap = await getDocs(collection(db, 'hubs'));
-    if (hubsSnap.empty) {
-      console.log('Firebase: Syncing initial hubs...');
-      for (const hub of INITIAL_HUBS) {
-        const { id, ...hubData } = hub;
-        await setDoc(doc(db, 'hubs', id), {
-          ...hubData,
-          createdAt: serverTimestamp(),
-          source: 'initial_sync'
-        });
-      }
-    }
-  } catch (error) {
-    console.warn('Firebase: Syncing initial hubs failed:', error);
-  }
-}
+// syncInitialData() was removed here: it wrote the hardcoded demo catalogue
+// (constants.ts PRODUCTS/STORES/INVENTORY) into production Firestore from the
+// browser whenever a read came back empty. Seeding is a server-side task with
+// admin credentials, never something a visitor's session should be able to do.
 
 
 function getLocalDayKey(date: Date = new Date()): string {

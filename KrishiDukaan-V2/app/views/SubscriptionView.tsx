@@ -21,6 +21,7 @@ import {
   type DurationPrice,
 } from '../lib/pricing';
 import { LEGAL_ROUTES, TERMS_VERSION } from '../lib/legal-constants';
+import { authedJsonHeaders } from "../lib/authed-fetch";
 
 interface SubscriptionViewProps {
   user: any;
@@ -268,7 +269,7 @@ export default function SubscriptionView({ user, role, onSuccess, onLogout }: Su
               return;
             }
 
-            getUserProfile(user.uid).then((profile) => {
+            getUserProfile(user.uid).then(async (profile) => {
               const profileEmail = profile?.email ?? '';
               if (!profileEmail || profileEmail.includes('@krishidukan.local')) return;
               const now = new Date();
@@ -276,7 +277,7 @@ export default function SubscriptionView({ user, role, onSuccess, onLogout }: Su
               expiry.setMonth(expiry.getMonth() + duration.months);
               fetch('/api/email/subscription-confirmation', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: await authedJsonHeaders(),
                 body: JSON.stringify({
                   userEmail:         profileEmail,
                   userName:          profile?.name || user.displayName || '',

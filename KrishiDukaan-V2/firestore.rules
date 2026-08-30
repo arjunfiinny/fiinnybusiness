@@ -492,9 +492,17 @@ service cloud.firestore {
       allow delete: if isAdmin() || (isAuthed() && retailerId == request.auth.uid);
     }
 
+    // Legacy store directory. Public read; writes are admin-only.
+    //
+    // This was `allow write: if isAuthed()`, which let any signed-in account
+    // rewrite or delete any shop in the directory. The only client that ever
+    // wrote here was the homepage's demo-data seeder (app/page.tsx), which has
+    // been removed -- the mobile app and the storefront only read. Real store
+    // records are written server-side through the Admin SDK, which bypasses
+    // these rules entirely, so nothing legitimate needs client write access.
     match /stores/{storeId} {
       allow read: if true;
-      allow write: if isAuthed();
+      allow write: if isAdmin();
     }
 
     match /manufacturers/{manufacturerId} {

@@ -368,10 +368,14 @@ export function AdminUserEditPanel({ user, onClose, onSaved }: AdminUserEditPane
 
       // Delete Firebase Auth account via server route if uid is known
       if (uid) {
+        const idToken = await auth.currentUser?.getIdToken();
         await fetch("/api/admin/delete-user", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ targetUid: uid, callerUid }),
+          headers: {
+            "Content-Type": "application/json",
+            ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+          },
+          body: JSON.stringify({ targetUid: uid }),
         });
       }
 
