@@ -224,6 +224,9 @@ export default function Footer({ onNavigate, onCategoryClick, userRole, onUpgrad
             <Link href={LEGAL_ROUTES.terms} className="hover:text-on-surface transition-colors font-semibold">
               {t('footerTerms')}
             </Link>
+            <Link href={LEGAL_ROUTES.returns} className="hover:text-on-surface transition-colors font-semibold">
+              Returns
+            </Link>
             <Link href={LEGAL_ROUTES.sellerTerms} className="hover:text-on-surface transition-colors font-semibold">
               {t('footerSellerTerms')}
             </Link>
