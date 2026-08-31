@@ -163,8 +163,21 @@ service cloud.firestore {
     // Owner and admin only — no teamHas(), no role checks, no exceptions.
     match /payoutAccounts/{phone} {
       allow read:   if isAuthed() && (isAdmin() || myPhone() == phone);
-      allow create: if isAuthed() && myPhone() == phone;
-      allow update: if isAuthed() && myPhone() == phone;
+
+      // A seller may submit their own details, but NEVER the fields that
+      // decide whether they get paid. `update` used to allow the owner to
+      // write any field, which meant a seller could set their own
+      // status:'verified' — harmless while nothing read it, but this gates
+      // real payouts now. Verification fields are admin-only; a seller
+      // touching them is rejected outright rather than silently ignored.
+      allow create: if isAuthed() && myPhone() == phone
+                    && payoutStatusOk()
+                    && !request.resource.data.keys().hasAny(payoutProtectedFields());
+      allow update: if isAdmin()
+                    || (isAuthed() && myPhone() == phone
+                        && payoutStatusOk()
+                        && !request.resource.data.diff(resource.data)
+                              .affectedKeys().hasAny(payoutProtectedFields()));
       // Never client-deletable — payout history must stay auditable.
       allow delete: if false;
     }
@@ -529,6 +542,23 @@ service cloud.firestore {
     // Returns true when the incoming write does not set invalid discount values.
     // discountPct must be 0–99; dates must be absent or timestamps.
     // Also validates new fields: discountType, discountFixedAmt, bulk tiers.
+    /// Fields on payoutAccounts only an admin may write — they decide whether
+    /// a seller is paid, and to which Razorpay linked account. `status` is
+    /// handled separately (see payoutStatusOk) because a seller legitimately
+    /// sets it to 'pending_verification' when submitting or editing.
+    function payoutProtectedFields() {
+      return ['razorpayLinkedAccountId', 'verifiedAt', 'verifiedBy',
+              'rejectionReason'];
+    }
+
+    /// A seller may only ever put their payout account INTO review, never
+    /// approve it. Editing verified details correctly sends it back to
+    /// pending, which is what re-submitting should do.
+    function payoutStatusOk() {
+      return !('status' in request.resource.data)
+             || request.resource.data.status == 'pending_verification';
+    }
+
     function discountFieldsValid() {
       let d = request.resource.data;
       return (

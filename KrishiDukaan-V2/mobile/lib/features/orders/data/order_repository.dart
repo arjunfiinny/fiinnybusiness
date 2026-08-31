@@ -209,6 +209,66 @@ class OrderRepository {
     return controller.stream;
   }
 
+  /// Streams the orders where the current user is the SELLER — the source of
+  /// truth for their earnings.
+  ///
+  /// Orders are keyed inconsistently across platforms: mobile writes the
+  /// seller's phone into both `sellerPhone` and `sellerId`, while web orders
+  /// can carry the seller's Auth UID in `sellerId`. Querying only one field
+  /// would silently under-report what a seller is owed, so both are queried
+  /// and the results deduped.
+  ///
+  /// Each query silences its own errors rather than adding to the stream: a
+  /// permission denial on one must not blank out the others (the same trap
+  /// that previously made the orders screens flash data and then error).
+  Stream<List<OrderModel>> watchSellerOrders() {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return Stream.value([]);
+
+    final phone = user.phoneNumber ?? '';
+
+    final controller = StreamController<List<OrderModel>>();
+    List<DocumentSnapshot> byPhone = [];
+    List<DocumentSnapshot> byId = [];
+    List<DocumentSnapshot> byUid = [];
+
+    void emit() {
+      final seen = <String>{};
+      final orders = [...byPhone, ...byId, ...byUid]
+          .where((d) => seen.add(d.id))
+          .map((d) {
+            try { return OrderModel.fromFirestore(d); } catch (_) { return null; }
+          })
+          .whereType<OrderModel>()
+          .toList();
+      if (!controller.isClosed) controller.add(orders);
+    }
+
+    final subs = <StreamSubscription>[];
+    if (phone.isNotEmpty) {
+      subs.add(_db.collection('orders')
+          .where('sellerPhone', isEqualTo: phone)
+          .snapshots()
+          .listen((s) { byPhone = s.docs; emit(); }, onError: (_) {}));
+      subs.add(_db.collection('orders')
+          .where('sellerId', isEqualTo: phone)
+          .snapshots()
+          .listen((s) { byId = s.docs; emit(); }, onError: (_) {}));
+    }
+    // Legacy web orders that recorded the seller's Auth UID.
+    subs.add(_db.collection('orders')
+        .where('sellerId', isEqualTo: user.uid)
+        .snapshots()
+        .listen((s) { byUid = s.docs; emit(); }, onError: (_) {}));
+
+    controller.onCancel = () {
+      for (final s in subs) {
+        s.cancel();
+      }
+    };
+    return controller.stream;
+  }
+
   Future<OrderModel?> fetchById(String orderId) async {
     final doc = await _db.collection('orders').doc(orderId).get();
     if (!doc.exists) return null;

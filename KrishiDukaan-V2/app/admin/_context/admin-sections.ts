@@ -10,7 +10,7 @@
 export const ADMIN_SECTIONS = [
   "overview", "analytics", "orders", "users", "subscriptions", "pricing", "products",
   "reels", "discounts", "inventory", "companies", "hubs", "reports", "messages",
-  "whatsapp", "blog", "team",
+  "whatsapp", "blog", "team", "payouts",
 ] as const;
 
 export type AdminSection = (typeof ADMIN_SECTIONS)[number];
