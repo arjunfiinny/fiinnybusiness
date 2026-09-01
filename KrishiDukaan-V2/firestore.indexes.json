@@ -551,6 +551,34 @@
           "order": "ASCENDING"
         }
       ]
+    },
+    {
+      "collectionGroup": "salesAttendance",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "salesExecutiveId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "date",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "salesExpenses",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "salesExecutiveId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "date",
+          "order": "DESCENDING"
+        }
+      ]
     }
   ],
   "fieldOverrides": []

@@ -966,6 +966,57 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
+    // ─── salesAttendance ──────────────────────────────────────────────────────
+    // One doc per sales executive per IST calendar day, id `{uid}_{date}`.
+    // Written by the sales app: Start Day marks the rep present automatically,
+    // and they can correct the day by hand (leave, half day, week off).
+    //
+    // The deterministic id is what makes a day markable only once, but an id is
+    // not a permission — a rep could still write to someone else's `{uid}_{date}`
+    // doc — so the salesExecutiveId/uid match below is what actually enforces
+    // ownership, and the id prefix is deliberately NOT trusted on its own.
+    match /salesAttendance/{docId} {
+      allow read:   if isAdmin()
+                       || (isAuthed() && resource.data.salesExecutiveId == request.auth.uid);
+      allow create: if isSalesExec()
+                       && request.resource.data.salesExecutiveId == request.auth.uid;
+      // The owner may correct their own day; the salesExecutiveId can never be
+      // reassigned, so a record cannot be moved onto another rep.
+      allow update: if isAdmin()
+                       || (isSalesExec()
+                           && resource.data.salesExecutiveId == request.auth.uid
+                           && request.resource.data.salesExecutiveId == resource.data.salesExecutiveId);
+      allow delete: if isAdmin();
+    }
+
+    // ─── salesExpenses ────────────────────────────────────────────────────────
+    // Field expense claims raised by a sales executive and reviewed by an admin.
+    //
+    // The whole point of the collection is that the REVIEW DECISION is not the
+    // claimant's to make, so a rep may only ever write a PENDING document:
+    //  · create — must be their own, and must start PENDING.
+    //  · update — only their own, only while still PENDING, and it must stay
+    //    PENDING. Without that last clause a rep could approve their own claim.
+    //  · delete — withdrawing an un-reviewed claim is fine; once an admin has
+    //    decided, the record is an audit trail and only an admin may remove it.
+    match /salesExpenses/{expenseId} {
+      allow read:   if isAdmin()
+                       || (isAuthed() && resource.data.salesExecutiveId == request.auth.uid);
+      allow create: if isSalesExec()
+                       && request.resource.data.salesExecutiveId == request.auth.uid
+                       && request.resource.data.status == 'PENDING';
+      allow update: if isAdmin()
+                       || (isSalesExec()
+                           && resource.data.salesExecutiveId == request.auth.uid
+                           && request.resource.data.salesExecutiveId == resource.data.salesExecutiveId
+                           && resource.data.status == 'PENDING'
+                           && request.resource.data.status == 'PENDING');
+      allow delete: if isAdmin()
+                       || (isSalesExec()
+                           && resource.data.salesExecutiveId == request.auth.uid
+                           && resource.data.status == 'PENDING');
+    }
+
     // ─── erpHandoffCodes ──────────────────────────────────────────────────────
     // Single-use codes that are exchanged for an ERP sign-in token. Each document
     // is a bearer credential, so no client may read, list or write one — reading a
