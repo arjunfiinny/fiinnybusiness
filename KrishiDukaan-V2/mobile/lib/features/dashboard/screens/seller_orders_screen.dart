@@ -91,25 +91,22 @@ class _SellerOrdersBodyState extends ConsumerState<_SellerOrdersBody> {
 
           // Count statuses
           final total = orders.length;
-          final placedCount = orders.where((o) => o.status == 'pending').length;
-          final dispatchedCount = orders.where((o) => o.status == 'dispatched').length;
-          final deliveredCount = orders.where((o) => o.status == 'delivered').length;
-          final rejectedCount = orders.where((o) => o.status == 'cancelled').length;
+          final placedCount = orders.where((o) => o.status == 'placed').length;
           final acceptedCount = orders.where((o) => o.status == 'accepted').length;
+          final dispatchedCount = orders.where((o) => o.status == 'dispatched').length;
+          final outForDeliveryCount =
+              orders.where((o) => o.status == 'out_for_delivery').length;
+          final deliveredCount = orders.where((o) => o.status == 'delivered').length;
+          final rejectedCount = orders.where((o) => o.status == 'rejected').length;
 
           final paidOrders = orders.where((o) => o.payment?.status == 'paid').toList();
           final paidOrdersCount = paidOrders.length;
 
           final filteredOrders = _activeFilter == 'all'
               ? orders
-              : orders.where((o) {
-                  if (_activeFilter == 'pending') return o.status == 'pending';
-                  if (_activeFilter == 'dispatched') return o.status == 'dispatched';
-                  if (_activeFilter == 'delivered') return o.status == 'delivered';
-                  if (_activeFilter == 'cancelled') return o.status == 'cancelled';
-                  if (_activeFilter == 'accepted') return o.status == 'accepted';
-                  return true;
-                }).toList();
+              // The filter key IS the canonical status, so no per-status branch
+              // is needed — a new status can never be silently unfilterable.
+              : orders.where((o) => o.status == _activeFilter).toList();
 
           return Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -165,12 +162,13 @@ class _SellerOrdersBodyState extends ConsumerState<_SellerOrdersBody> {
                             child: Row(
                               children: [
                                 _filterChip('all', 'All ($total)'),
-                                _filterChip('pending', 'New ($placedCount)'),
+                                _filterChip('placed', 'New ($placedCount)'),
+                                _filterChip('accepted', 'Accepted ($acceptedCount)'),
                                 _filterChip('dispatched', 'Dispatched ($dispatchedCount)'),
+                                _filterChip('out_for_delivery',
+                                    'Out for Delivery ($outForDeliveryCount)'),
                                 _filterChip('delivered', 'Delivered ($deliveredCount)'),
-                                _filterChip('cancelled', 'Rejected ($rejectedCount)'),
-                                if (acceptedCount > 0)
-                                  _filterChip('accepted', 'Processing ($acceptedCount)'),
+                                _filterChip('rejected', 'Rejected ($rejectedCount)'),
                               ],
                             ),
                           ),
@@ -451,7 +449,7 @@ class _SellerOrderCard extends StatelessWidget {
     ].join(', ');
 
     final statusConfig = switch (order.status) {
-      'pending' => (
+      'placed' => (
           label: 'Order Placed',
           icon: Icons.access_time,
           color: Colors.amber.shade800,
@@ -459,13 +457,20 @@ class _SellerOrderCard extends StatelessWidget {
           border: Colors.amber.shade200
         ),
       'accepted' => (
-          label: 'Processing',
+          label: 'Accepted',
           icon: Icons.check_circle_outline,
           color: Colors.blue.shade700,
           bg: Colors.blue.shade50,
           border: Colors.blue.shade200
         ),
       'dispatched' => (
+          label: 'Dispatched',
+          icon: Icons.inventory_2_outlined,
+          color: Colors.indigo.shade700,
+          bg: Colors.indigo.shade50,
+          border: Colors.indigo.shade200
+        ),
+      'out_for_delivery' => (
           label: 'Out for Delivery',
           icon: Icons.local_shipping_outlined,
           color: Colors.purple.shade700,
@@ -731,17 +736,19 @@ class _OrderProgressBar extends StatelessWidget {
       );
     }
 
-    final steps = ['pending', 'dispatched', 'delivered'];
-    final labels = ['Order Placed', 'Out for Delivery', 'Delivered'];
-    final icons = [Icons.access_time, Icons.local_shipping_outlined, Icons.check_circle_outline];
+    // Mirrors FirestoreKeys.orderStatusFlow / ORDER_STATUS_FLOW on the web, so
+    // the seller, the customer app and the website all show the same stages.
+    const steps = ['placed', 'accepted', 'dispatched', 'out_for_delivery', 'delivered'];
+    const labels = ['Placed', 'Accepted', 'Dispatched', 'Out for\nDelivery', 'Delivered'];
+    const icons = [
+      Icons.access_time,
+      Icons.check_circle_outline,
+      Icons.inventory_2_outlined,
+      Icons.local_shipping_outlined,
+      Icons.done_all,
+    ];
 
-    final currentIdx = switch (status) {
-      'pending' => 0,
-      'accepted' => 0,
-      'dispatched' => 1,
-      'delivered' => 2,
-      _ => -1,
-    };
+    final currentIdx = steps.indexOf(status);
 
     return Row(
       children: List.generate(steps.length, (idx) {
@@ -907,6 +914,34 @@ class _ActionButtons extends StatefulWidget {
 class _ActionButtonsState extends State<_ActionButtons> {
   bool _loading = false;
 
+  /// One step forward at a time, mirroring NEXT_ACTIONS in
+  /// app/dashboard/orders/page.tsx so a seller sees the same choices on phone
+  /// and web. Reject stays available until the goods leave the seller: once
+  /// dispatched, cancelling is a refund rather than a status flip.
+  static List<_OrderAction> _nextActionsFor(String status) => switch (status) {
+        'placed' => const [
+            _OrderAction('accepted', 'Accept Order', Icons.check_circle_outline,
+                AppColors.info),
+            _OrderAction('rejected', 'Reject', Icons.cancel_outlined, null,
+                destructive: true),
+          ],
+        'accepted' => const [
+            _OrderAction('dispatched', 'Mark Dispatched',
+                Icons.inventory_2_outlined, AppColors.primary),
+            _OrderAction('rejected', 'Reject', Icons.cancel_outlined, null,
+                destructive: true),
+          ],
+        'dispatched' => const [
+            _OrderAction('out_for_delivery', 'Out for Delivery',
+                Icons.local_shipping_outlined, AppColors.primary),
+          ],
+        'out_for_delivery' => const [
+            _OrderAction('delivered', 'Mark Delivered', Icons.done_all_outlined,
+                AppColors.success),
+          ],
+        _ => const [],
+      };
+
   Future<void> _updateStatus(String newStatus) async {
     setState(() => _loading = true);
     try {
@@ -927,9 +962,8 @@ class _ActionButtonsState extends State<_ActionButtons> {
               child: CircularProgressIndicator(strokeWidth: 2)));
     }
 
-    final hasActions = widget.order.status == 'pending' ||
-        widget.order.status == 'accepted' ||
-        widget.order.status == 'dispatched';
+    final actions = _nextActionsFor(widget.order.status);
+    final hasActions = actions.isNotEmpty;
 
     final invoiceButton = OutlinedButton.icon(
       onPressed: () => _showInvoiceDialog(
@@ -959,59 +993,34 @@ class _ActionButtonsState extends State<_ActionButtons> {
       children: [
         Row(
           children: [
-            if (widget.order.status == 'pending') ...[
+            for (final a in actions) ...[
               Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: () => _updateStatus('cancelled'),
-                  icon: const Icon(Icons.cancel_outlined, size: 16),
-                  label: const Text('Reject'),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: AppColors.error,
-                    side: const BorderSide(color: AppColors.error),
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  ),
-                ),
+                child: a.destructive
+                    ? OutlinedButton.icon(
+                        onPressed: () => _updateStatus(a.next),
+                        icon: Icon(a.icon, size: 16),
+                        label: Text(a.label),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: AppColors.error,
+                          side: const BorderSide(color: AppColors.error),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12)),
+                        ),
+                      )
+                    : FilledButton.icon(
+                        onPressed: () => _updateStatus(a.next),
+                        icon: Icon(a.icon, size: 16),
+                        label: Text(a.label),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: a.color,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12)),
+                        ),
+                      ),
               ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: FilledButton.icon(
-                  onPressed: () => _updateStatus('dispatched'),
-                  icon: const Icon(Icons.local_shipping_outlined, size: 16),
-                  label: const Text('Mark Dispatched'),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: AppColors.primary,
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  ),
-                ),
-              ),
-            ] else if (widget.order.status == 'accepted') ...[
-              Expanded(
-                child: FilledButton.icon(
-                  onPressed: () => _updateStatus('dispatched'),
-                  icon: const Icon(Icons.local_shipping_outlined, size: 16),
-                  label: const Text('Mark Dispatched'),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: AppColors.info,
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  ),
-                ),
-              ),
-            ] else if (widget.order.status == 'dispatched') ...[
-              Expanded(
-                child: FilledButton.icon(
-                  onPressed: () => _updateStatus('delivered'),
-                  icon: const Icon(Icons.done_all_outlined, size: 16),
-                  label: const Text('Mark Delivered'),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: AppColors.success,
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  ),
-                ),
-              ),
+              if (a != actions.last) const SizedBox(width: 10),
             ],
           ],
         ),
@@ -1577,4 +1586,17 @@ void _showInvoiceDialog(BuildContext context, OrderModel order, {String? sellerN
       ),
     ),
   );
+}
+
+/// One button offered to the seller on an order card.
+class _OrderAction {
+  final String next;
+  final String label;
+  final IconData icon;
+  /// Null for [destructive] actions, which take the shared error styling.
+  final Color? color;
+  final bool destructive;
+
+  const _OrderAction(this.next, this.label, this.icon, this.color,
+      {this.destructive = false});
 }

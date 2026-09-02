@@ -766,16 +766,14 @@ class DashboardRepository {
     return controller.stream;
   }
 
+  /// Writes a canonical order status (see FirestoreKeys.orderStatusFlow).
+  /// No translation: the value passed in is the value stored, which is what the
+  /// web seller/customer views read.
   Future<void> updateOrderStatus(String orderId, String status) async {
-    final fsStatus = switch (status) {
-      'cancelled' => 'rejected',
-      'dispatched' => 'out_for_delivery',
-      _ => status,
-    };
     await _db.collection('orders').doc(orderId).update({
-      'status': fsStatus,
+      'status': status,
       'statusHistory': FieldValue.arrayUnion([
-        {'status': fsStatus, 'at': DateTime.now().toIso8601String()},
+        {'status': status, 'at': DateTime.now().toIso8601String()},
       ]),
       'updatedAt': FieldValue.serverTimestamp(),
     });

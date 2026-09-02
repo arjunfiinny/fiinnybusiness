@@ -16,11 +16,17 @@
  * reversed to claw that back. */
 export const PAYOUT_HOLD_DAYS = 7;
 
-/** KrishiDukan takes no commission — a public promise on /sell ("0%
- *  commission, always... we do not deduct a marketplace commission, ever").
- *  Only the payment gateway's own fee is deducted, and that is charged by
- *  Razorpay, not by us. Kept as a named constant so any future change is a
- *  deliberate edit here rather than an arithmetic tweak somewhere. */
+/** Default KrishiDukan commission applied to NEW orders.
+ *
+ *  Still 0: no order-creation path charges a commission, and /sell publicly
+ *  promises "0% commission, always". Changing this number alone does NOT start
+ *  charging sellers — nothing reads it at checkout — and it must not be raised
+ *  without also updating that public copy and the seller terms.
+ *
+ *  Individual orders may still carry a `payment.platformFee` set by an admin
+ *  (see the payouts flow); that stored per-order value is what is actually
+ *  deducted, so a one-off charge is always visible on the order itself rather
+ *  than implied by a global rate. */
 export const PLATFORM_COMMISSION_RATE = 0;
 
 export type PayoutState =
@@ -50,6 +56,10 @@ export type OrderLike = {
   payment?: {
     gatewayFee?: number;
     gatewayTax?: number;
+    /** KrishiDukan's own cut on this order, in rupees. Stored PER ORDER rather
+     *  than derived from a rate, so historical payouts keep the fee that was
+     *  actually applied even if the rate later changes. */
+    platformFee?: number;
     razorpayPaymentId?: string;
     /** Set once a Route transfer exists for this order. */
     transferId?: string;
@@ -67,6 +77,8 @@ export type SellerEarningsRow = {
   orderId: string;
   gross: number;
   gatewayFee: number;
+  /** KrishiDukan's cut on this order. 0 for every order unless an admin set one. */
+  platformFee: number;
   net: number;
   state: PayoutState;
   deliveredAt: Date | null;
@@ -84,6 +96,8 @@ export type SellerEarningsSummary = {
   paidOut: number;
   /** Gateway fees deducted across all counted orders, for transparency. */
   gatewayFees: number;
+  /** KrishiDukan commission deducted across all counted orders. */
+  platformFees: number;
   /** Earliest date on which any on-hold money becomes due. */
   nextReleaseOn: Date | null;
   rows: SellerEarningsRow[];
@@ -184,6 +198,7 @@ export function computeSellerEarnings(
   let awaitingDelivery = 0;
   let paidOut = 0;
   let gatewayFees = 0;
+  let platformFees = 0;
   let nextReleaseOn: Date | null = null;
 
   for (const order of orders) {
@@ -196,10 +211,14 @@ export function computeSellerEarnings(
     // shown is never a fabricated deduction.
     const gatewayFee =
       (order.payment?.gatewayFee ?? 0) + (order.payment?.gatewayTax ?? 0);
-    const net = Math.max(0, gross - gatewayFee);
+    // Deducted here as well as displayed: if "You receive" did not subtract it,
+    // the seller would be shown a figure larger than what reaches their bank.
+    const platformFee = order.payment?.platformFee ?? 0;
+    const net = Math.max(0, gross - gatewayFee - platformFee);
 
-    rows.push({ orderId: order.id, gross, gatewayFee, net, state, deliveredAt, releaseOn });
+    rows.push({ orderId: order.id, gross, gatewayFee, platformFee, net, state, deliveredAt, releaseOn });
     gatewayFees += gatewayFee;
+    platformFees += platformFee;
 
     if (state === "due") due += net;
     else if (state === "on_hold") {
@@ -218,5 +237,5 @@ export function computeSellerEarnings(
     return bv - av;
   });
 
-  return { due, onHold, awaitingDelivery, paidOut, gatewayFees, nextReleaseOn, rows };
+  return { due, onHold, awaitingDelivery, paidOut, gatewayFees, platformFees, nextReleaseOn, rows };
 }

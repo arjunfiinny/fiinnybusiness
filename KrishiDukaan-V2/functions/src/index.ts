@@ -867,6 +867,10 @@ export const notifyCustomerOnOrderStatus = onDocumentWritten(
         "Order accepted 👍",
         `${store} accepted your order for ${itemSummary}`,
       ],
+      dispatched: [
+        "Order dispatched 📦",
+        `${store} has dispatched your order for ${itemSummary}`,
+      ],
       out_for_delivery: [
         "Out for delivery 🚚",
         `Your order for ${itemSummary} is on its way`,

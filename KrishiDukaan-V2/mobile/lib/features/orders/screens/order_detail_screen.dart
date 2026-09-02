@@ -179,11 +179,12 @@ class OrderDetailScreen extends ConsumerWidget {
 
   Widget _statusChip(String status) {
     final color = switch (status) {
-      'pending' => AppColors.statusPending,
+      'placed' => AppColors.statusPending,
       'accepted' => AppColors.statusAccepted,
       'dispatched' => AppColors.statusDispatched,
+      'out_for_delivery' => AppColors.statusDispatched,
       'delivered' => AppColors.statusDelivered,
-      'cancelled' => AppColors.statusCancelled,
+      'rejected' => AppColors.statusCancelled,
       _ => AppColors.onSurfaceVariant,
     };
     return Container(

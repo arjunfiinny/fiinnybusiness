@@ -18,18 +18,20 @@ import {
 } from "lucide-react";
 import { fetchOrdersForCustomer } from "../../firebase";
 import { PageHeader } from "../_components/page-header";
-import type { OrderDoc, OrderStatus } from "../../../types/order";
+import { ORDER_STATUS_FLOW, type OrderDoc, type OrderStatus } from "../../../types/order";
 import { openInvoice } from "../../utils/invoice-generator";
 
-// Visible progress steps (same as customer view)
-const STATUS_FLOW = ["placed", "out_for_delivery", "delivered"] as const;
+// Visible progress steps — shared with the seller view and the public customer
+// view so all three timelines show the same stages.
+const STATUS_FLOW = ORDER_STATUS_FLOW;
 
 const STATUS_CONFIG: Record<
   OrderStatus,
   { label: string; color: string; bg: string; icon: typeof Clock }
 > = {
   placed:           { label: "Order Placed",     color: "text-amber-700",  bg: "bg-amber-50 border-amber-200",   icon: Clock },
-  accepted:         { label: "Processing",       color: "text-blue-700",   bg: "bg-blue-50 border-blue-200",     icon: CheckCircle2 },
+  accepted:         { label: "Accepted",         color: "text-blue-700",   bg: "bg-blue-50 border-blue-200",     icon: CheckCircle2 },
+  dispatched:       { label: "Dispatched",       color: "text-indigo-700", bg: "bg-indigo-50 border-indigo-200", icon: Package },
   out_for_delivery: { label: "Out for Delivery", color: "text-purple-700", bg: "bg-purple-50 border-purple-200", icon: Truck },
   delivered:        { label: "Delivered",        color: "text-green-700",  bg: "bg-green-50 border-green-200",   icon: Package },
   rejected:         { label: "Rejected",         color: "text-red-700",   bg: "bg-red-50 border-red-200",       icon: XCircle },
@@ -60,14 +62,15 @@ function OrderProgressBar({ status }: { status: OrderStatus }) {
     );
   }
 
-  const resolved = status === "accepted" ? "out_for_delivery" : status;
-  const currentIdx = STATUS_FLOW.indexOf(resolved as (typeof STATUS_FLOW)[number]);
+  // "accepted" is a real step in the flow now, so it is no longer remapped onto
+  // out_for_delivery — doing that would show the parcel as further along than it is.
+  const currentIdx = STATUS_FLOW.indexOf(status);
 
   return (
     <div className="flex items-center gap-0 w-full">
       {STATUS_FLOW.map((step, idx) => {
         const isReached = currentIdx >= idx;
-        const isCurrent = (status === "accepted" ? "out_for_delivery" : status) === step;
+        const isCurrent = status === step;
         const config = STATUS_CONFIG[step as OrderStatus];
         const isLast = idx === STATUS_FLOW.length - 1;
         return (
@@ -136,8 +139,10 @@ type FilterTab = "all" | OrderStatus;
 
 const FILTER_LABELS: { key: FilterTab; label: string; color: string }[] = [
   { key: "all",              label: "All",           color: "bg-surface-container text-on-surface" },
-  { key: "placed",           label: "Placed",        color: "bg-amber-100 text-amber-800" },
-  { key: "out_for_delivery", label: "Dispatched",    color: "bg-purple-100 text-purple-800" },
+  { key: "placed",           label: "Placed",           color: "bg-amber-100 text-amber-800" },
+  { key: "accepted",         label: "Accepted",         color: "bg-blue-100 text-blue-800" },
+  { key: "dispatched",       label: "Dispatched",       color: "bg-indigo-100 text-indigo-800" },
+  { key: "out_for_delivery", label: "Out for Delivery", color: "bg-purple-100 text-purple-800" },
   { key: "delivered",        label: "Delivered",     color: "bg-green-100 text-green-800" },
   { key: "rejected",         label: "Rejected",      color: "bg-red-100 text-red-800" },
 ];

@@ -152,7 +152,11 @@ class _Content extends StatelessWidget {
     final inPeriod = orders
         .where((o) => o.createdAt == null || o.createdAt!.isAfter(cutoff))
         .toList();
-    final valid = inPeriod.where((o) => o.status != 'cancelled').toList();
+    // 'rejected' is the canonical declined status; the old mobile-only
+    // 'cancelled' alias is still excluded so historical docs stay correct.
+    final valid = inPeriod
+        .where((o) => o.status != 'rejected' && o.status != 'cancelled')
+        .toList();
     final totalRevenue = valid.fold<double>(0, (sum, o) => sum + o.total);
     final totalOrders = inPeriod.length;
 
