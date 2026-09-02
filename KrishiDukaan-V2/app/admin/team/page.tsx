@@ -28,6 +28,7 @@ const SECTION_LABELS: Record<AdminSection, string> = {
   overview: "Overview",
   analytics: "Analytics",
   orders: "Orders",
+  payments: "Payments",
   users: "Users & Roles",
   subscriptions: "Subscriptions",
   payouts: "Seller Payouts",

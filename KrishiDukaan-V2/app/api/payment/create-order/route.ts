@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import Razorpay from 'razorpay';
 import { getAdminDb } from '../../../lib/firebase-admin';
+import { recordAttempt } from '../../../lib/payment-attempts';
 import {
   DEFAULT_DURATIONS,
   PRICING_DOC_PATH,
@@ -128,6 +129,23 @@ export async function POST(request: Request) {
     };
 
     const order = await razorpay.orders.create(options);
+
+    // Same lifecycle record as a cart purchase, so the admin Payments view
+    // covers subscription failures and product failures in one place.
+    await recordAttempt({
+      razorpayOrderId: order.id,
+      kind:            'subscription',
+      userId:          String(userId || ''),
+      amount:          baseAmount,
+      subtotal:        subtotal,
+      seatCount:       seats,
+      durationMonths:  months,
+      promoCode:       promoCode || null,
+      discountPercent: discountPercent,
+      source:          request.headers.get('x-client') === 'mobile' ? 'mobile' : 'web',
+      note:            `Subscription — ${seats} seat(s), ${months} month(s)`,
+    });
+
     return NextResponse.json({
       ...order,
       seatCount:      seats,

@@ -24,7 +24,7 @@ import RetailerJoinView from './views/RetailerJoinView';
 import HelpView from './views/HelpView';
 import { fetchManufacturerProfile } from './dashboard/_lib/brand-page-firestore';
 import { motion, AnimatePresence } from 'framer-motion';
-import { auth, db, fetchMarketplaceProducts, fetchStores, syncInitialData, getUserProfile, fetchHubs, createOrdersFromCart, updateOrderPayment, trackPageView, requestRoleUpgrade, logFailedPayment } from './firebase';
+import { auth, db, fetchMarketplaceProducts, fetchStores, syncInitialData, getUserProfile, fetchHubs, createOrdersFromCart, updateOrderPayment, trackPageView, requestRoleUpgrade } from './firebase';
 import { acceptManufacturerInvite } from './lib/invite/invite-acceptance-service';
 import { fetchInviteDetailsForSignup } from './lib/invite/fetch-invite-for-signup';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
@@ -1141,19 +1141,52 @@ export default function App() {
           },
         },
       });
-      // Cart-checkout failures were never logged anywhere — the admin's
-      // Failed Payments tab (app/admin/subscriptions/page.tsx) only ever
-      // received entries from the subscription-purchase page, so a failed
-      // cart payment was invisible to admin short of checking Razorpay's own
-      // dashboard directly. Mirrors the logging SubscriptionView.tsx already
-      // does on its own failure callback.
-      rzp.on("payment.failed", (response: any) => {
-        logFailedPayment(user.uid, response.error, {
-          orderId: rzpOrder.id,
-          // Paise, matching SubscriptionView's existing call and what the admin
-          // Failed Payments card expects (it renders fp.amount / 100).
-          amount: rzpOrder.amount,
-        });
+      // The SDK saying "failed" is not proof the payment failed: a UPI collect
+      // approved slightly late is captured by Razorpay after the checkout has
+      // already given up watching, which is how a customer gets charged and
+      // told it failed in the same breath. So report the failure to the server,
+      // which asks Razorpay directly before recording anything — and if the
+      // money was in fact captured, finish the order instead of showing an
+      // error. Mobile already reconciles this way (checkout_screen.dart).
+      rzp.on("payment.failed", async (response: any) => {
+        try {
+          const idTokenForFailure = await user.getIdToken();
+          const res = await fetch("/api/payment/attempt-failed", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${idTokenForFailure}`,
+            },
+            body: JSON.stringify({
+              razorpay_order_id: rzpOrder.id,
+              error: response?.error ?? null,
+            }),
+          });
+          const data = await res.json();
+
+          if (data?.status === "captured") {
+            // Money is on Razorpay's books — create the order rather than
+            // telling a paying customer their payment failed.
+            await createOrdersAfterPayment({
+              razorpayOrderId: rzpOrder.id,
+              razorpayPaymentId: data.paymentId,
+              // No signature exists on this path: the checkout reported failure,
+              // so Razorpay never handed one back. The payment is confirmed by
+              // the server reading Razorpay's own records instead, which is a
+              // stronger guarantee than a client-supplied signature.
+              reconciled: true,
+              amount: rzpOrder.amount / 100,
+              status: "paid",
+              paidAt: new Date().toISOString(),
+            });
+            setCheckoutLoading(false);
+            return;
+          }
+        } catch {
+          // Reconciliation itself failed — fall through to the cautious message
+          // below rather than leaving the customer with no feedback at all.
+        }
+
         setCheckoutLoading(false);
         setCheckoutMessage(
           "❌ Payment failed. If any amount was deducted, it will be refunded automatically within 5-7 business days.",

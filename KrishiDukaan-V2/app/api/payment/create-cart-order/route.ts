@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import Razorpay from 'razorpay';
 import { getAdminDb, getAdminAuth } from '../../../lib/firebase-admin';
+import { recordAttempt, type AttemptItem } from '../../../lib/payment-attempts';
 
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID!,
@@ -49,8 +50,9 @@ export async function POST(request: Request) {
     if (!idToken) {
       return NextResponse.json({ error: 'Missing authorization token' }, { status: 401 });
     }
+    let callerUid: string;
     try {
-      await getAdminAuth().verifyIdToken(idToken);
+      callerUid = (await getAdminAuth().verifyIdToken(idToken)).uid;
     } catch {
       return NextResponse.json({ error: 'Invalid authorization token' }, { status: 401 });
     }
@@ -87,6 +89,9 @@ export async function POST(request: Request) {
     // ── Server-side price verification ────────────────────────────────────────
     const db = getAdminDb();
     let serverSubtotal = 0;
+    // Built as prices are resolved so the attempt record shows exactly which
+    // products, at which price, a failed payment was for.
+    const pricedItems: AttemptItem[] = [];
 
     for (const item of items) {
       const qty = Math.max(1, Math.floor(Number(item.qty) || 1));
@@ -124,10 +129,18 @@ export async function POST(request: Request) {
         );
       }
 
-      const snaps = await Promise.all(queries);
+      // Fetched in parallel with the pricing queries: it names the product for
+      // the attempt record, and the canonical-price fallback below needs it too.
+      const [snaps, prodSnap] = await Promise.all([
+        Promise.all(queries),
+        db.collection('products').doc(item.productId).get(),
+      ]);
       const invDoc = snaps.find((s) => !s.empty)?.docs[0] ?? null;
+      const prodData = prodSnap.exists ? prodSnap.data()! : null;
 
       let finalPrice: number;
+      let priceSource: AttemptItem['priceSource'] = 'none';
+      let itemName = '';
 
       if (invDoc) {
         const d         = invDoc.data();
@@ -138,6 +151,8 @@ export async function POST(request: Request) {
           ? Math.max(0, Number(d.discountFixedAmt ?? 0))
           : 0;
         finalPrice = Math.round(Math.max(0, basePrice - discAmt - discFixed) * 100) / 100;
+        priceSource = 'inventory';
+        itemName = String(d.productName ?? d.name ?? '');
         console.log('[create-cart-order] inventory doc found for', item.productId,
           '| base:', basePrice, 'disc:', discPct + '%', 'fixed:', discFixed, 'final:', finalPrice);
       } else {
@@ -169,16 +184,17 @@ export async function POST(request: Request) {
             ? Math.max(0, Number(d.discountFixedAmt ?? 0))
             : 0;
           finalPrice = Math.round(Math.max(0, basePrice - discAmt - discFixed) * 100) / 100;
+          priceSource = 'seller-copy';
+          itemName = String(d.name ?? d.productName ?? '');
           console.log('[create-cart-order] seller copy found for', item.productId,
             '| base:', basePrice, 'disc:', discPct + '%', 'final:', finalPrice);
         } else {
           // Fallback 2: read seller's sellingPrice from canonical product's availability[]
-          const prodSnap = await db.collection('products').doc(item.productId).get();
-          if (!prodSnap.exists) {
+          if (!prodData) {
             console.warn('[create-cart-order] no product doc for', item.productId, '— skipping');
             finalPrice = 0;
+            priceSource = 'none';
           } else {
-            const prodData = prodSnap.data()!;
             const availability = Array.isArray(prodData.availability) ? prodData.availability : [];
             const avEntry = phoneKey
               ? availability.find((e: Record<string,unknown>) =>
@@ -186,10 +202,12 @@ export async function POST(request: Request) {
               : null;
             if (avEntry && Number(avEntry.sellingPrice) > 0) {
               finalPrice = Number(avEntry.sellingPrice);
+              priceSource = 'availability';
               console.log('[create-cart-order] availability[] entry found for', item.productId,
                 '| price:', finalPrice);
             } else {
               finalPrice = Number(prodData.price ?? 0);
+              priceSource = 'canonical';
               console.log('[create-cart-order] canonical price fallback for', item.productId,
                 '| price:', finalPrice);
             }
@@ -197,7 +215,20 @@ export async function POST(request: Request) {
         }
       }
 
-      serverSubtotal += Math.round(finalPrice * qty * 100) / 100;
+      const lineTotal = Math.round(finalPrice * qty * 100) / 100;
+      serverSubtotal += lineTotal;
+
+      pricedItems.push({
+        productId:   item.productId,
+        name:        itemName || String(prodData?.name ?? prodData?.productName ?? item.productId),
+        qty,
+        unitPrice:   finalPrice,
+        lineTotal,
+        sellerId:    item.sellerId,
+        sellerPhone: item.sellerPhone ?? null,
+        sellerName:  null,
+        priceSource,
+      });
     }
 
     serverSubtotal = Math.round(serverSubtotal * 100) / 100;
@@ -248,6 +279,22 @@ export async function POST(request: Request) {
         serverSubtotal:  String(serverSubtotal),
         deliveryCharge:  String(safeClientDelivery),
       },
+    });
+
+    // Recorded before the customer sees the checkout sheet, so a lost sale is
+    // visible to admin even when the client never reports back — a killed app,
+    // a closed tab, or a dismissed sheet all leave this row as 'created'.
+    // Awaited but internally non-throwing: it cannot fail the order.
+    await recordAttempt({
+      razorpayOrderId: order.id,
+      kind:            'cart',
+      userId:          callerUid,
+      amount:          totalForPayment,
+      subtotal:        subtotalForPayment,
+      deliveryCharge:  safeClientDelivery,
+      items:           pricedItems,
+      source:          request.headers.get('x-client') === 'mobile' ? 'mobile' : 'web',
+      note:            note || 'Cart Order',
     });
 
     return NextResponse.json({

@@ -97,6 +97,48 @@ you use for the customer app if you want one signing identity across both.
 
 Output: `build/app/outputs/bundle/release/app-release.aab`
 
+## Publishing to Play
+
+**This is a separate Play Console app, not a KrishiDukaan release.** Play keys a
+listing to its `applicationId`, and this app is
+`com.karanarjuntechnologies.KrishiDukanSales` while the customer app is
+`com.karanarjuntechnologies.KrishiDukan`. Uploading this bundle to the customer
+listing is rejected ("package name doesn't match") — two package names is always
+two listings. Version codes are independent too: this app starts at `1.0.0+1`
+regardless of where the customer app is.
+
+Use the **Internal testing** track, not Production. Up to 100 testers invited by
+email, no full store review, and it stays unlisted — which matters for a
+login-gated internal tool, since a public listing means strangers install it,
+cannot sign in, and leave one-star reviews. Testers still get auto-updates.
+
+Store listing copy, the exact Data safety answers and reviewer notes are in
+[`PLAY_LISTING.md`](PLAY_LISTING.md) — copy-paste ready.
+
+What the console will ask for:
+
+- **Data safety** — declare precise **location** (every visit, day start/end and
+  attendance check-in is GPS-stamped), **photos** (expense bills) and **email
+  address**, all linked to a user identity. These answers must match the privacy
+  policy you link.
+- **Privacy policy URL** — `krishidukan.com/privacy`. Check it actually covers
+  field-staff location tracking; the customer-facing text may not.
+- Content rating questionnaire and target audience.
+
+Two things that are deliberately *not* needed:
+
+- **No SHA-1 fingerprint in Firebase.** Sign-in is email/password only — no
+  Google Sign-In, phone auth or Dynamic Links, which are the only features that
+  need it. This avoids the usual "works in debug, breaks once Play App Signing
+  re-signs the bundle" trap.
+- **No background-location declaration.** Only foreground
+  `ACCESS_FINE_LOCATION` is requested; background location triggers a separate
+  and much slower Play review.
+
+The upload keystore may be shared with the customer app — an upload key only
+authenticates uploads, and Play App Signing mints a distinct app signing key per
+app regardless.
+
 ## Firebase
 
 Registered in the **production** project `krishidukan-e8315` as its own client:
