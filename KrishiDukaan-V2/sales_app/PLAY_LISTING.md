@@ -164,5 +164,20 @@ Sign in with the credentials above to reach the dashboard. Location permission
 is required to use the Start Day, dealer visit and attendance features.
 ```
 
-Create that demo account through the admin panel with role `salesExecutive`
-before submitting, and keep it active for as long as the app is on Play.
+Create that demo account before submitting, and keep it active for as long as
+the app is on Play:
+
+1. Sign in to the admin panel → **Users & Roles** → **Create user**.
+2. Role: **Sales Executive (Field Team)**.
+3. Give it an email and a password of at least 6 characters. Use a dedicated
+   address (e.g. `play-review@krishidukan.com`), not a real rep's account — the
+   credentials go into Play Console in plain text and are visible to reviewers.
+4. Paste those credentials into the App access block above.
+
+The account needs no seeded data to pass review: the dashboard, dealer list,
+attendance, expenses and reports all render correctly for a brand-new rep with
+no history, and the reviewer only has to get past the login screen.
+
+Note that `functions/scripts/seed-sales-executives.ts` is NOT the tool for this
+— it is a one-time migration that back-fills the `salesExecutive` role onto reps
+who already have field activity, and it creates no new accounts.

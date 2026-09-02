@@ -9,14 +9,17 @@ Run after replacing assets/icons/app_icon_source.png:
 
 Why this exists rather than pointing the generator straight at the artwork:
 
-* The artwork ships with rounded corners and a drop shadow. Android and iOS both
-  apply their own mask, so a pre-rounded source gets rounded twice and the shadow
-  survives as grey fringing along the cut. This squares the canvas off and fills
-  the corners with the artwork's own background.
-* iOS rejects transparency in an app icon; the alpha is flattened onto white.
+* The artwork is a rounded card floating on a near-white page, with a soft drop
+  shadow around it. Android and iOS both apply their own mask, so feeding them
+  that image would round an already-rounded card (a visible double edge) and
+  keep the shadow as a grey halo baked into every launcher icon. This finds the
+  card and crops to its interior, so the platform mask is the only rounding.
+* iOS rejects transparency in an app icon, so the result is flattened to RGB.
 * An Android adaptive icon can be cropped to any shape and only the centre ~66%
-  is guaranteed visible, so the foreground is the artwork inset on a transparent
-  canvas instead of the full-bleed square.
+  is guaranteed visible. The inset that keeps the artwork inside that safe zone
+  is applied by flutter_launcher_icons (adaptive_icon_foreground_inset), so the
+  foreground written here is full-bleed — insetting in both places would
+  compound and leave the icon floating small inside its mask.
 """
 
 from pathlib import Path
@@ -30,64 +33,100 @@ SQUARE = ICONS / "app_icon.png"
 FOREGROUND = ICONS / "app_icon_foreground.png"
 
 SIZE = 1024
-# Fraction of the canvas the artwork occupies in the adaptive foreground. 0.62
-# keeps it inside the 66% safe zone with a little slack for aggressive masks.
-FOREGROUND_SCALE = 0.62
+
+# The adaptive foreground is written FULL-BLEED. flutter_launcher_icons applies
+# its own `adaptive_icon_foreground_inset` (see flutter_launcher_icons.yaml),
+# which is what pulls the artwork inside the ~66% safe zone. Insetting here as
+# well would compound the two and leave the icon floating small in its circle.
+
+# A pixel this much darker than the page is part of the shadow ring rather than
+# the page or the card, both of which are essentially white here.
+SHADOW_LUMA = 245
+
+# Extra pixels trimmed past the detected card edge. The shadow fades gradually,
+# so stopping exactly at the threshold can still leave a faint grey line.
+SAFETY_TRIM = 8
 
 
-def background_colour(im: Image.Image) -> tuple[int, int, int]:
-    """The artwork's own ground, sampled just inside the centre of each edge.
+def _luma(px: tuple[int, ...]) -> int:
+    return (px[0] + px[1] + px[2]) // 3
 
-    Sampling the very corner would pick up the rounding or the shadow, which is
-    exactly what we are trying to remove.
+
+def find_card_box(im: Image.Image) -> tuple[int, int, int, int]:
+    """Bounding box of the card's interior, excluding its shadow and rounding.
+
+    Walks inward along the centre row and centre column. The first run of
+    shadow-dark pixels marks the card's edge; everything past it is card. Both
+    the page outside and the card inside are near-white, so the shadow dip is
+    the only reliable signal — a plain "not white" test would stop at the very
+    first pixel and find nothing.
     """
     w, h = im.size
-    inset = max(2, min(w, h) // 12)
-    samples = [
-        im.getpixel((w // 2, inset)),
-        im.getpixel((w // 2, h - inset - 1)),
-        im.getpixel((inset, h // 2)),
-        im.getpixel((w - inset - 1, h // 2)),
-    ]
-    opaque = [s for s in samples if len(s) < 4 or s[3] > 200]
-    if not opaque:
-        return (255, 255, 255)
-    return tuple(sum(s[i] for s in opaque) // len(opaque) for i in range(3))
+    px = im.load()
+    cx, cy = w // 2, h // 2
+
+    def scan(get, length: int) -> tuple[int, int]:
+        lo, hi = 0, length - 1
+        for i in range(length // 2):
+            if _luma(get(i)) < SHADOW_LUMA:
+                lo = i
+                break
+        for i in range(length - 1, length // 2, -1):
+            if _luma(get(i)) < SHADOW_LUMA:
+                hi = i
+                break
+        return lo, hi
+
+    left, right = scan(lambda x: px[x, cy], w)
+    top, bottom = scan(lambda y: px[cx, y], h)
+
+    # Walk past the shadow band into the card itself.
+    while left < cx and _luma(px[left, cy]) < SHADOW_LUMA:
+        left += 1
+    while right > cx and _luma(px[right, cy]) < SHADOW_LUMA:
+        right -= 1
+    while top < cy and _luma(px[cx, top]) < SHADOW_LUMA:
+        top += 1
+    while bottom > cy and _luma(px[cx, bottom]) < SHADOW_LUMA:
+        bottom -= 1
+
+    left += SAFETY_TRIM
+    top += SAFETY_TRIM
+    right -= SAFETY_TRIM
+    bottom -= SAFETY_TRIM
+
+    # Square it off around the centre so nothing is stretched.
+    side = min(right - left, bottom - top)
+    ccx, ccy = (left + right) // 2, (top + bottom) // 2
+    half = side // 2
+    return (ccx - half, ccy - half, ccx + half, ccy + half)
 
 
 def main() -> int:
     if not SOURCE.exists():
-        print(f"error: put the 1024x1024 artwork at {SOURCE}", file=sys.stderr)
+        print(f"error: put the artwork at {SOURCE}", file=sys.stderr)
         return 1
 
-    art = Image.open(SOURCE).convert("RGBA")
-    if art.width != art.height:
-        side = min(art.size)
-        left = (art.width - side) // 2
-        top = (art.height - side) // 2
-        art = art.crop((left, top, left + side, top + side))
-    art = art.resize((SIZE, SIZE), Image.LANCZOS)
+    art = Image.open(SOURCE).convert("RGB")
+    box = find_card_box(art)
+    card = art.crop(box).resize((SIZE, SIZE), Image.LANCZOS)
 
-    ground = background_colour(art)
+    # Full-bleed square for iOS and the legacy Android icon.
+    card.save(SQUARE)
 
-    # Full-bleed square: artwork flattened onto its own ground so the rounded
-    # corners and shadow disappear into a solid edge.
-    square = Image.new("RGB", (SIZE, SIZE), ground)
-    square.paste(art, (0, 0), art)
-    square.save(SQUARE)
+    # Adaptive foreground: the same content, full-bleed. The inset is applied
+    # by flutter_launcher_icons, not here.
+    card.convert("RGBA").save(FOREGROUND)
 
-    # Adaptive foreground: same artwork, inset, transparent around it.
-    inner = int(SIZE * FOREGROUND_SCALE)
-    fg = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
-    fg.paste(art.resize((inner, inner), Image.LANCZOS), ((SIZE - inner) // 2,) * 2)
-    fg.save(FOREGROUND)
-
-    print(f"ground colour  {'#%02X%02X%02X' % ground}")
-    print(f"wrote          {SQUARE.relative_to(ICONS.parent.parent)}  {SIZE}x{SIZE}")
-    print(f"wrote          {FOREGROUND.relative_to(ICONS.parent.parent)}  {SIZE}x{SIZE} (artwork at {int(FOREGROUND_SCALE*100)}%)")
+    corner = card.getpixel((4, 4))
+    print(f"source          {art.size[0]}x{art.size[1]}")
+    print(f"card detected   {box}  ({box[2] - box[0]}px square)")
+    print(f"card corner     #{'%02X%02X%02X' % corner}")
+    print(f"wrote           {SQUARE.name}  {SIZE}x{SIZE}")
+    print(f"wrote           {FOREGROUND.name}  {SIZE}x{SIZE} (full-bleed; inset applied by flutter_launcher_icons)")
     print()
-    print("If the ground colour above is not white, set adaptive_icon_background")
-    print("in flutter_launcher_icons.yaml to match it.")
+    print("Set adaptive_icon_background in flutter_launcher_icons.yaml to the")
+    print("card corner colour above if it is not already.")
     return 0
 
 
