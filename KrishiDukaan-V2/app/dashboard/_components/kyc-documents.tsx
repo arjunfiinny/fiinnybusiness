@@ -25,7 +25,13 @@ import { db, storage } from "../../firebase";
  * so the admin list can show what has been submitted without touching Storage.
  */
 
-export type KycDocType = "pan_card" | "cancelled_cheque" | "gst_certificate" | "address_proof";
+export type KycDocType =
+  | "pan_card"
+  | "cancelled_cheque"
+  | "gst_certificate"
+  | "address_proof"
+  | "owner_photo"
+  | "trade_license";
 
 type DocSpec = {
   type: KycDocType;
@@ -61,6 +67,18 @@ const DOC_SPECS: DocSpec[] = [
     label: "GST certificate",
     hint: "Only if your business is GST registered",
     required: false,
+  },
+  {
+    type: "owner_photo",
+    label: "Owner photo",
+    hint: "A clear photo of the account holder's face, for identity verification",
+    required: true,
+  },
+  {
+    type: "trade_license",
+    label: "Trade / product license",
+    hint: "Shop establishment, FSSAI, mandi, or other license permitting you to sell agri produce or inputs",
+    required: true,
   },
 ];
 
