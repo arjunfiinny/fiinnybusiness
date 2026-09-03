@@ -53,9 +53,11 @@ const DOC_LABELS: Record<string, string> = {
   cancelled_cheque: "Cancelled cheque",
   address_proof: "Address proof",
   gst_certificate: "GST certificate",
+  owner_photo: "Owner photo",
+  trade_license: "Trade / product license",
 };
 
-const REQUIRED_DOCS = ["pan_card", "cancelled_cheque", "address_proof"];
+const REQUIRED_DOCS = ["pan_card", "cancelled_cheque", "address_proof", "owner_photo", "trade_license"];
 
 export default function AdminPayoutsPage() {
   const [rows, setRows] = useState<PayoutRow[]>([]);

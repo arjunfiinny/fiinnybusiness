@@ -327,6 +327,24 @@ service cloud.firestore {
     }
 
     // ─── failedPayments ──────────────────────────────────────────────────────
+    // ─── paymentAttempts ──────────────────────────────────────────────────────
+    // One doc per Razorpay order, written server-side by the create-order routes
+    // before checkout opens, then moved to paid/failed as the payment resolves.
+    //
+    // NO CLIENT WRITES AT ALL. Every write goes through the Admin SDK, which
+    // bypasses these rules — that is the point. This record is the evidence of
+    // what a customer tried to buy and at what price, so allowing the customer
+    // to create or edit it would let them forge a basket or erase a failure.
+    // Clients report a failure through /api/payment/attempt-failed instead,
+    // which re-checks Razorpay before believing them.
+    //
+    // Reads are admin-only: an attempt row exposes the buyer's phone alongside
+    // the priced basket.
+    match /paymentAttempts/{orderId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
     match /failedPayments/{paymentId} {
       allow read: if isAdmin();
       allow create: if isAuthed() && (
@@ -357,7 +375,7 @@ service cloud.firestore {
       allow update: if isAdmin() || (isAuthed() && (
         resource.data.sellerPhone == myPhone() ||
         resource.data.sellerId == request.auth.uid
-      ) && request.resource.data.status in ['placed','accepted','out_for_delivery','delivered','rejected'])
+      ) && request.resource.data.status in ['placed','accepted','dispatched','out_for_delivery','delivered','rejected'])
         // Allow customer to update payment field on their own order
         || (isAuthed() && (
           resource.data.customerId == request.auth.uid ||
@@ -972,6 +990,57 @@ service cloud.firestore {
       allow update: if isAuthed()
                        && resource.data.salesExecutiveId == request.auth.uid;
       allow delete: if isAdmin();
+    }
+
+    // ─── salesAttendance ──────────────────────────────────────────────────────
+    // One doc per sales executive per IST calendar day, id `{uid}_{date}`.
+    // Written by the sales app: Start Day marks the rep present automatically,
+    // and they can correct the day by hand (leave, half day, week off).
+    //
+    // The deterministic id is what makes a day markable only once, but an id is
+    // not a permission — a rep could still write to someone else's `{uid}_{date}`
+    // doc — so the salesExecutiveId/uid match below is what actually enforces
+    // ownership, and the id prefix is deliberately NOT trusted on its own.
+    match /salesAttendance/{docId} {
+      allow read:   if isAdmin()
+                       || (isAuthed() && resource.data.salesExecutiveId == request.auth.uid);
+      allow create: if isSalesExec()
+                       && request.resource.data.salesExecutiveId == request.auth.uid;
+      // The owner may correct their own day; the salesExecutiveId can never be
+      // reassigned, so a record cannot be moved onto another rep.
+      allow update: if isAdmin()
+                       || (isSalesExec()
+                           && resource.data.salesExecutiveId == request.auth.uid
+                           && request.resource.data.salesExecutiveId == resource.data.salesExecutiveId);
+      allow delete: if isAdmin();
+    }
+
+    // ─── salesExpenses ────────────────────────────────────────────────────────
+    // Field expense claims raised by a sales executive and reviewed by an admin.
+    //
+    // The whole point of the collection is that the REVIEW DECISION is not the
+    // claimant's to make, so a rep may only ever write a PENDING document:
+    //  · create — must be their own, and must start PENDING.
+    //  · update — only their own, only while still PENDING, and it must stay
+    //    PENDING. Without that last clause a rep could approve their own claim.
+    //  · delete — withdrawing an un-reviewed claim is fine; once an admin has
+    //    decided, the record is an audit trail and only an admin may remove it.
+    match /salesExpenses/{expenseId} {
+      allow read:   if isAdmin()
+                       || (isAuthed() && resource.data.salesExecutiveId == request.auth.uid);
+      allow create: if isSalesExec()
+                       && request.resource.data.salesExecutiveId == request.auth.uid
+                       && request.resource.data.status == 'PENDING';
+      allow update: if isAdmin()
+                       || (isSalesExec()
+                           && resource.data.salesExecutiveId == request.auth.uid
+                           && request.resource.data.salesExecutiveId == resource.data.salesExecutiveId
+                           && resource.data.status == 'PENDING'
+                           && request.resource.data.status == 'PENDING');
+      allow delete: if isAdmin()
+                       || (isSalesExec()
+                           && resource.data.salesExecutiveId == request.auth.uid
+                           && resource.data.status == 'PENDING');
     }
 
     // ─── erpHandoffCodes ──────────────────────────────────────────────────────

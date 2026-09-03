@@ -8,7 +8,7 @@ import '../../../core/models/subscription_model.dart';
 import '../../../core/providers/user_provider.dart';
 import '../../../core/utils/currency_utils.dart';
 import '../../../core/widgets/app_top_bar.dart';
-import '../data/dashboard_repository.dart';
+import '../../manufacturer/data/manufacturer_repository.dart';
 import '../providers/dashboard_provider.dart';
 
 /// Seller-facing subscription management — the app's equivalent of web's
@@ -399,7 +399,12 @@ class _SeatListingCardState extends State<_SeatListingCard> {
 
     setState(() => _releasing = true);
     try {
-      await DashboardRepository().releaseSeatListing(l.id);
+      // Full release, not just a status flip: this also takes the retailer's
+      // copy of the product offline and off the marketplace. Web's
+      // subscription page calls the same removeProductAssignment — using a
+      // bare status update here left the product live and orderable from a
+      // retailer whose seat had just been revoked.
+      await ManufacturerRepository().removeProductAssignment(l.id);
       if (mounted) widget.onReleased();
     } catch (e) {
       if (mounted) {

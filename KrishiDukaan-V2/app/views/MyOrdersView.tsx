@@ -2,24 +2,28 @@
 
 import { useEffect, useState } from "react";
 import { fetchOrdersForCustomer } from "../firebase";
-import type { OrderDoc } from "../../types/order";
+import { ORDER_STATUS_FLOW, type OrderDoc, type OrderStatus } from "../../types/order";
 import { useI18n } from "../i18n/I18nContext";
 import { openInvoice } from "../utils/invoice-generator";
 
 type Translate = (key: string, params?: Record<string, string | number>) => string;
 
-// Visible timeline — 3 steps (accepted is legacy, handled as processing label)
-const STATUS_ORDER = ["placed", "out_for_delivery", "delivered"] as const;
+// Timeline the customer sees. Mirrors ORDER_STATUS_FLOW exactly so the tracking
+// steps match what the seller is actually clicking through.
+const STATUS_ORDER = ORDER_STATUS_FLOW;
 
 const TIMELINE_STEP_KEYS: { key: string; labelKey: string }[] = [
   { key: "placed",           labelKey: "orderStatusPlaced" },
+  { key: "accepted",         labelKey: "orderTimelineAccepted" },
+  { key: "dispatched",       labelKey: "orderTimelineDispatched" },
   { key: "out_for_delivery", labelKey: "orderTimelineOutForDelivery" },
   { key: "delivered",        labelKey: "orderStatusDelivered" },
 ];
 
 const STATUS_BADGE_KEY: Record<string, string> = {
   placed:           "orderStatusPlaced",
-  accepted:         "orderStatusAccepted",   // legacy orders — show as Accepted
+  accepted:         "orderStatusAccepted",
+  dispatched:       "orderStatusDispatched",
   out_for_delivery: "orderStatusOutForDelivery",
   delivered:        "orderStatusDelivered",
   rejected:         "orderStatusRejected",
@@ -44,10 +48,9 @@ function OrderTimeline({ status, t }: { status: string; t: Translate }) {
     );
   }
 
-  // Map legacy "accepted" to the "out_for_delivery" step index so the timeline
-  // shows progress correctly without needing a separate Accepted step.
-  const resolvedStatus = status === "accepted" ? "out_for_delivery" : status;
-  const currentIdx = STATUS_ORDER.indexOf(resolvedStatus as (typeof STATUS_ORDER)[number]);
+  // "accepted" is its own step now, so it is no longer folded into
+  // out_for_delivery — that would have shown the parcel as already on its way.
+  const currentIdx = STATUS_ORDER.indexOf(status as OrderStatus);
 
   return (
     <div className="flex items-start gap-0">
@@ -146,7 +149,8 @@ export default function MyOrdersView({ customerId }: { customerId: string }) {
                 order.status === "delivered"        ? "bg-green-100 text-green-700" :
                 order.status === "rejected"         ? "bg-red-100 text-red-700" :
                 order.status === "out_for_delivery" ? "bg-blue-100 text-blue-700" :
-                order.status === "accepted"         ? "bg-primary/10 text-primary" :
+                order.status === "accepted"         ? "bg-blue-100 text-blue-700" :
+                order.status === "dispatched"       ? "bg-indigo-100 text-indigo-700" :
                                                       "bg-surface-container text-on-surface-variant"
               }`}>
                 {STATUS_BADGE_KEY[order.status] ? (t as Translate)(STATUS_BADGE_KEY[order.status]!) : order.status.replace(/_/g, " ")}

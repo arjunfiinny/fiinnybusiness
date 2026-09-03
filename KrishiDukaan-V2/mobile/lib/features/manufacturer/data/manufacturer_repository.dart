@@ -151,6 +151,7 @@ class ManufacturerRepository {
     required String ownerName,
     required String retailerPhone,
     String? email,
+    String? line1,
     String? city,
     String? state,
     String? pincode,
@@ -170,7 +171,7 @@ class ManufacturerRepository {
       'ownerName': ownerName.trim(),
       'email': email?.trim().toLowerCase() ?? '',
       'address': {
-        'line1': '',
+        'line1': line1?.trim() ?? '',
         'city': city?.trim() ?? '',
         'state': state?.trim() ?? '',
         'pincode': pincode?.trim() ?? '',
@@ -210,7 +211,7 @@ class ManufacturerRepository {
       'createdBy': manufacturerId,
       'addedAt': now,
       'address': {
-        'line1': '',
+        'line1': line1?.trim() ?? '',
         'city': city?.trim() ?? '',
         'state': state?.trim() ?? '',
         'pincode': pincode?.trim() ?? '',
@@ -905,6 +906,124 @@ class ManufacturerRepository {
       productName: catalogName,
       manufacturerPhone: manufacturerPhone,
     );
+  }
+
+  /// Removes a product assignment — the reverse of [assignProductToRetailer].
+  ///
+  /// Mirrors web's `removeProductAssignment` step for step:
+  /// 1. Release the seat listing. This MUST succeed regardless of anything
+  ///    else below — it's what frees the seat for reassignment, and a
+  ///    retailer who already deleted their copy of the product must not be
+  ///    able to leave a seat stuck as permanently consumed.
+  /// 2. Deactivate the retailer's product copy and inventory record, if they
+  ///    still exist — best-effort, since the retailer may have already
+  ///    removed them from their own inventory.
+  /// 3. Drop the retailer's entry from the manufacturer's canonical product's
+  ///    `availability[]`, so the marketplace stops offering it from a store
+  ///    that no longer stocks it.
+  /// 4. If that was the retailer's last active assignment, clear
+  ///    `assignedSeat` on their `manufacturerRetailers` doc — otherwise the
+  ///    retailer list keeps showing them as seat-consuming with nothing
+  ///    assigned.
+  Future<void> removeProductAssignment(String seatListingId) async {
+    final listingRef = _db.collection('retailerSeatListings').doc(seatListingId);
+    final listingSnap = await listingRef.get();
+    if (!listingSnap.exists) {
+      throw Exception('Seat listing not found.');
+    }
+    final data = listingSnap.data()!;
+    final now = FieldValue.serverTimestamp();
+
+    final retailerProductId = data['productId'] as String? ?? '';
+    final manufacturerProductId = data['manufacturerProductId'] as String? ?? '';
+    final retailerDocId = data['retailerDocId'] as String? ?? '';
+    final manufacturerId = data['ownerId'] as String? ?? '';
+
+    // ── 1 & 2: release the seat, deactivate the copy — one batch ──────────
+    final batch = _db.batch();
+    batch.update(listingRef, {
+      'status': 'released',
+      'releasedAt': now,
+      'updatedAt': now,
+    });
+
+    if (retailerProductId.isNotEmpty) {
+      try {
+        final copySnap =
+            await _db.collection('products').doc(retailerProductId).get();
+        if (copySnap.exists) {
+          batch.update(copySnap.reference, {'isActive': false, 'updatedAt': now});
+        }
+        final invSnap = await _db
+            .collection('inventory')
+            .where('productId', isEqualTo: retailerProductId)
+            .get();
+        for (final d in invSnap.docs) {
+          batch.update(d.reference, {'isAvailable': false, 'updatedAt': now});
+        }
+      } catch (_) {
+        // Product/inventory already gone — seat release must still proceed.
+      }
+    }
+
+    await batch.commit();
+
+    // ── 3: drop this retailer from the canonical product's availability[] ──
+    if (manufacturerProductId.isNotEmpty && retailerDocId.isNotEmpty) {
+      try {
+        final mfgRef = _db.collection('products').doc(manufacturerProductId);
+        final mfgSnap = await mfgRef.get();
+        if (mfgSnap.exists) {
+          final raw = mfgSnap.data()?['availability'];
+          if (raw is List) {
+            final entry = raw.cast<dynamic>().firstWhere(
+                  (e) => e is Map && e['storeId'] == retailerDocId,
+                  orElse: () => null,
+                );
+            if (entry != null) {
+              await mfgRef.update({
+                'availability': FieldValue.arrayRemove([entry]),
+              });
+            }
+          }
+        }
+      } catch (_) {
+        // Non-critical — the marketplace read path already treats a missing
+        // product/copy as unavailable.
+      }
+    }
+
+    // ── 4: clear assignedSeat if that was the retailer's last active seat ──
+    if (manufacturerId.isNotEmpty && retailerDocId.isNotEmpty) {
+      try {
+        final remaining = await _db
+            .collection('retailerSeatListings')
+            .where('ownerId', isEqualTo: manufacturerId)
+            .where('retailerDocId', isEqualTo: retailerDocId)
+            .where('listingType', isEqualTo: 'assigned')
+            .where('status', isEqualTo: 'active')
+            .limit(1)
+            .get();
+        if (remaining.docs.isEmpty) {
+          final retailerDocs = await _db
+              .collection('manufacturerRetailers')
+              .where('manufacturerId', isEqualTo: manufacturerId)
+              .where('retailerDocId', isEqualTo: retailerDocId)
+              .get();
+          final clearBatch = _db.batch();
+          for (final d in retailerDocs.docs) {
+            if (d.data()['status'] == 'revoked') continue;
+            clearBatch.update(d.reference, {
+              'assignedSeat': false,
+              'updatedAt': now,
+            });
+          }
+          await clearBatch.commit();
+        }
+      } catch (_) {
+        // Non-critical — seat awareness will self-correct on next read.
+      }
+    }
   }
 
   Future<void> _sendProductAssignedNotification({

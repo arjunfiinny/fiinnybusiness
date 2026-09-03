@@ -68,6 +68,13 @@ class _NetworkBodyState extends ConsumerState<_NetworkBody> {
   /// selection mode only appears once something is selected, so the ordinary
   /// tap-to-open flow is unchanged.
   final Set<String> _selected = {};
+
+  /// Whether the list is in multi-select mode. Kept separate from
+  /// [_selected] being non-empty so "Select" can show the checkboxes with
+  /// nothing yet chosen — web renders its row checkboxes unconditionally,
+  /// and auto-picking a row to enter the mode would be one mis-tap away from
+  /// bulk-deactivating the wrong retailer.
+  bool _selectionMode = false;
   bool _bulkRunning = false;
 
   @override
@@ -128,6 +135,7 @@ class _NetworkBodyState extends ConsumerState<_NetworkBody> {
     setState(() {
       _bulkRunning = false;
       _selected.clear();
+      _selectionMode = false;
     });
     ref.invalidate(retailerNetworkProvider(widget.manufacturerPhone));
     ref.invalidate(seatStatsProvider(widget.manufacturerPhone));
@@ -296,14 +304,68 @@ class _NetworkBodyState extends ConsumerState<_NetworkBody> {
               ),
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text(
-                    '${filtered.length} retailer${filtered.length != 1 ? 's' : ''}'
-                    '${q.isNotEmpty ? ' match "$_query"' : ''}',
-                    style: AppTextStyles.caption
-                        .copyWith(color: AppColors.onSurfaceVariant),
-                  ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '${filtered.length} retailer${filtered.length != 1 ? 's' : ''}'
+                        '${q.isNotEmpty ? ' match "$_query"' : ''}',
+                        style: AppTextStyles.caption
+                            .copyWith(color: AppColors.onSurfaceVariant),
+                      ),
+                    ),
+                    // Multi-select needs a visible way in. It used to be
+                    // long-press only, with no affordance at all — the feature
+                    // was there but undiscoverable. Web shows a checkbox on
+                    // every row plus a select-all, so this exposes the same
+                    // two things in the space a phone actually has.
+                    Builder(builder: (_) {
+                      // Revoked retailers aren't selectable, matching web.
+                      final selectable = filtered
+                          .where((r) => r.status != 'revoked')
+                          .toList(growable: false);
+                      final allSelected = selectable.isNotEmpty &&
+                          selectable.every((r) => _selected.contains(r.phone));
+                      if (!_selectionMode) {
+                        return TextButton.icon(
+                          onPressed: selectable.isEmpty
+                              ? null
+                              : () => setState(() => _selectionMode = true),
+                          icon: const Icon(Icons.checklist_rounded, size: 16),
+                          label: const Text('Select'),
+                          style: TextButton.styleFrom(
+                            visualDensity: VisualDensity.compact,
+                            foregroundColor: AppColors.primary,
+                          ),
+                        );
+                      }
+                      return TextButton.icon(
+                        onPressed: () => setState(() {
+                          if (allSelected) {
+                            // Second tap on "Clear all" leaves the mode too,
+                            // so there's always a way back out.
+                            _selected.clear();
+                            _selectionMode = false;
+                          } else {
+                            _selected
+                              ..clear()
+                              ..addAll(selectable.map((r) => r.phone));
+                          }
+                        }),
+                        icon: Icon(
+                          allSelected
+                              ? Icons.remove_done_rounded
+                              : Icons.done_all_rounded,
+                          size: 16,
+                        ),
+                        label: Text(allSelected ? 'Clear all' : 'Select all'),
+                        style: TextButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                          foregroundColor: AppColors.primary,
+                        ),
+                      );
+                    }),
+                  ],
                 ),
               ),
               if (_selected.isNotEmpty)
@@ -365,7 +427,10 @@ class _NetworkBodyState extends ConsumerState<_NetworkBody> {
                         IconButton(
                           tooltip: 'Clear selection',
                           icon: const Icon(Icons.close, size: 18),
-                          onPressed: () => setState(_selected.clear),
+                          onPressed: () => setState(() {
+                            _selected.clear();
+                            _selectionMode = false;
+                          }),
                         ),
                       ],
                     ],
@@ -403,16 +468,22 @@ class _NetworkBodyState extends ConsumerState<_NetworkBody> {
                             retailer: r,
                             manufacturerPhone: widget.manufacturerPhone,
                             selected: selected,
-                            // Selection mode is entered by long-pressing, so
-                            // the ordinary tap-to-open flow is untouched.
-                            selectionMode: _selected.isNotEmpty,
-                            onToggleSelected: () => setState(() {
-                              if (selected) {
-                                _selected.remove(r.phone);
-                              } else {
-                                _selected.add(r.phone);
-                              }
-                            }),
+                            // Long-press still works as a shortcut; the
+                            // Select button above is the discoverable way in.
+                            selectionMode: _selectionMode,
+                            // Revoked retailers can't be bulk-acted on, so
+                            // they can't be selected either — same rule web
+                            // applies when it renders its row checkboxes.
+                            onToggleSelected: r.status == 'revoked'
+                                ? null
+                                : () => setState(() {
+                                      _selectionMode = true;
+                                      if (selected) {
+                                        _selected.remove(r.phone);
+                                      } else {
+                                        _selected.add(r.phone);
+                                      }
+                                    }),
                           );
                         },
                       ),
@@ -964,6 +1035,8 @@ class _EditRetailerSheetState extends State<_EditRetailerSheet> {
   late final _emailCtrl = TextEditingController(text: widget.retailer.email ?? '');
   // Address was editable on web's modal but had no fields here at all, so a
   // retailer added from the app could never have their address corrected.
+  late final _line1Ctrl =
+      TextEditingController(text: widget.retailer.line1 ?? '');
   late final _cityCtrl = TextEditingController(text: widget.retailer.city ?? '');
   late final _stateCtrl = TextEditingController(text: widget.retailer.state ?? '');
   late final _pincodeCtrl =
@@ -976,6 +1049,7 @@ class _EditRetailerSheetState extends State<_EditRetailerSheet> {
     _ownerNameCtrl.dispose();
     _phoneCtrl.dispose();
     _emailCtrl.dispose();
+    _line1Ctrl.dispose();
     _cityCtrl.dispose();
     _stateCtrl.dispose();
     _pincodeCtrl.dispose();
@@ -1034,6 +1108,15 @@ class _EditRetailerSheetState extends State<_EditRetailerSheet> {
             keyboardType: TextInputType.emailAddress,
             decoration: InputDecoration(
               labelText: 'Email',
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+            ),
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _line1Ctrl,
+            textCapitalization: TextCapitalization.words,
+            decoration: InputDecoration(
+              labelText: 'Street / Locality',
               border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
             ),
           ),
@@ -1134,6 +1217,7 @@ class _EditRetailerSheetState extends State<_EditRetailerSheet> {
         phone: phone,
         email: _emailCtrl.text.trim(),
         manufacturerPhone: widget.manufacturerPhone,
+        line1: _line1Ctrl.text,
         city: _cityCtrl.text,
         state: _stateCtrl.text,
         pincode: _pincodeCtrl.text,
@@ -1314,6 +1398,7 @@ class _NewRetailerForm extends StatefulWidget {
 
 class _NewRetailerFormState extends State<_NewRetailerForm> {
   final _shopNameCtrl = TextEditingController();
+  final _line1Ctrl = TextEditingController();
   final _ownerNameCtrl = TextEditingController();
   final _phoneCtrl = TextEditingController();
   final _emailCtrl = TextEditingController();
@@ -1339,6 +1424,7 @@ class _NewRetailerFormState extends State<_NewRetailerForm> {
     _emailCtrl.dispose();
     _mapsSearchCtrl.dispose();
     _mapsLinkCtrl.dispose();
+    _line1Ctrl.dispose();
     _cityCtrl.dispose();
     _stateCtrl.dispose();
     _pincodeCtrl.dispose();
@@ -1502,6 +1588,8 @@ class _NewRetailerFormState extends State<_NewRetailerForm> {
         ownerName: owner,
         retailerPhone: phone,
         email: _emailCtrl.text.trim().isNotEmpty ? _emailCtrl.text.trim() : null,
+        line1:
+            _line1Ctrl.text.trim().isNotEmpty ? _line1Ctrl.text.trim() : null,
         city: _cityCtrl.text.trim().isNotEmpty ? _cityCtrl.text.trim() : null,
         state: _stateCtrl.text.trim().isNotEmpty ? _stateCtrl.text.trim() : null,
         pincode: _pincodeCtrl.text.trim().isNotEmpty ? _pincodeCtrl.text.trim() : null,
@@ -1739,6 +1827,16 @@ class _NewRetailerFormState extends State<_NewRetailerForm> {
               ],
             ),
           ],
+          const SizedBox(height: 16),
+          TextField(
+            controller: _line1Ctrl,
+            textCapitalization: TextCapitalization.words,
+            decoration: InputDecoration(
+              labelText: 'Street / Locality',
+              hintText: 'Shop no., street, area',
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+            ),
+          ),
           const SizedBox(height: 16),
 
           // ── City / State / Pincode row ──────────────────────────────────

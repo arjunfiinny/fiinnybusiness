@@ -155,11 +155,19 @@ class PaymentService {
     }
   }
 
-  /// Records a genuine payment failure to the `failedPayments` collection so
-  /// it shows up in the admin dashboard's Failed Payments tab — mirrors
-  /// `logFailedPayment` in app/firebase.ts (web). Previously nothing on
-  /// mobile ever wrote here, so admin had to check Razorpay's own dashboard
-  /// directly for any failure a mobile customer hit.
+  /// Records a genuine payment failure so admin can see it.
+  ///
+  /// Reports to `/api/payment/attempt-failed`, which updates the server-side
+  /// `paymentAttempts` row behind Admin → Payments. That row already carries
+  /// the priced basket, so admin sees WHICH products the customer was buying —
+  /// something the client has no way to attach here.
+  ///
+  /// The endpoint re-checks Razorpay before believing us, so a late capture is
+  /// recorded as paid rather than filed as a failure.
+  ///
+  /// Also still writes the legacy `failedPayments` document that the older
+  /// admin Subscriptions → Failed Payments tab reads, so that view keeps
+  /// working until it is retired.
   ///
   /// Call this only for a CONFIRMED failure (i.e. after [checkOrderStatus]
   /// shows the payment was not captured) — never for the SDK's own timeout
@@ -176,6 +184,26 @@ class PaymentService {
       final user = FirebaseAuth.instance.currentUser;
       if (user == null) return;
       final db = FirebaseFirestore.instance;
+
+      // Server-side attempt record (Admin → Payments).
+      if (orderId != null) {
+        try {
+          final token = await user.getIdToken();
+          await http.post(
+            Uri.parse('${AppConfig.apiBaseUrl}/api/payment/attempt-failed'),
+            headers: {
+              'Authorization': 'Bearer $token',
+              'Content-Type': 'application/json',
+            },
+            body: jsonEncode({
+              'razorpay_order_id': orderId,
+              'error': {'description': message},
+            }),
+          );
+        } catch (_) {
+          // Best-effort — the legacy write below still records something.
+        }
+      }
 
       String? phone;
       try {

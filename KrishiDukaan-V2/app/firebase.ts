@@ -2134,15 +2134,47 @@ export async function fetchAllUsers(): Promise<any[]> {
 }
 
 /** One page of the users list, newest first — for admin "browse mode" instead of a full collection scan. */
+export type UserRoleFilter = 'all' | 'retailer' | 'manufacturer' | 'admin' | 'customer';
+
+/**
+ * One page of users, optionally narrowed to a role by Firestore itself.
+ *
+ * The role argument is what keeps the admin Users tab cheap. Without it the page
+ * had to download the ENTIRE users collection to filter in the browser, so
+ * picking "Retailer" read ~1,300 docs to show 139 — the actual cause of that tab
+ * being slow and read-heavy.
+ *
+ * 'customer' is deliberately NOT pushed into the query. A customer is a user
+ * whose role is 'customer' OR who has no role field at all, and Firestore cannot
+ * express "field missing OR equals" in a single query — a where('role','==','customer')
+ * would silently drop every legacy user that predates the field. So that one case
+ * pages through unfiltered and is narrowed by the caller, which is still
+ * paginated and still far cheaper than loading everything.
+ */
 export async function fetchUsersPage(
   pageSize: number,
   cursor?: QueryDocumentSnapshot<DocumentData> | null,
+  role: UserRoleFilter = 'all',
 ): Promise<{ users: any[]; lastDoc: QueryDocumentSnapshot<DocumentData> | null; hasMore: boolean }> {
-  const base = query(collection(db, 'users'), orderBy('createdAt', 'desc'), limit(pageSize));
-  const q = cursor ? query(collection(db, 'users'), orderBy('createdAt', 'desc'), startAfter(cursor), limit(pageSize)) : base;
-  const snap = await getDocs(q);
+  const serverFilterable = role === 'retailer' || role === 'manufacturer' || role === 'admin';
+
+  const constraints = [
+    ...(serverFilterable ? [where('role', '==', role)] : []),
+    orderBy('createdAt', 'desc'),
+    ...(cursor ? [startAfter(cursor)] : []),
+    limit(pageSize),
+  ];
+  const snap = await getDocs(query(collection(db, 'users'), ...constraints));
+
+  const all = snap.docs.map(d => ({ id: d.id, ...d.data() } as any));
+  const users = role === 'customer'
+    ? all.filter(u => !u.role || u.role === 'customer')
+    : all;
+
   return {
-    users: snap.docs.map(d => ({ id: d.id, ...d.data() })),
+    users,
+    // Cursor tracks the RAW page, not the filtered rows — paging must continue
+    // from where Firestore left off even when this page filtered everything out.
     lastDoc: snap.docs.length ? snap.docs[snap.docs.length - 1] : null,
     hasMore: snap.docs.length === pageSize,
   };

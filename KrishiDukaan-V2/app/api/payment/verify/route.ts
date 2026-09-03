@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import crypto from 'crypto';
 import Razorpay from 'razorpay';
+import { markAttemptPaid } from '../../../lib/payment-attempts';
 
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID!,
@@ -34,6 +35,11 @@ export async function POST(request: Request) {
         ? Number(order.notes.durationMonths)
         : undefined;
       const amountPaid = Math.round(Number(order.amount) / 100);
+
+      // Closes out the attempt record. A valid signature is proof Razorpay
+      // completed this payment, so this is the primary success path for both
+      // web and mobile.
+      await markAttemptPaid(razorpay_order_id, razorpay_payment_id ?? null);
 
       return NextResponse.json({
         status: 'ok',

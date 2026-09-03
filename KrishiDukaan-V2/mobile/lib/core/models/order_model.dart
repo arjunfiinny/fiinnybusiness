@@ -63,13 +63,11 @@ class OrderModel {
       customerAddressMap['pincode'] = '';
     }
 
-    final fsStatus = d['status']?.toString() ?? 'pending';
-    final status = switch (fsStatus) {
-      'placed' => 'pending',
-      'out_for_delivery' => 'dispatched',
-      'rejected' => 'cancelled',
-      _ => fsStatus,
-    };
+    // Canonical Firestore status, used verbatim. The old mapping to mobile-only
+    // names ('pending'/'dispatched'/'cancelled') was removed: it renamed
+    // out_for_delivery to 'dispatched', which collided once 'dispatched' became
+    // a real status between accepted and out_for_delivery.
+    final status = d['status']?.toString() ?? 'placed';
 
     final rawItems = d['items'];
     final List<OrderItemModel> itemsList = [];

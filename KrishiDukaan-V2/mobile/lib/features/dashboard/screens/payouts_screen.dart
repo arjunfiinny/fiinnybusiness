@@ -742,7 +742,14 @@ class _DocSpec {
   final String label;
   final String hint;
   final bool required;
-  const _DocSpec(this.type, this.label, this.hint, {this.required = true});
+
+  /// A face photo rather than a document: defaults the camera to
+  /// front-facing, since a seller photographing their own face with the rear
+  /// camera is an awkward ask.
+  final bool selfie;
+
+  const _DocSpec(this.type, this.label, this.hint,
+      {this.required = true, this.selfie = false});
 }
 
 const _kDocSpecs = [
@@ -752,6 +759,12 @@ const _kDocSpecs = [
       'Must clearly show account number, IFSC and holder name'),
   _DocSpec('address_proof', 'Address proof',
       'Aadhaar, electricity bill or shop licence'),
+  _DocSpec('owner_photo', 'Owner photo',
+      "A clear photo of the account holder's face, for identity verification",
+      selfie: true),
+  _DocSpec('trade_license', 'Trade / product license',
+      'Shop establishment, FSSAI, mandi, or other license permitting you to '
+      'sell agri produce or inputs'),
   _DocSpec('gst_certificate', 'GST certificate',
       'Only if your business is GST registered', required: false),
 ];
@@ -813,6 +826,9 @@ class _KycSectionState extends ConsumerState<_KycSection> {
         // uploads under the 5 MB cap on a slow rural connection.
         imageQuality: 80,
         maxWidth: 2000,
+        preferredCameraDevice: spec.selfie
+            ? CameraDevice.front
+            : CameraDevice.rear,
       );
       if (picked == null) {
         if (mounted) setState(() => _busyType = null);

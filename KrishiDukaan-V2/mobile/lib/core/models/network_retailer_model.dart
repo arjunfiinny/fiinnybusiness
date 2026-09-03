@@ -9,6 +9,10 @@ class NetworkRetailerModel {
   final String? email;
   final String inviteCode;
   final String status; // invited | active | revoked
+  /// Street / locality. Web's edit modal has always had this field; the app
+  /// did not, and because the address map is written whole, every mobile edit
+  /// was silently blanking it.
+  final String? line1;
   final String? city;
   final String? state;
   final String? pincode;
@@ -26,6 +30,7 @@ class NetworkRetailerModel {
     this.email,
     required this.inviteCode,
     required this.status,
+    this.line1,
     this.city,
     this.state,
     this.pincode,
@@ -50,6 +55,7 @@ class NetworkRetailerModel {
       email: d['retailerEmail'] as String? ?? d['email'] as String?,
       inviteCode: d['inviteCode'] as String? ?? '',
       status: d['status'] as String? ?? 'invited',
+      line1: addr?['line1'] as String?,
       city: addr?['city'] as String?,
       state: addr?['state'] as String?,
       pincode: addr?['pincode'] as String?,
