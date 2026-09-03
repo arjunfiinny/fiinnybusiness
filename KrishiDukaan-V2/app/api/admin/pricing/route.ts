@@ -49,7 +49,7 @@ export async function PUT(request: Request) {
       return NextResponse.json(
         {
           error:
-            "Invalid pricing. Each row needs a whole-number duration in months and a whole-number rupee price, with no duplicate durations.",
+            "Invalid pricing. Each row needs a whole-number duration in months and a whole-number rupee price, with no duplicate plan keys. A bundle row needs BOTH a flat price and an included-listings count.",
         },
         { status: 400 },
       );

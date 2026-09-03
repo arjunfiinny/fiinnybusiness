@@ -12,10 +12,16 @@ import {
   PRICING_DOC_PATH,
   SEAT_PRESETS,
   SEAT_STEP,
+  billableSeats,
+  computeAmount,
+  isPlanAllowed,
   normalizeSeatCount,
+  planKey,
   parseDurations,
   type DurationPrice,
 } from '../lib/pricing';
+import { LEGAL_ROUTES, TERMS_VERSION } from '../lib/legal-constants';
+import { authedJsonHeaders } from "../lib/authed-fetch";
 
 interface SubscriptionViewProps {
   user: any;
@@ -35,6 +41,10 @@ type DurationOption = {
   label: string;
   pricePerSeat: number;
   badge?: string;
+  id?: string;
+  /** Set on bundle plans ("Rs 4,999 for 50 listings"); overrides pricePerSeat. */
+  flatPrice?: number;
+  includedListings?: number;
 };
 
 /** "1 Month" / "3 Months" / "1 Year" from a month count. */
@@ -45,10 +55,14 @@ function durationLabel(months: number): string {
 }
 
 const toOption = (d: DurationPrice): DurationOption => ({
+  id: planKey(d),
   months: d.months,
   label: durationLabel(d.months),
   pricePerSeat: d.pricePerSeat,
   ...(d.badge ? { badge: d.badge } : {}),
+  ...(d.flatPrice !== undefined
+    ? { flatPrice: d.flatPrice, includedListings: d.includedListings }
+    : {}),
 });
 
 /**
@@ -74,6 +88,9 @@ export default function SubscriptionView({ user, role, onSuccess, onLogout }: Su
   const [promoError,   setPromoError]   = useState<string | null>(null);
   const [error,        setError]        = useState<string | null>(null);
 
+  const premiumRole: PremiumRole = role === 'manufacturer' ? 'manufacturer' : 'retailer';
+  const isRetailer = premiumRole === 'retailer';
+
   // Load the live pricing ladder. Falls back silently to DURATION_OPTIONS on
   // any failure — an unreachable settings doc must not block a seller from
   // subscribing, and create-order applies the same fallback when pricing the
@@ -88,7 +105,11 @@ export default function SubscriptionView({ user, role, onSuccess, onLogout }: Su
         if (cancelled || !snap.exists()) return;
         const parsed = parseDurations(snap.data());
         if (!parsed?.length) return;
-        const next = parsed.map(toOption);
+        // Mirror of the server-side gate in create-order. Showing a plan the
+        // seller would be refused at checkout is worse than not showing it.
+        const visible = parsed.filter((d) => isPlanAllowed(d, premiumRole));
+        if (!visible.length) return;
+        const next = visible.map(toOption);
         setOptions(next);
         // Keep the selection valid if the admin removed the chosen period.
         setDuration((cur) => next.find((o) => o.months === cur.months) ?? next[0]!);
@@ -97,10 +118,8 @@ export default function SubscriptionView({ user, role, onSuccess, onLogout }: Su
       }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [premiumRole]);
 
-  const premiumRole: PremiumRole = role === 'manufacturer' ? 'manufacturer' : 'retailer';
-  const isRetailer = premiumRole === 'retailer';
 
   const content = {
     badge:    isRetailer ? t('retailerPremiumBadge')    : t('manufacturerPremiumBadge'),
@@ -111,7 +130,10 @@ export default function SubscriptionView({ user, role, onSuccess, onLogout }: Su
       : [t('manufacturerBenefit1'), t('manufacturerBenefit2'), t('manufacturerBenefit3'), t('manufacturerBenefit4')],
   };
 
-  const baseTotal   = seatCount * duration.pricePerSeat;
+  // Same function create-order prices the charge with, so what the seller is
+  // shown and what Razorpay bills cannot drift.
+  const grantedSeats = billableSeats(duration, seatCount);
+  const baseTotal   = computeAmount(duration, seatCount);
   const discountAmt = promoApplied ? Math.floor(baseTotal * promoApplied.discountPct / 100) : 0;
   const finalTotal  = baseTotal - discountAmt;
 
@@ -177,12 +199,19 @@ export default function SubscriptionView({ user, role, onSuccess, onLogout }: Su
       if (typeof window === 'undefined' || !window.Razorpay) {
         throw new Error('Payment gateway is not ready. Please refresh and try again.');
       }
+      // The server resolves the buyer's role from this token, not from userId —
+      // a role-restricted plan cannot be bought without it.
+      const idToken = await user.getIdToken?.();
       const response = await fetch('/api/payment/create-order', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+        },
         body: JSON.stringify({
           seatCount,
           durationMonths: duration.months,
+          planId: duration.id,
           promoCode: promoApplied?.code ?? null,
           userId: user.uid,
         }),
@@ -217,7 +246,17 @@ export default function SubscriptionView({ user, role, onSuccess, onLogout }: Su
             const updateResult = await updateSubscriptionStatus(user.uid, 'paid', {
               orderId:   paymentResponse.razorpay_order_id,
               paymentId: paymentResponse.razorpay_payment_id,
-            }, verifyData.seatCount || seatCount, duration.months);
+            }, verifyData.seatCount || grantedSeats, duration.months, verifyData.amountPaid,
+              // What the seller was shown immediately above the pay button, and
+              // therefore what they accepted by pressing it. Recorded against
+              // the subscription so "which terms did this seller agree to" is
+              // answerable from the data rather than from git history.
+              {
+                version: TERMS_VERSION,
+                documents: [LEGAL_ROUTES.terms, LEGAL_ROUTES.sellerTerms],
+                acceptedAt: new Date().toISOString(),
+                surface: 'web:subscription-checkout',
+              });
 
             if (!updateResult.paymentLogged) {
               setVerifying(false);
@@ -230,7 +269,7 @@ export default function SubscriptionView({ user, role, onSuccess, onLogout }: Su
               return;
             }
 
-            getUserProfile(user.uid).then((profile) => {
+            getUserProfile(user.uid).then(async (profile) => {
               const profileEmail = profile?.email ?? '';
               if (!profileEmail || profileEmail.includes('@krishidukan.local')) return;
               const now = new Date();
@@ -238,7 +277,7 @@ export default function SubscriptionView({ user, role, onSuccess, onLogout }: Su
               expiry.setMonth(expiry.getMonth() + duration.months);
               fetch('/api/email/subscription-confirmation', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: await authedJsonHeaders(),
                 body: JSON.stringify({
                   userEmail:         profileEmail,
                   userName:          profile?.name || user.displayName || '',
@@ -548,7 +587,9 @@ export default function SubscriptionView({ user, role, onSuccess, onLogout }: Su
                   <div className="flex items-end justify-between">
                     <span className="text-3xl font-black text-on-surface tracking-tight">₹{finalTotal}.00</span>
                     <span className="text-[10px] text-on-surface-variant bg-white border border-outline-variant/20 rounded-lg px-2 py-1 font-semibold">
-                      ₹{duration.pricePerSeat} × {seatCount} listing{seatCount !== 1 ? 's' : ''} · {duration.label}
+                      {duration.flatPrice !== undefined
+                        ? `₹${duration.flatPrice} · up to ${duration.includedListings} listings · ${duration.label}`
+                        : `₹${duration.pricePerSeat} × ${seatCount} listing${seatCount !== 1 ? 's' : ''} · ${duration.label}`}
                     </span>
                   </div>
                 </div>
@@ -574,6 +615,28 @@ export default function SubscriptionView({ user, role, onSuccess, onLogout }: Su
                       : `List ${seatCount} Products for ₹${finalTotal} · ${duration.label}`
                   }
                 </button>
+
+                <p className="text-[11px] leading-relaxed text-on-surface-variant text-center">
+                  By proceeding, you agree to KrishiDukan&apos;s{' '}
+                  <a
+                    href={LEGAL_ROUTES.terms}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-bold text-primary hover:underline"
+                  >
+                    Terms &amp; Conditions
+                  </a>{' '}
+                  and{' '}
+                  <a
+                    href={LEGAL_ROUTES.sellerTerms}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-bold text-primary hover:underline"
+                  >
+                    Seller &amp; Manufacturer Subscription Terms
+                  </a>
+                  .
+                </p>
 
                 <div className="flex flex-col items-center gap-2">
                   <p className="text-[10px] text-on-surface-variant font-semibold flex items-center gap-1.5 opacity-70">

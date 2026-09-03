@@ -163,8 +163,21 @@ service cloud.firestore {
     // Owner and admin only — no teamHas(), no role checks, no exceptions.
     match /payoutAccounts/{phone} {
       allow read:   if isAuthed() && (isAdmin() || myPhone() == phone);
-      allow create: if isAuthed() && myPhone() == phone;
-      allow update: if isAuthed() && myPhone() == phone;
+
+      // A seller may submit their own details, but NEVER the fields that
+      // decide whether they get paid. `update` used to allow the owner to
+      // write any field, which meant a seller could set their own
+      // status:'verified' — harmless while nothing read it, but this gates
+      // real payouts now. Verification fields are admin-only; a seller
+      // touching them is rejected outright rather than silently ignored.
+      allow create: if isAuthed() && myPhone() == phone
+                    && payoutStatusOk()
+                    && !request.resource.data.keys().hasAny(payoutProtectedFields());
+      allow update: if isAdmin()
+                    || (isAuthed() && myPhone() == phone
+                        && payoutStatusOk()
+                        && !request.resource.data.diff(resource.data)
+                              .affectedKeys().hasAny(payoutProtectedFields()));
       // Never client-deletable — payout history must stay auditable.
       allow delete: if false;
     }
@@ -314,6 +327,24 @@ service cloud.firestore {
     }
 
     // ─── failedPayments ──────────────────────────────────────────────────────
+    // ─── paymentAttempts ──────────────────────────────────────────────────────
+    // One doc per Razorpay order, written server-side by the create-order routes
+    // before checkout opens, then moved to paid/failed as the payment resolves.
+    //
+    // NO CLIENT WRITES AT ALL. Every write goes through the Admin SDK, which
+    // bypasses these rules — that is the point. This record is the evidence of
+    // what a customer tried to buy and at what price, so allowing the customer
+    // to create or edit it would let them forge a basket or erase a failure.
+    // Clients report a failure through /api/payment/attempt-failed instead,
+    // which re-checks Razorpay before believing them.
+    //
+    // Reads are admin-only: an attempt row exposes the buyer's phone alongside
+    // the priced basket.
+    match /paymentAttempts/{orderId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
     match /failedPayments/{paymentId} {
       allow read: if isAdmin();
       allow create: if isAuthed() && (
@@ -344,7 +375,7 @@ service cloud.firestore {
       allow update: if isAdmin() || (isAuthed() && (
         resource.data.sellerPhone == myPhone() ||
         resource.data.sellerId == request.auth.uid
-      ) && request.resource.data.status in ['placed','accepted','out_for_delivery','delivered','rejected'])
+      ) && request.resource.data.status in ['placed','accepted','dispatched','out_for_delivery','delivered','rejected'])
         // Allow customer to update payment field on their own order
         || (isAuthed() && (
           resource.data.customerId == request.auth.uid ||
@@ -492,9 +523,17 @@ service cloud.firestore {
       allow delete: if isAdmin() || (isAuthed() && retailerId == request.auth.uid);
     }
 
+    // Legacy store directory. Public read; writes are admin-only.
+    //
+    // This was `allow write: if isAuthed()`, which let any signed-in account
+    // rewrite or delete any shop in the directory. The only client that ever
+    // wrote here was the homepage's demo-data seeder (app/page.tsx), which has
+    // been removed -- the mobile app and the storefront only read. Real store
+    // records are written server-side through the Admin SDK, which bypasses
+    // these rules entirely, so nothing legitimate needs client write access.
     match /stores/{storeId} {
       allow read: if true;
-      allow write: if isAuthed();
+      allow write: if isAdmin();
     }
 
     match /manufacturers/{manufacturerId} {
@@ -521,6 +560,23 @@ service cloud.firestore {
     // Returns true when the incoming write does not set invalid discount values.
     // discountPct must be 0–99; dates must be absent or timestamps.
     // Also validates new fields: discountType, discountFixedAmt, bulk tiers.
+    /// Fields on payoutAccounts only an admin may write — they decide whether
+    /// a seller is paid, and to which Razorpay linked account. `status` is
+    /// handled separately (see payoutStatusOk) because a seller legitimately
+    /// sets it to 'pending_verification' when submitting or editing.
+    function payoutProtectedFields() {
+      return ['razorpayLinkedAccountId', 'verifiedAt', 'verifiedBy',
+              'rejectionReason'];
+    }
+
+    /// A seller may only ever put their payout account INTO review, never
+    /// approve it. Editing verified details correctly sends it back to
+    /// pending, which is what re-submitting should do.
+    function payoutStatusOk() {
+      return !('status' in request.resource.data)
+             || request.resource.data.status == 'pending_verification';
+    }
+
     function discountFieldsValid() {
       let d = request.resource.data;
       return (
@@ -934,6 +990,57 @@ service cloud.firestore {
       allow update: if isAuthed()
                        && resource.data.salesExecutiveId == request.auth.uid;
       allow delete: if isAdmin();
+    }
+
+    // ─── salesAttendance ──────────────────────────────────────────────────────
+    // One doc per sales executive per IST calendar day, id `{uid}_{date}`.
+    // Written by the sales app: Start Day marks the rep present automatically,
+    // and they can correct the day by hand (leave, half day, week off).
+    //
+    // The deterministic id is what makes a day markable only once, but an id is
+    // not a permission — a rep could still write to someone else's `{uid}_{date}`
+    // doc — so the salesExecutiveId/uid match below is what actually enforces
+    // ownership, and the id prefix is deliberately NOT trusted on its own.
+    match /salesAttendance/{docId} {
+      allow read:   if isAdmin()
+                       || (isAuthed() && resource.data.salesExecutiveId == request.auth.uid);
+      allow create: if isSalesExec()
+                       && request.resource.data.salesExecutiveId == request.auth.uid;
+      // The owner may correct their own day; the salesExecutiveId can never be
+      // reassigned, so a record cannot be moved onto another rep.
+      allow update: if isAdmin()
+                       || (isSalesExec()
+                           && resource.data.salesExecutiveId == request.auth.uid
+                           && request.resource.data.salesExecutiveId == resource.data.salesExecutiveId);
+      allow delete: if isAdmin();
+    }
+
+    // ─── salesExpenses ────────────────────────────────────────────────────────
+    // Field expense claims raised by a sales executive and reviewed by an admin.
+    //
+    // The whole point of the collection is that the REVIEW DECISION is not the
+    // claimant's to make, so a rep may only ever write a PENDING document:
+    //  · create — must be their own, and must start PENDING.
+    //  · update — only their own, only while still PENDING, and it must stay
+    //    PENDING. Without that last clause a rep could approve their own claim.
+    //  · delete — withdrawing an un-reviewed claim is fine; once an admin has
+    //    decided, the record is an audit trail and only an admin may remove it.
+    match /salesExpenses/{expenseId} {
+      allow read:   if isAdmin()
+                       || (isAuthed() && resource.data.salesExecutiveId == request.auth.uid);
+      allow create: if isSalesExec()
+                       && request.resource.data.salesExecutiveId == request.auth.uid
+                       && request.resource.data.status == 'PENDING';
+      allow update: if isAdmin()
+                       || (isSalesExec()
+                           && resource.data.salesExecutiveId == request.auth.uid
+                           && request.resource.data.salesExecutiveId == resource.data.salesExecutiveId
+                           && resource.data.status == 'PENDING'
+                           && request.resource.data.status == 'PENDING');
+      allow delete: if isAdmin()
+                       || (isSalesExec()
+                           && resource.data.salesExecutiveId == request.auth.uid
+                           && resource.data.status == 'PENDING');
     }
 
     // ─── erpHandoffCodes ──────────────────────────────────────────────────────

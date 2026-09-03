@@ -22,30 +22,38 @@ import {
 import { auth, fetchIncomingOrdersForSeller, updateOrderStatus } from "../../firebase";
 import { PageHeader } from "../_components/page-header";
 import { formatCustomerAddress, normalizeOrderItems } from "../../../types/order";
-import type { OrderDoc, OrderStatus } from "../../../types/order";
+import { ORDER_STATUS_FLOW, type OrderDoc, type OrderStatus } from "../../../types/order";
 import { useI18n } from "../../i18n/I18nContext";
 import { openInvoice } from "../../utils/invoice-generator";
 
-// Visible progress flow — "accepted" is kept in the type for backward compat but removed from the UI
-const STATUS_FLOW: OrderStatus[] = ["placed", "out_for_delivery", "delivered"];
+// Progression shown to the seller. Imported rather than redeclared so the
+// seller view, the customer view and the "can advance to" checks cannot drift.
+const STATUS_FLOW: OrderStatus[] = ORDER_STATUS_FLOW;
 
 const STATUS_CONFIG: Record<OrderStatus, { label: string; color: string; bg: string; icon: typeof Clock }> = {
   placed:           { label: "Order Placed",     color: "text-amber-700",  bg: "bg-amber-50 border-amber-200",   icon: Clock },
-  accepted:         { label: "Processing",       color: "text-blue-700",   bg: "bg-blue-50 border-blue-200",     icon: CheckCircle2 },
+  accepted:         { label: "Accepted",         color: "text-blue-700",   bg: "bg-blue-50 border-blue-200",     icon: CheckCircle2 },
+  dispatched:       { label: "Dispatched",       color: "text-indigo-700", bg: "bg-indigo-50 border-indigo-200", icon: Package },
   out_for_delivery: { label: "Out for Delivery", color: "text-purple-700", bg: "bg-purple-50 border-purple-200", icon: Truck },
   delivered:        { label: "Delivered",         color: "text-green-700",  bg: "bg-green-50 border-green-200",   icon: Package },
   rejected:         { label: "Rejected",         color: "text-red-700",    bg: "bg-red-50 border-red-200",       icon: XCircle },
 };
 
+// One step forward at a time, so the customer's tracking timeline reflects what
+// actually happened rather than jumping stages. Reject stays available until the
+// goods have left the seller: once dispatched, a cancellation is a refund, not a
+// status flip, and is handled through the refund flow instead.
 const NEXT_ACTIONS: Record<OrderStatus, { next: OrderStatus; label: string; color: string }[]> = {
-  // Placed → dispatch directly (no manual accept step for prepaid orders)
   placed: [
-    { next: "out_for_delivery", label: "Mark Ready & Dispatch", color: "bg-purple-600 hover:bg-purple-700 text-white" },
-    { next: "rejected",         label: "Reject",               color: "bg-red-100 hover:bg-red-200 text-red-700 border border-red-200" },
+    { next: "accepted", label: "Accept Order", color: "bg-blue-600 hover:bg-blue-700 text-white" },
+    { next: "rejected", label: "Reject",       color: "bg-red-100 hover:bg-red-200 text-red-700 border border-red-200" },
   ],
-  // Legacy "accepted" orders: still allow advancing to dispatch
   accepted: [
-    { next: "out_for_delivery", label: "Mark Dispatched", color: "bg-purple-600 hover:bg-purple-700 text-white" },
+    { next: "dispatched", label: "Mark Dispatched", color: "bg-indigo-600 hover:bg-indigo-700 text-white" },
+    { next: "rejected",   label: "Reject",          color: "bg-red-100 hover:bg-red-200 text-red-700 border border-red-200" },
+  ],
+  dispatched: [
+    { next: "out_for_delivery", label: "Out for Delivery", color: "bg-purple-600 hover:bg-purple-700 text-white" },
   ],
   out_for_delivery: [
     { next: "delivered", label: "Mark Delivered", color: "bg-green-600 hover:bg-green-700 text-white" },
@@ -54,7 +62,7 @@ const NEXT_ACTIONS: Record<OrderStatus, { next: OrderStatus; label: string; colo
   rejected:  [],
 };
 
-type FilterTab = "all" | "placed" | "accepted" | "out_for_delivery" | "delivered" | "rejected";
+type FilterTab = "all" | "placed" | "accepted" | "dispatched" | "out_for_delivery" | "delivered" | "rejected";
 type ViewTab = "orders" | "payments";
 
 function formatDate(createdAt: unknown): string {
@@ -79,16 +87,21 @@ function formatDateStr(iso: string | undefined): string {
 /**
  * Payout breakdown for one order.
  *
- * KrishiDukan's commission is ₹0 by policy, so the only deduction between the
- * order total and the seller's money is the payment gateway's own fee. That
- * fee is not in the client-side payment payload — it appears on Razorpay's
- * payment entity after capture — so it is fetched once via /api/payment/fee
- * and cached onto the order doc. Orders that predate the fee capture, or whose
- * payment never captured, render an honest "—" rather than a guessed number.
+ * Two deductions sit between the order total and the seller's money: the
+ * KrishiDukan platform fee, and the payment gateway's own fee. Both come from
+ * /api/payment/fee — the platform fee derived there from settings/route (the
+ * document the payment split itself uses), the gateway fee read off Razorpay's
+ * payment entity after capture and cached onto the order doc, because it is not
+ * in the client-side payment payload.
+ *
+ * This panel used to hardcode a "KrishiDukan charge ₹0.00" row. Orders that
+ * predate the fee capture, or whose payment never captured, render an honest
+ * "—" rather than a guessed number — the same rule now applies to both rows.
  */
 function PayoutBreakdown({ order }: { order: OrderDoc }) {
   // undefined = still resolving, null = genuinely unavailable
   const [gatewayFee, setGatewayFee] = useState<number | null | undefined>(undefined);
+  const [platformFee, setPlatformFee] = useState<number | null | undefined>(undefined);
   const payment = (order as any).payment as
     | { razorpayPaymentId?: string; gatewayFee?: number }
     | undefined;
@@ -97,17 +110,16 @@ function PayoutBreakdown({ order }: { order: OrderDoc }) {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      if (typeof payment?.gatewayFee === "number") {
-        setGatewayFee(payment.gatewayFee);
-        return;
-      }
-      if (!payment?.razorpayPaymentId) {
-        setGatewayFee(null);
-        return;
-      }
+      // No early return on a cached or missing gateway fee any more: the
+      // platform fee is derived server-side from settings/route and has to be
+      // fetched regardless, including for an order whose payment never
+      // captured. The route answers both cases without hitting Razorpay.
       try {
         const token = await auth.currentUser?.getIdToken();
-        if (!token) { if (!cancelled) setGatewayFee(null); return; }
+        if (!token) {
+          if (!cancelled) { setGatewayFee(null); setPlatformFee(null); }
+          return;
+        }
         const res = await fetch("/api/payment/fee", {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
@@ -116,14 +128,26 @@ function PayoutBreakdown({ order }: { order: OrderDoc }) {
         const json = await res.json();
         if (cancelled) return;
         setGatewayFee(typeof json.gatewayFee === "number" ? json.gatewayFee : null);
+        setPlatformFee(typeof json.platformFee === "number" ? json.platformFee : null);
       } catch {
-        if (!cancelled) setGatewayFee(null);
+        if (!cancelled) {
+          setGatewayFee(null);
+          setPlatformFee(null);
+        }
       }
     })();
     return () => { cancelled = true; };
   }, [order.id, payment?.gatewayFee, payment?.razorpayPaymentId]);
 
-  const net = typeof gatewayFee === "number" ? gross - gatewayFee : null;
+  // Net is shown only when BOTH deductions are known. Subtracting one of two
+  // known charges and calling the result "you receive" overstates the payout.
+  const net =
+    typeof gatewayFee === "number" && typeof platformFee === "number"
+      ? gross - gatewayFee - platformFee
+      : null;
+
+  const money = (v: number | null | undefined) =>
+    v === undefined ? "…" : v === null ? "—" : `− ₹${v.toFixed(2)}`;
 
   return (
     <div className="rounded-xl border border-surface-container bg-surface-container-lowest p-4">
@@ -136,18 +160,12 @@ function PayoutBreakdown({ order }: { order: OrderDoc }) {
           <span className="font-semibold text-on-surface">₹{gross.toFixed(2)}</span>
         </div>
         <div className="flex justify-between">
-          <span className="text-on-surface-variant">Payment gateway charge</span>
-          <span className="font-semibold text-on-surface">
-            {gatewayFee === undefined
-              ? "…"
-              : gatewayFee === null
-                ? "—"
-                : `− ₹${gatewayFee.toFixed(2)}`}
-          </span>
+          <span className="text-on-surface-variant">KrishiDukan platform fee</span>
+          <span className="font-semibold text-on-surface">{money(platformFee)}</span>
         </div>
         <div className="flex justify-between">
-          <span className="text-on-surface-variant">KrishiDukan charge</span>
-          <span className="font-semibold text-green-700">₹0.00</span>
+          <span className="text-on-surface-variant">Payment gateway charge</span>
+          <span className="font-semibold text-on-surface">{money(gatewayFee)}</span>
         </div>
         <div className="mt-1 flex justify-between border-t border-surface-container pt-2">
           <span className="font-bold text-on-surface">You receive</span>
@@ -159,7 +177,12 @@ function PayoutBreakdown({ order }: { order: OrderDoc }) {
       <p className="mt-2.5 text-[10px] text-on-surface-variant">
         {order.status === "delivered"
           ? "Transferred to your registered bank account."
-          : "Transferred to your bank account once you mark this order delivered."}
+          : "Transferred to your bank account once you mark this order delivered."}{" "}
+        Figures are before GST and other applicable taxes. See the{" "}
+        <a href="/seller-terms" className="font-semibold text-primary hover:underline">
+          Seller &amp; Manufacturer Subscription Terms
+        </a>
+        .
       </p>
     </div>
   );
@@ -415,12 +438,12 @@ export default function OrdersPage() {
 
   const FILTER_TABS: { key: FilterTab; label: string; color: string }[] = [
     { key: "all",              label: `All (${orders.length})`,                                        color: "bg-surface-container text-on-surface" },
-    { key: "placed",           label: `New (${statusCounts["placed"] || 0})`,                          color: "bg-amber-100 text-amber-800" },
-    { key: "out_for_delivery", label: `Dispatched (${statusCounts["out_for_delivery"] || 0})`,         color: "bg-purple-100 text-purple-800" },
-    { key: "delivered",        label: `Delivered (${statusCounts["delivered"] || 0})`,                 color: "bg-green-100 text-green-800" },
-    { key: "rejected",         label: `Rejected (${statusCounts["rejected"] || 0})`,                   color: "bg-red-100 text-red-800" },
-    // Legacy tab — only show if there are orders with accepted status
-    ...(statusCounts["accepted"] ? [{ key: "accepted" as FilterTab, label: `Processing (${statusCounts["accepted"]})`, color: "bg-blue-100 text-blue-800" }] : []),
+    { key: "placed",           label: `New (${statusCounts["placed"] || 0})`,                              color: "bg-amber-100 text-amber-800" },
+    { key: "accepted",         label: `Accepted (${statusCounts["accepted"] || 0})`,                        color: "bg-blue-100 text-blue-800" },
+    { key: "dispatched",       label: `Dispatched (${statusCounts["dispatched"] || 0})`,                    color: "bg-indigo-100 text-indigo-800" },
+    { key: "out_for_delivery", label: `Out for Delivery (${statusCounts["out_for_delivery"] || 0})`,        color: "bg-purple-100 text-purple-800" },
+    { key: "delivered",        label: `Delivered (${statusCounts["delivered"] || 0})`,                      color: "bg-green-100 text-green-800" },
+    { key: "rejected",         label: `Rejected (${statusCounts["rejected"] || 0})`,                        color: "bg-red-100 text-red-800" },
   ];
 
   return (

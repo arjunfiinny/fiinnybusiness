@@ -263,6 +263,7 @@ export const translations = {
     footerPrivacy: 'Privacy',
     footerTerms: 'Terms',
     footerCookies: 'Cookies',
+    footerSellerTerms: 'Seller Terms',
 
     // Loading/Errors
     connectingFirebase: 'Loading...',
@@ -946,6 +947,8 @@ export const translations = {
     orderLabel: 'Order',
     orderFrom: 'From: {name}',
     orderRejected: 'Order Rejected',
+    orderTimelineAccepted: 'Accepted',
+    orderTimelineDispatched: 'Dispatched',
     orderTimelineOutForDelivery: 'Out for\nDelivery',
     ordersEmptyTitle: 'No orders yet',
     ordersEmptyDesc: 'When you place an order, it will appear here with real-time status updates.',
@@ -1146,6 +1149,7 @@ export const translations = {
     retailerRole: 'Retailer',
     orderStatusPlaced: 'Placed',
     orderStatusAccepted: 'Accepted',
+    orderStatusDispatched: 'Dispatched',
     orderStatusOutForDelivery: 'Out for delivery',
     orderStatusDelivered: 'Delivered',
     orderStatusRejected: 'Rejected',
@@ -2108,6 +2112,7 @@ export const translations = {
     footerPrivacy: 'गोपनीयता',
     footerTerms: 'अटी',
     footerCookies: 'कुकीज',
+    footerSellerTerms: 'विक्रेता अटी',
 
     // Loading/Errors
     connectingFirebase: 'लोड होत आहे ...',
@@ -2791,6 +2796,8 @@ export const translations = {
     orderLabel: 'ऑर्डर',
     orderFrom: 'कडून: {name}',
     orderRejected: 'ऑर्डर नाकारली',
+    orderTimelineAccepted: 'स्वीकारली',
+    orderTimelineDispatched: 'रवाना केली',
     orderTimelineOutForDelivery: 'डिलिव्हरीसाठी\nनिघाली',
     ordersEmptyTitle: 'अद्याप कोणतीही ऑर्डर नाही',
     ordersEmptyDesc: 'तुम्ही ऑर्डर दिल्यावर, ती येथे रिअल-टाइम स्थिती अपडेट्ससह दिसेल.',
@@ -2991,6 +2998,7 @@ export const translations = {
     retailerRole: 'किरकोळ विक्रेता',
     orderStatusPlaced: 'दिली',
     orderStatusAccepted: 'स्वीकारली',
+    orderStatusDispatched: 'रवाना केली',
     orderStatusOutForDelivery: 'डिलिव्हरीसाठी बाहेर',
     orderStatusDelivered: 'डिलिव्हर झाली',
     orderStatusRejected: 'नाकारली',
@@ -3954,6 +3962,7 @@ export const translations = {
     footerPrivacy: 'गोपनीयता',
     footerTerms: 'शर्तें',
     footerCookies: 'कुकीज़',
+    footerSellerTerms: 'विक्रेता शर्तें',
 
     // Loading/Errors
     connectingFirebase: 'Firebase से कनेक्ट हो रहा है...',
@@ -4637,6 +4646,8 @@ export const translations = {
     orderLabel: 'ऑर्डर',
     orderFrom: 'से: {name}',
     orderRejected: 'ऑर्डर अस्वीकृत',
+    orderTimelineAccepted: 'स्वीकृत',
+    orderTimelineDispatched: 'रवाना',
     orderTimelineOutForDelivery: 'डिलीवरी के\nलिए निकला',
     ordersEmptyTitle: 'अभी तक कोई ऑर्डर नहीं',
     ordersEmptyDesc: 'जब आप कोई ऑर्डर देंगे, तो वह यहाँ रीयल-टाइम स्थिति अपडेट के साथ दिखाई देगा।',
@@ -4837,6 +4848,7 @@ export const translations = {
     retailerRole: 'रिटेलर',
     orderStatusPlaced: 'दिया गया',
     orderStatusAccepted: 'स्वीकार किया',
+    orderStatusDispatched: 'रवाना किया',
     orderStatusOutForDelivery: 'डिलीवरी के लिए निकला',
     orderStatusDelivered: 'डिलीवर हो गया',
     orderStatusRejected: 'अस्वीकार किया',

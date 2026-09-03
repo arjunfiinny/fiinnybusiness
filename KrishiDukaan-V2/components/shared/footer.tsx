@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { ICONS } from '../../app/constants';
 import { useI18n } from '../../app/i18n/I18nContext';
 import { PLAY_STORE_URL, APP_STORE_URL, androidLive, iosLive } from '../../app/lib/store-links';
+import { LEGAL_ROUTES } from '../../app/lib/legal-constants';
 
 type FooterProps = {
   onNavigate?: (view: 'home' | 'market' | 'hub' | 'map' | 'about' | 'become-retailer') => void;
@@ -210,10 +211,25 @@ export default function Footer({ onNavigate, onCategoryClick, userRole, onUpgrad
         {/* Bottom bar */}
         <div className="mt-10 pt-6 border-t border-surface-container flex flex-col md:flex-row items-center justify-between gap-3 text-[11px] text-outline">
           <p>© {new Date().getFullYear()} KrishiDukan. {t('footerRights')}</p>
-          <div className="flex gap-4">
-            <button className="hover:text-on-surface transition-colors font-semibold">{t('footerPrivacy')}</button>
-            <button className="hover:text-on-surface transition-colors font-semibold">{t('footerTerms')}</button>
-            <button className="hover:text-on-surface transition-colors font-semibold">{t('footerCookies')}</button>
+          {/* Real anchors. These were <button>s with no onClick and no href —
+              rendered, styled and hoverable, but they went nowhere, while the
+              mobile sign-up screen was already telling users they had agreed to
+              "Terms of Service". "Cookies" is dropped rather than linked: there
+              is no separate cookie policy, and cookie use is covered by the
+              Privacy Policy. */}
+          <div className="flex flex-wrap gap-4">
+            <Link href={LEGAL_ROUTES.privacy} className="hover:text-on-surface transition-colors font-semibold">
+              {t('footerPrivacy')}
+            </Link>
+            <Link href={LEGAL_ROUTES.terms} className="hover:text-on-surface transition-colors font-semibold">
+              {t('footerTerms')}
+            </Link>
+            <Link href={LEGAL_ROUTES.returns} className="hover:text-on-surface transition-colors font-semibold">
+              Returns
+            </Link>
+            <Link href={LEGAL_ROUTES.sellerTerms} className="hover:text-on-surface transition-colors font-semibold">
+              {t('footerSellerTerms')}
+            </Link>
           </div>
         </div>
       </div>

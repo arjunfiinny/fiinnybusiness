@@ -26,6 +26,13 @@ import {
   type DocumentData,
 } from 'firebase/firestore';
 import { getAuth } from 'firebase/auth';
+import {
+  DEFAULT_DURATIONS,
+  PRICING_DOC_PATH,
+  computeAmount,
+  parseDurations,
+  type DurationPrice,
+} from './lib/pricing';
 import { getStorage } from 'firebase/storage';
 import { getAnalytics, isSupported } from 'firebase/analytics';
 
@@ -1019,12 +1026,68 @@ export async function getUserProfile(uid: string) {
   return null;
 }
 
+/**
+ * The live plan for a billing period, read from settings/pricing.
+ *
+ * There used to be a `PRICE_PER_SEAT` literal here AND in adminManualActivate
+ * AND in the mobile app, none of which the admin Pricing screen could reach.
+ * Editing the price in admin changed what Razorpay charged but not what got
+ * written to payments/ and subscriptions/, so the books recorded the old price
+ * — Rs 21 for any period outside {1,3,6,12}. Both literals are gone; this is
+ * the only price lookup left on the client, and the amount actually charged is
+ * preferred over it wherever the gateway can tell us (see verify/).
+ */
+async function loadPlan(durationMonths: number): Promise<DurationPrice | null> {
+  let ladder: DurationPrice[] = DEFAULT_DURATIONS;
+  try {
+    const snap = await getDoc(
+      doc(db, PRICING_DOC_PATH.collection, PRICING_DOC_PATH.doc),
+    );
+    if (snap.exists()) ladder = parseDurations(snap.data()) ?? DEFAULT_DURATIONS;
+  } catch {
+    /* unreachable settings doc degrades to the built-in ladder */
+  }
+  return ladder.find((d) => d.months === durationMonths) ?? null;
+}
+
+/**
+ * What the seller was shown, and therefore accepted, at the moment of purchase.
+ *
+ * Recorded against the subscription and the payment so the question "which
+ * version of the terms did this seller agree to, and where" is answerable from
+ * the data years later. Version strings come from app/lib/legal-constants.ts.
+ */
+export interface TermsAcceptance {
+  /** TERMS_VERSION at the time of purchase. */
+  version: string;
+  /** Routes of the documents the notice linked to. */
+  documents: string[];
+  /** ISO 8601, client clock — indicative, the server timestamp is authoritative. */
+  acceptedAt: string;
+  /** Which checkout showed the notice, e.g. 'web:subscription-checkout'. */
+  surface: string;
+}
+
 export async function updateSubscriptionStatus(
   uid: string,
   status: 'paid' | 'unpaid',
   paymentDetails?: any,
   seatCount: number = 1,
-  durationMonths: number = 1
+  durationMonths: number = 1,
+  /**
+   * Rupees Razorpay actually captured, as returned by verify/. Pass it whenever
+   * it is available: it is the only figure guaranteed to match the seller's card
+   * statement. Omitted only by callers with no gateway round-trip behind them.
+   */
+  amountPaid?: number,
+  /**
+   * The terms notice the seller passed through on the way to paying. Optional
+   * so older callers (and the admin-activation path, which has no seller in
+   * front of it to accept anything) keep working — a missing record is honest
+   * about the fact that no notice was shown, which is better than stamping one
+   * that was not.
+   */
+  termsAcceptance?: TermsAcceptance,
 ): Promise<{ profileUpdated: true; paymentLogged: boolean; paymentLogError?: string }> {
   const timestamp = serverTimestamp();
 
@@ -1065,9 +1128,13 @@ export async function updateSubscriptionStatus(
 
   if (status === 'paid') {
     try {
-      const PRICE_PER_SEAT: Record<number, number> = { 1: 21, 3: 54, 6: 90, 12: 144 };
-      const pricePerSeat = PRICE_PER_SEAT[durationMonths] ?? 21;
-      const totalAmount = seatsToAdd * pricePerSeat;
+      // Prefer what the gateway captured; fall back to the live ladder only when
+      // the caller had no verified amount to hand us.
+      let totalAmount = Number(amountPaid);
+      if (!Number.isFinite(totalAmount) || totalAmount < 0) {
+        const plan = await loadPlan(durationMonths);
+        totalAmount = plan ? computeAmount(plan, seatsToAdd) : 0;
+      }
 
       // Write both legacy (userId/ownerId) and new (userPhone/ownerPhone) fields so all queries
       // and Firestore rules work. Rules check ownerPhone == myPhone() OR ownerId == uid.
@@ -1084,6 +1151,7 @@ export async function updateSubscriptionStatus(
         razorpayPaymentId: paymentDetails?.paymentId ?? null,
         timestamp,
         status: 'success',
+        termsAcceptance: termsAcceptance ?? null,
       });
 
       const now = new Date();
@@ -1108,6 +1176,10 @@ export async function updateSubscriptionStatus(
         expiryDate: Timestamp.fromDate(expiry),
         createdAt: timestamp,
         updatedAt: timestamp,
+        // Which standard terms this subscription was sold under. There are no
+        // company-specific seller agreements, so this version string plus the
+        // published documents is the whole contract for this period.
+        termsAcceptance: termsAcceptance ?? null,
       });
 
       return { profileUpdated: true, paymentLogged: true };
@@ -1938,76 +2010,10 @@ import { Hub, INITIAL_HUBS } from './initialHubs';
 
 export type { Hub };
 
-export async function syncInitialData(products: any[], stores: any[], inventory: any[] = []) {
-  // Sync products
-  try {
-    const productsSnap = await getDocs(collection(db, 'products'));
-    if (productsSnap.empty) {
-      console.log('Firebase: Syncing initial products...');
-      for (const product of products) {
-        await addDoc(collection(db, 'products'), {
-          ...product,
-          createdAt: serverTimestamp(),
-          source: 'initial_sync'
-        });
-      }
-    }
-  } catch (error) {
-    console.warn('Firebase: Syncing initial products failed:', error);
-  }
-
-  // Sync stores
-  try {
-    const storesSnap = await getDocs(collection(db, 'stores'));
-    if (storesSnap.empty) {
-      console.log('Firebase: Syncing initial stores...');
-      for (const store of stores) {
-        await addDoc(collection(db, 'stores'), {
-          ...store,
-          createdAt: serverTimestamp(),
-          source: 'initial_sync'
-        });
-      }
-    }
-  } catch (error) {
-    console.warn('Firebase: Syncing initial stores failed:', error);
-  }
-
-  // Sync inventory
-  try {
-    const inventorySnap = await getDocs(collection(db, 'inventory'));
-    if (inventorySnap.empty && inventory.length > 0) {
-      console.log('Firebase: Syncing initial inventory...');
-      for (const item of inventory) {
-        await addDoc(collection(db, 'inventory'), {
-          ...item,
-          createdAt: serverTimestamp(),
-          source: 'initial_sync'
-        });
-      }
-    }
-  } catch (error) {
-    console.warn('Firebase: Syncing initial inventory failed:', error);
-  }
-
-  // Sync hubs
-  try {
-    const hubsSnap = await getDocs(collection(db, 'hubs'));
-    if (hubsSnap.empty) {
-      console.log('Firebase: Syncing initial hubs...');
-      for (const hub of INITIAL_HUBS) {
-        const { id, ...hubData } = hub;
-        await setDoc(doc(db, 'hubs', id), {
-          ...hubData,
-          createdAt: serverTimestamp(),
-          source: 'initial_sync'
-        });
-      }
-    }
-  } catch (error) {
-    console.warn('Firebase: Syncing initial hubs failed:', error);
-  }
-}
+// syncInitialData() was removed here: it wrote the hardcoded demo catalogue
+// (constants.ts PRODUCTS/STORES/INVENTORY) into production Firestore from the
+// browser whenever a read came back empty. Seeding is a server-side task with
+// admin credentials, never something a visitor's session should be able to do.
 
 
 function getLocalDayKey(date: Date = new Date()): string {
@@ -2128,15 +2134,47 @@ export async function fetchAllUsers(): Promise<any[]> {
 }
 
 /** One page of the users list, newest first — for admin "browse mode" instead of a full collection scan. */
+export type UserRoleFilter = 'all' | 'retailer' | 'manufacturer' | 'admin' | 'customer';
+
+/**
+ * One page of users, optionally narrowed to a role by Firestore itself.
+ *
+ * The role argument is what keeps the admin Users tab cheap. Without it the page
+ * had to download the ENTIRE users collection to filter in the browser, so
+ * picking "Retailer" read ~1,300 docs to show 139 — the actual cause of that tab
+ * being slow and read-heavy.
+ *
+ * 'customer' is deliberately NOT pushed into the query. A customer is a user
+ * whose role is 'customer' OR who has no role field at all, and Firestore cannot
+ * express "field missing OR equals" in a single query — a where('role','==','customer')
+ * would silently drop every legacy user that predates the field. So that one case
+ * pages through unfiltered and is narrowed by the caller, which is still
+ * paginated and still far cheaper than loading everything.
+ */
 export async function fetchUsersPage(
   pageSize: number,
   cursor?: QueryDocumentSnapshot<DocumentData> | null,
+  role: UserRoleFilter = 'all',
 ): Promise<{ users: any[]; lastDoc: QueryDocumentSnapshot<DocumentData> | null; hasMore: boolean }> {
-  const base = query(collection(db, 'users'), orderBy('createdAt', 'desc'), limit(pageSize));
-  const q = cursor ? query(collection(db, 'users'), orderBy('createdAt', 'desc'), startAfter(cursor), limit(pageSize)) : base;
-  const snap = await getDocs(q);
+  const serverFilterable = role === 'retailer' || role === 'manufacturer' || role === 'admin';
+
+  const constraints = [
+    ...(serverFilterable ? [where('role', '==', role)] : []),
+    orderBy('createdAt', 'desc'),
+    ...(cursor ? [startAfter(cursor)] : []),
+    limit(pageSize),
+  ];
+  const snap = await getDocs(query(collection(db, 'users'), ...constraints));
+
+  const all = snap.docs.map(d => ({ id: d.id, ...d.data() } as any));
+  const users = role === 'customer'
+    ? all.filter(u => !u.role || u.role === 'customer')
+    : all;
+
   return {
-    users: snap.docs.map(d => ({ id: d.id, ...d.data() })),
+    users,
+    // Cursor tracks the RAW page, not the filtered rows — paging must continue
+    // from where Firestore left off even when this page filtered everything out.
     lastDoc: snap.docs.length ? snap.docs[snap.docs.length - 1] : null,
     hasMore: snap.docs.length === pageSize,
   };
@@ -2486,9 +2524,8 @@ export async function adminManualActivate(
   const now = new Date();
   const expiry = new Date(now);
   expiry.setMonth(expiry.getMonth() + durationMonths);
-  const PRICE_PER_SEAT: Record<number, number> = { 1: 21, 3: 54, 6: 90, 12: 144 };
-  const pricePerSeat = PRICE_PER_SEAT[durationMonths] ?? 21;
-  const totalAmount = seats * pricePerSeat;
+  const plan = await loadPlan(durationMonths);
+  const totalAmount = plan ? computeAmount(plan, seats) : 0;
   const ts = serverTimestamp();
 
   await setDoc(userRef, {

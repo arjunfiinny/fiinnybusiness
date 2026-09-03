@@ -16,6 +16,30 @@ export type AdminCaller = { uid: string; phone: string | null };
  * bar is stricter than the read-only 'subscriptions' admin section team
  * members can already have.
  */
+/**
+ * Verifies the request carries a valid Firebase ID token, without requiring any
+ * particular role.
+ *
+ * For endpoints that act for a signed-in user rather than an admin — chiefly the
+ * transactional email routes, which take the RECIPIENT from the request body.
+ * Unauthenticated, those were an open relay: anyone could make the platform's
+ * SMTP identity send mail to any address, which is how a sending domain ends up
+ * on a blocklist.
+ */
+export async function requireAuthed(request: Request): Promise<AdminCaller | NextResponse> {
+  const authHeader = request.headers.get("Authorization") ?? "";
+  const idToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  if (!idToken) {
+    return NextResponse.json({ error: "Missing authorization token." }, { status: 401 });
+  }
+  try {
+    const decoded = await getAdminAuth().verifyIdToken(idToken);
+    return { uid: decoded.uid, phone: (decoded.phone_number as string) ?? null };
+  } catch {
+    return NextResponse.json({ error: "Invalid or expired authorization token." }, { status: 401 });
+  }
+}
+
 export async function requireAdmin(request: Request): Promise<AdminCaller | NextResponse> {
   const authHeader = request.headers.get("Authorization") ?? "";
   const idToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;

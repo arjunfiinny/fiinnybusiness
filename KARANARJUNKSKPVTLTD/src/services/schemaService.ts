@@ -1,43 +1,25 @@
-import { getDoc, setDoc, serverTimestamp, getDocs } from 'firebase/firestore';
+import { getDoc, setDoc, deleteDoc, serverTimestamp, getDocs } from 'firebase/firestore';
 import { db } from '../firebase';
 import type { ModuleSchema } from '../types/schema';
 import { getTenantDoc, getTenantCollection } from '../utils/tenantPath';
+import { MODULE_REGISTRY, getDefaultSchema, ALL_DEFAULT_SCHEMAS } from '../config/moduleRegistry';
 
 export const SCHEMA_COLLECTION = 'ui_schemas';
 
-// Default schema for Retailers if none exists
-const DEFAULT_RETAILER_SCHEMA: ModuleSchema = {
-    moduleId: 'retailers',
-    moduleName: 'Retailers/Customers',
-    fields: [
-        { id: 'name', label: 'Retailer Name', type: 'text', required: true, editable: true, visibleInTable: true, visibleInExport: true, order: 1, systemOnly: true },
-        { id: 'number', label: 'Contact Number', type: 'phone', required: true, editable: true, visibleInTable: true, visibleInExport: true, order: 2 },
-        { id: 'location', label: 'Location/Village', type: 'text', required: false, editable: true, visibleInTable: true, visibleInExport: true, order: 3 },
-        { id: 'portfolioSize', label: 'Portfolio Size', type: 'select', required: true, editable: true, visibleInTable: true, visibleInExport: true, order: 4, options: [{ label: 'Big', value: 'Big' }, { label: 'Medium', value: 'Medium' }, { label: 'Small', value: 'Small' }] },
-        { id: 'outstandingAmount', label: 'Outstanding Balance', type: 'currency', required: false, editable: false, visibleInTable: true, visibleInExport: true, order: 5, systemOnly: true },
-        { id: 'email', label: 'Email Address', type: 'email', required: false, editable: true, visibleInTable: false, visibleInExport: true, order: 6 },
-        { id: 'bookName', label: 'Book Name', type: 'text', required: false, editable: true, visibleInTable: false, visibleInExport: true, order: 7 },
-        { id: 'billBookPageNo', label: 'Bill Book Page No', type: 'text', required: false, editable: true, visibleInTable: false, visibleInExport: true, order: 8 },
-        { id: 'alternateNumber', label: 'Alternate Mobile', type: 'phone', required: false, editable: true, visibleInTable: false, visibleInExport: true, order: 9 },
-    ]
-};
+/**
+ * Default layouts live in src/config/moduleRegistry.ts, not here.
+ *
+ * This file used to carry two hardcoded schemas and branch on
+ * `if (moduleId === 'retailers') ... if (moduleId === 'orders')`, which meant
+ * adding a screen to the builder required edits in three files. Everything now
+ * reads the registry, so a new entry there is immediately fetchable, seedable
+ * and saveable.
+ */
 
-// Default schema for Orders
-const DEFAULT_ORDER_SCHEMA: ModuleSchema = {
-    moduleId: 'orders',
-    moduleName: 'Orders & Sales',
-    fields: [
-        { id: 'productName', label: 'Product Name', type: 'text', required: true, editable: false, visibleInTable: true, visibleInExport: true, order: 1, systemOnly: true },
-        { id: 'quantity', label: 'Quantity', type: 'number', required: true, editable: true, visibleInTable: true, visibleInExport: true, order: 2 },
-        { id: 'unit', label: 'Unit', type: 'select', required: true, editable: true, visibleInTable: true, visibleInExport: true, order: 3, options: [{ label: 'Boxes', value: 'Boxes' }, { label: 'Pieces', value: 'Pieces' }] },
-        { id: 'amount', label: 'Total Amount', type: 'currency', required: true, editable: true, visibleInTable: true, visibleInExport: true, order: 4, systemOnly: true },
-        { id: 'paymentStatus', label: 'Payment Status', type: 'select', required: true, editable: true, visibleInTable: true, visibleInExport: true, order: 5, options: [{ label: 'Paid', value: 'Paid' }, { label: 'Unpaid', value: 'Unpaid' }], systemOnly: true },
-        { id: 'talkedTo', label: 'Talked To', type: 'text', required: false, editable: true, visibleInTable: true, visibleInExport: true, order: 6 },
-        { id: 'notes', label: 'Notes', type: 'text', required: false, editable: true, visibleInTable: false, visibleInExport: true, order: 7 },
-    ]
-};
-
-export const fetchModuleSchema = async (tenantId: string, moduleId: string): Promise<ModuleSchema> => {
+export const fetchModuleSchema = async (
+    tenantId: string,
+    moduleId: string,
+): Promise<ModuleSchema> => {
     try {
         const schemaRef = getTenantDoc(db, tenantId, SCHEMA_COLLECTION, moduleId);
         const schemaSnap = await getDoc(schemaRef);
@@ -46,45 +28,96 @@ export const fetchModuleSchema = async (tenantId: string, moduleId: string): Pro
             return schemaSnap.data() as ModuleSchema;
         }
 
-        // Return defaults if none exists in DB yet
-        if (moduleId === 'retailers') return DEFAULT_RETAILER_SCHEMA;
-        if (moduleId === 'orders') return DEFAULT_ORDER_SCHEMA;
+        const fallback = getDefaultSchema(moduleId);
+        if (fallback) return fallback;
 
-        throw new Error(`Schema for module ${moduleId} not found and no default exists.`);
+        throw new Error(`Schema for module "${moduleId}" is not in MODULE_REGISTRY.`);
     } catch (error) {
         console.error(`Error fetching schema for ${moduleId}:`, error);
         throw error;
     }
 };
 
-export const fetchAllSchemas = async (tenantId: string): Promise<ModuleSchema[]> => {
+/**
+ * Every configurable module, saved layout where one exists and the registry
+ * default everywhere else.
+ *
+ * The previous version returned ONLY what Firestore held, and seeded defaults
+ * only when the collection was completely empty. For any tenant that had ever
+ * saved a layout the seed branch never ran again, so a module added to the
+ * product later could never appear in their builder. Merging on read fixes that
+ * without a per-tenant migration: defaults are simply the value until an admin
+ * saves something over them.
+ *
+ * Nothing is written here. Seeding on read would mean a tenant merely opening
+ * the builder silently acquires documents for screens they never touched, and
+ * those frozen copies would then stop tracking future default changes.
+ */
+export interface SchemaState {
+    schemas: ModuleSchema[];
+    /** Modules the tenant has actually saved; the rest are registry defaults. */
+    savedModuleIds: Set<string>;
+}
+
+export const fetchSchemaState = async (tenantId: string): Promise<SchemaState> => {
     try {
-        const schemasCol = getTenantCollection(db, tenantId, SCHEMA_COLLECTION);
-        const snap = await getDocs(schemasCol);
+        const snap = await getDocs(getTenantCollection(db, tenantId, SCHEMA_COLLECTION));
+        const saved = new Map<string, ModuleSchema>();
+        snap.docs.forEach((d) => {
+            const data = d.data() as ModuleSchema;
+            if (data?.moduleId) saved.set(data.moduleId, data);
+        });
 
-        if (snap.empty) {
-            // Seed defaults
-            await saveModuleSchema(tenantId, DEFAULT_RETAILER_SCHEMA.moduleId, DEFAULT_RETAILER_SCHEMA);
-            await saveModuleSchema(tenantId, DEFAULT_ORDER_SCHEMA.moduleId, DEFAULT_ORDER_SCHEMA);
-            return [DEFAULT_RETAILER_SCHEMA, DEFAULT_ORDER_SCHEMA];
-        }
+        // Registry order first, so the builder's grouping stays stable.
+        const merged: ModuleSchema[] = ALL_DEFAULT_SCHEMAS().map(
+            (def) => saved.get(def.moduleId) ?? def,
+        );
 
-        return snap.docs.map(doc => doc.data() as ModuleSchema);
+        // A saved layout for a module no longer in the registry (renamed or
+        // retired) is still returned, so an admin can see and clean it up
+        // rather than having it vanish silently.
+        const registryIds = new Set(MODULE_REGISTRY.map((m) => m.schema.moduleId));
+        saved.forEach((schema, id) => {
+            if (!registryIds.has(id)) merged.push(schema);
+        });
+
+        return { schemas: merged, savedModuleIds: new Set(saved.keys()) };
     } catch (error) {
-        console.error("Error fetching all schemas:", error);
+        console.error('Error fetching all schemas:', error);
         throw error;
     }
 };
 
-export const saveModuleSchema = async (tenantId: string, moduleId: string, schema: ModuleSchema): Promise<void> => {
+export const saveModuleSchema = async (
+    tenantId: string,
+    moduleId: string,
+    schema: ModuleSchema,
+): Promise<void> => {
     try {
         const schemaRef = getTenantDoc(db, tenantId, SCHEMA_COLLECTION, moduleId);
         await setDoc(schemaRef, {
             ...schema,
-            updatedAt: serverTimestamp()
+            updatedAt: serverTimestamp(),
         });
     } catch (error) {
         console.error(`Error saving schema for ${moduleId}:`, error);
+        throw error;
+    }
+};
+
+/**
+ * Drop the tenant's saved layout so the module falls back to the registry
+ * default. Deletes rather than overwriting with a copy of the default, so the
+ * module keeps tracking future changes to that default.
+ */
+export const resetModuleSchema = async (tenantId: string, moduleId: string): Promise<void> => {
+    if (!getDefaultSchema(moduleId)) {
+        throw new Error(`Cannot reset "${moduleId}" — it has no registry default.`);
+    }
+    try {
+        await deleteDoc(getTenantDoc(db, tenantId, SCHEMA_COLLECTION, moduleId));
+    } catch (error) {
+        console.error(`Error resetting schema for ${moduleId}:`, error);
         throw error;
     }
 };

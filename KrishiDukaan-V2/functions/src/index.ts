@@ -9,6 +9,8 @@ import { recordEngagement } from "./notifications/engagement";
 
 export { sendWaNotification, retryWaNotifications, webhookReceiver } from "./wa-dispatch";
 export { transcodeReel } from "./reels/media/transcodeReel";
+export { backfillReelTranscodes } from "./reels/media/backfillReelTranscodes";
+export { releaseTransferOnDelivery } from "./route-release";
 export {
   notifyOwnerOnReelRepost,
   flushEngagementNotifications,
@@ -866,6 +868,10 @@ export const notifyCustomerOnOrderStatus = onDocumentWritten(
       accepted: [
         "Order accepted 👍",
         `${store} accepted your order for ${itemSummary}`,
+      ],
+      dispatched: [
+        "Order dispatched 📦",
+        `${store} has dispatched your order for ${itemSummary}`,
       ],
       out_for_delivery: [
         "Out for delivery 🚚",

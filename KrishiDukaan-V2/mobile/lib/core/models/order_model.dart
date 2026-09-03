@@ -20,6 +20,11 @@ class OrderModel {
   final String status;
   final OrderPaymentModel? payment;
   final DateTime? createdAt;
+
+  /// Status transitions, each `{status, at}` with an ISO timestamp. The
+  /// payout hold runs from the `delivered` entry, so this is required for
+  /// earnings — it was previously not parsed at all.
+  final List<Map<String, String>> statusHistory;
   final String? invoiceNumber;
 
   const OrderModel({
@@ -39,6 +44,7 @@ class OrderModel {
     required this.status,
     this.payment,
     this.createdAt,
+    this.statusHistory = const [],
     this.invoiceNumber,
   });
 
@@ -57,13 +63,11 @@ class OrderModel {
       customerAddressMap['pincode'] = '';
     }
 
-    final fsStatus = d['status']?.toString() ?? 'pending';
-    final status = switch (fsStatus) {
-      'placed' => 'pending',
-      'out_for_delivery' => 'dispatched',
-      'rejected' => 'cancelled',
-      _ => fsStatus,
-    };
+    // Canonical Firestore status, used verbatim. The old mapping to mobile-only
+    // names ('pending'/'dispatched'/'cancelled') was removed: it renamed
+    // out_for_delivery to 'dispatched', which collided once 'dispatched' became
+    // a real status between accepted and out_for_delivery.
+    final status = d['status']?.toString() ?? 'placed';
 
     final rawItems = d['items'];
     final List<OrderItemModel> itemsList = [];
@@ -117,6 +121,14 @@ class OrderModel {
       status: status,
       payment: paymentModel,
       createdAt: createdAtDate,
+      statusHistory: (d['statusHistory'] as List?)
+              ?.whereType<Map>()
+              .map((e) => {
+                    'status': (e['status'] ?? '').toString(),
+                    'at': (e['at'] ?? '').toString(),
+                  })
+              .toList() ??
+          const [],
       invoiceNumber: d['invoiceNumber']?.toString(),
     );
   }
@@ -167,12 +179,38 @@ class OrderPaymentModel {
   final double amount;
   final String? paidAt;
 
+  // ── Payout fields, written by the web payout flow ─────────────────────
+  // Mirrors app/dashboard/_lib/seller-earnings.ts so the app and the web
+  // dashboard can never disagree about what a seller is owed.
+
+  /// Razorpay's own charge on this payment, fetched post-capture. Null until
+  /// it has been looked up — treated as 0 rather than guessed, so the seller
+  /// is never shown a deduction that was invented.
+  final double? gatewayFee;
+  final double? gatewayTax;
+
+  /// Set once a Route transfer has actually paid this order out.
+  final String? transferId;
+  final String? transferredAt;
+
+  /// Amount already refunded to the customer. A PARTIAL refund leaves the
+  /// order's status unchanged, so this must be subtracted or the seller would
+  /// appear owed the full original amount.
+  final double? refundedAmount;
+  final String? refundId;
+
   const OrderPaymentModel({
     this.razorpayOrderId,
     this.razorpayPaymentId,
     required this.status,
     required this.amount,
     this.paidAt,
+    this.gatewayFee,
+    this.gatewayTax,
+    this.transferId,
+    this.transferredAt,
+    this.refundedAmount,
+    this.refundId,
   });
 
   factory OrderPaymentModel.fromMap(Map<String, dynamic> m) =>
@@ -182,5 +220,11 @@ class OrderPaymentModel {
         status: m['status'] as String? ?? 'pending',
         amount: (m['amount'] as num?)?.toDouble() ?? 0.0,
         paidAt: m['paidAt'] as String?,
+        gatewayFee: (m['gatewayFee'] as num?)?.toDouble(),
+        gatewayTax: (m['gatewayTax'] as num?)?.toDouble(),
+        transferId: m['transferId'] as String?,
+        transferredAt: m['transferredAt'] as String?,
+        refundedAmount: (m['refundedAmount'] as num?)?.toDouble(),
+        refundId: m['refundId'] as String?,
       );
 }

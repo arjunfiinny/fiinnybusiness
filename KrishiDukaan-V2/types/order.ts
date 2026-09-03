@@ -1,11 +1,32 @@
 export type SellerType = "retailer" | "manufacturer";
 
+/**
+ * Canonical order lifecycle, in progression order:
+ *   placed → accepted → dispatched → out_for_delivery → delivered
+ * with `rejected` as the terminal decline from any pre-dispatch state.
+ *
+ * `dispatched` means the seller has handed the parcel off / packed it out of
+ * their stock; `out_for_delivery` means it is physically on its way to the
+ * customer's door. They are deliberately distinct because a seller who ships
+ * via a transporter can sit in `dispatched` for a day or more, and a customer
+ * seeing "out for delivery" for that long assumes something is wrong.
+ */
 export type OrderStatus =
   | "placed"
   | "accepted"
+  | "dispatched"
   | "out_for_delivery"
   | "delivered"
   | "rejected";
+
+/** Progression order, shared by every timeline and "can advance to" check. */
+export const ORDER_STATUS_FLOW: OrderStatus[] = [
+  "placed",
+  "accepted",
+  "dispatched",
+  "out_for_delivery",
+  "delivered",
+];
 
 export type StatusHistoryEntry = {
   status: OrderStatus;
@@ -152,6 +173,28 @@ export type PaymentInfo = {
   status: PaymentStatus;
   amount: number; // in INR
   paidAt?: string; // ISO timestamp
+
+  // ── Payout accounting (rupees) ──────────────────────────────────────────
+  /** Razorpay's own charge, fetched from the payment entity after capture. */
+  gatewayFee?: number;
+  gatewayTax?: number;
+  /** KrishiDukan's cut on this order. Stored per order, not derived from a
+   *  rate, so a historical payout keeps the fee actually applied to it. */
+  platformFee?: number;
+  /** Set once money has moved (or a manual payout was recorded). Doubles as the
+   *  idempotency guard that stops an order being paid out twice. */
+  transferId?: string;
+  transferredAt?: string;
+  /** 'processing' while a manual bank transfer is in flight, 'paid' once done. */
+  payoutStatus?: "processing" | "paid";
+  payoutMethod?: string;
+  payoutAmount?: number;
+  payoutInitiatedAt?: string;
+  payoutBankRef?: string;
+  payoutNote?: string;
+  /** Rupees refunded to the customer on this order. */
+  refundedAmount?: number;
+  refundId?: string;
 };
 
 export type InvoiceMetadata = {
@@ -197,6 +240,29 @@ export type OrderDoc = {
   status: OrderStatus;
   statusHistory?: StatusHistoryEntry[];
   payment?: PaymentInfo;
+  /**
+   * Razorpay Route payout state, written by the releaseTransferOnDelivery
+   * function when the order is marked delivered. Absent on orders with no
+   * transfer — cash on delivery, orders predating Route, and any seller who has
+   * not onboarded a linked account yet.
+   */
+  routeRelease?: RouteReleaseInfo;
   createdAt?: unknown;
   updatedAt?: unknown;
+};
+
+export type RouteReleaseInfo = {
+  /** Razorpay transfer id this order's payout belongs to. */
+  transferId: string;
+  /** Transfer amount in paise, as Razorpay reports it. */
+  amount?: number;
+  /**
+   * `scheduled` - a release time is set and Razorpay will settle then.
+   * `already_released` - the transfer was no longer on hold when we looked.
+   */
+  status: "scheduled" | "already_released";
+  /** When the money settles to the seller. Delivery + 24h. */
+  releaseAt?: unknown;
+  scheduledAt?: unknown;
+  recordedAt?: unknown;
 };

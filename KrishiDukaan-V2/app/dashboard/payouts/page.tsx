@@ -29,6 +29,8 @@ import {
 } from "lucide-react";
 import { db } from "../../firebase";
 import { PageHeader } from "../_components/page-header";
+import { KycDocuments } from "../_components/kyc-documents";
+import { SellerEarningsPanel } from "../_components/seller-earnings-panel";
 import { useEffectiveUser } from "../_context/effective-user-context";
 
 // ─── validation ───────────────────────────────────────────────────────────────
@@ -233,8 +235,13 @@ export default function PayoutsPage() {
     <div className="pb-16">
       <PageHeader
         title="Payouts"
-        description="The bank account your order money is sent to. KrishiDukan charges you nothing — you receive the full order amount minus only the payment gateway's own fee."
+        description="The bank account your order money is sent to. You receive the order amount less the KrishiDukan platform fee, the payment gateway's own charges and applicable taxes."
       />
+
+      {/* What they're owed, before the mechanics of where it's sent. */}
+      <div className="mb-6">
+        <SellerEarningsPanel uid={uid} profile={profile} />
+      </div>
 
       {/* How payouts work — set expectations before they type anything. */}
       <div className="mb-6 rounded-xl border border-blue-200 bg-blue-50 p-4">
@@ -244,8 +251,26 @@ export default function PayoutsPage() {
             <p className="font-semibold">How you get paid</p>
             <ul className="mt-1 list-disc space-y-1 pl-4 text-blue-800">
               <li>Money is transferred once you mark the order <strong>Delivered</strong>.</li>
-              <li>KrishiDukan commission is <strong>₹0</strong>. We take no cut.</li>
-              <li>Only the payment gateway&apos;s charge is deducted — see it on each order.</li>
+              <li>
+                The <strong>KrishiDukan platform fee</strong> and the{" "}
+                <strong>payment gateway&apos;s charges</strong> are deducted — the exact
+                amounts are shown on each order.
+              </li>
+              <li>
+                GST and other applicable taxes are charged at the rates prescribed under
+                applicable law.
+              </li>
+              <li>
+                Settlement timing depends on the payment service provider and your
+                account setup. Full terms:{" "}
+                <a
+                  href="/seller-terms"
+                  className="font-semibold underline hover:text-blue-950"
+                >
+                  Seller &amp; Manufacturer Subscription Terms
+                </a>
+                .
+              </li>
             </ul>
           </div>
         </div>
@@ -447,6 +472,20 @@ export default function PayoutsPage() {
             <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" />
             These details are visible only to you and are used solely to send your order payouts.
           </p>
+        </div>
+      ) : null}
+
+      {/* Supporting evidence for the bank details above. Kept outside the
+          edit/view toggle so a seller can add a missing document without
+          re-opening and re-submitting the whole bank form. */}
+      {phone ? (
+        <div className="mt-6">
+          <KycDocuments
+            phone={phone}
+            // Once verified, the documents are the basis of that decision —
+            // changing them silently would leave the approval unbacked.
+            readOnly={saved?.status === "verified"}
+          />
         </div>
       ) : null}
     </div>

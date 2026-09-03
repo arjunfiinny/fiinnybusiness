@@ -59,8 +59,15 @@ export default async function ReelsPage() {
     overlayPos: r.overlayPos,
   }));
 
-  // ── JSON-LD: ItemList of VideoObjects — this is what gets each reel's
-  //    title/description into Google's video indexing.
+  // ── JSON-LD: ItemList of links to the watch pages.
+  //
+  // Deliberately NOT VideoObject entries, which is what this used to emit.
+  // A VideoObject is attributed to the page carrying it, and this page is a
+  // thumbnail grid with no player — so declaring thirty of them here told
+  // Google about thirty videos that are not on a watch page, and Search
+  // Console rejected every one of them with exactly that reason. An ItemList
+  // of URLs says the true thing: these are links to pages, and each of those
+  // pages carries one video and the markup describing it.
   const itemListLd = {
     "@context": "https://schema.org",
     "@type": "ItemList",
@@ -69,21 +76,7 @@ export default async function ReelsPage() {
       "@type": "ListItem",
       position: i + 1,
       url: `${SITE_URL}/reels/${buildReelSlug(r.title, r.id)}`,
-      item: {
-        "@type": "VideoObject",
-        name: r.title || `${r.shopName} on AgriReels`,
-        description: r.caption || r.title || `Farming video by ${r.shopName}`,
-        contentUrl: r.videoUrl,
-        ...(r.thumbnailUrl ? { thumbnailUrl: r.thumbnailUrl } : {}),
-        uploadDate: r.createdAtMs
-          ? new Date(r.createdAtMs).toISOString()
-          : undefined,
-        interactionStatistic: {
-          "@type": "InteractionCounter",
-          interactionType: { "@type": "WatchAction" },
-          userInteractionCount: r.viewsCount,
-        },
-      },
+      name: r.title || `${r.shopName} on AgriReels`,
     })),
   };
 
