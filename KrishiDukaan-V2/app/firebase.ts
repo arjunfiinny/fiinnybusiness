@@ -26,6 +26,13 @@ import {
   type DocumentData,
 } from 'firebase/firestore';
 import { getAuth } from 'firebase/auth';
+import {
+  DEFAULT_DURATIONS,
+  PRICING_DOC_PATH,
+  computeAmount,
+  parseDurations,
+  type DurationPrice,
+} from './lib/pricing';
 import { getStorage } from 'firebase/storage';
 import { getAnalytics, isSupported } from 'firebase/analytics';
 
@@ -1019,12 +1026,68 @@ export async function getUserProfile(uid: string) {
   return null;
 }
 
+/**
+ * The live plan for a billing period, read from settings/pricing.
+ *
+ * There used to be a `PRICE_PER_SEAT` literal here AND in adminManualActivate
+ * AND in the mobile app, none of which the admin Pricing screen could reach.
+ * Editing the price in admin changed what Razorpay charged but not what got
+ * written to payments/ and subscriptions/, so the books recorded the old price
+ * — Rs 21 for any period outside {1,3,6,12}. Both literals are gone; this is
+ * the only price lookup left on the client, and the amount actually charged is
+ * preferred over it wherever the gateway can tell us (see verify/).
+ */
+async function loadPlan(durationMonths: number): Promise<DurationPrice | null> {
+  let ladder: DurationPrice[] = DEFAULT_DURATIONS;
+  try {
+    const snap = await getDoc(
+      doc(db, PRICING_DOC_PATH.collection, PRICING_DOC_PATH.doc),
+    );
+    if (snap.exists()) ladder = parseDurations(snap.data()) ?? DEFAULT_DURATIONS;
+  } catch {
+    /* unreachable settings doc degrades to the built-in ladder */
+  }
+  return ladder.find((d) => d.months === durationMonths) ?? null;
+}
+
+/**
+ * What the seller was shown, and therefore accepted, at the moment of purchase.
+ *
+ * Recorded against the subscription and the payment so the question "which
+ * version of the terms did this seller agree to, and where" is answerable from
+ * the data years later. Version strings come from app/lib/legal-constants.ts.
+ */
+export interface TermsAcceptance {
+  /** TERMS_VERSION at the time of purchase. */
+  version: string;
+  /** Routes of the documents the notice linked to. */
+  documents: string[];
+  /** ISO 8601, client clock — indicative, the server timestamp is authoritative. */
+  acceptedAt: string;
+  /** Which checkout showed the notice, e.g. 'web:subscription-checkout'. */
+  surface: string;
+}
+
 export async function updateSubscriptionStatus(
   uid: string,
   status: 'paid' | 'unpaid',
   paymentDetails?: any,
   seatCount: number = 1,
-  durationMonths: number = 1
+  durationMonths: number = 1,
+  /**
+   * Rupees Razorpay actually captured, as returned by verify/. Pass it whenever
+   * it is available: it is the only figure guaranteed to match the seller's card
+   * statement. Omitted only by callers with no gateway round-trip behind them.
+   */
+  amountPaid?: number,
+  /**
+   * The terms notice the seller passed through on the way to paying. Optional
+   * so older callers (and the admin-activation path, which has no seller in
+   * front of it to accept anything) keep working — a missing record is honest
+   * about the fact that no notice was shown, which is better than stamping one
+   * that was not.
+   */
+  termsAcceptance?: TermsAcceptance,
 ): Promise<{ profileUpdated: true; paymentLogged: boolean; paymentLogError?: string }> {
   const timestamp = serverTimestamp();
 
@@ -1065,9 +1128,13 @@ export async function updateSubscriptionStatus(
 
   if (status === 'paid') {
     try {
-      const PRICE_PER_SEAT: Record<number, number> = { 1: 21, 3: 54, 6: 90, 12: 144 };
-      const pricePerSeat = PRICE_PER_SEAT[durationMonths] ?? 21;
-      const totalAmount = seatsToAdd * pricePerSeat;
+      // Prefer what the gateway captured; fall back to the live ladder only when
+      // the caller had no verified amount to hand us.
+      let totalAmount = Number(amountPaid);
+      if (!Number.isFinite(totalAmount) || totalAmount < 0) {
+        const plan = await loadPlan(durationMonths);
+        totalAmount = plan ? computeAmount(plan, seatsToAdd) : 0;
+      }
 
       // Write both legacy (userId/ownerId) and new (userPhone/ownerPhone) fields so all queries
       // and Firestore rules work. Rules check ownerPhone == myPhone() OR ownerId == uid.
@@ -1084,6 +1151,7 @@ export async function updateSubscriptionStatus(
         razorpayPaymentId: paymentDetails?.paymentId ?? null,
         timestamp,
         status: 'success',
+        termsAcceptance: termsAcceptance ?? null,
       });
 
       const now = new Date();
@@ -1108,6 +1176,10 @@ export async function updateSubscriptionStatus(
         expiryDate: Timestamp.fromDate(expiry),
         createdAt: timestamp,
         updatedAt: timestamp,
+        // Which standard terms this subscription was sold under. There are no
+        // company-specific seller agreements, so this version string plus the
+        // published documents is the whole contract for this period.
+        termsAcceptance: termsAcceptance ?? null,
       });
 
       return { profileUpdated: true, paymentLogged: true };
@@ -1938,76 +2010,10 @@ import { Hub, INITIAL_HUBS } from './initialHubs';
 
 export type { Hub };
 
-export async function syncInitialData(products: any[], stores: any[], inventory: any[] = []) {
-  // Sync products
-  try {
-    const productsSnap = await getDocs(collection(db, 'products'));
-    if (productsSnap.empty) {
-      console.log('Firebase: Syncing initial products...');
-      for (const product of products) {
-        await addDoc(collection(db, 'products'), {
-          ...product,
-          createdAt: serverTimestamp(),
-          source: 'initial_sync'
-        });
-      }
-    }
-  } catch (error) {
-    console.warn('Firebase: Syncing initial products failed:', error);
-  }
-
-  // Sync stores
-  try {
-    const storesSnap = await getDocs(collection(db, 'stores'));
-    if (storesSnap.empty) {
-      console.log('Firebase: Syncing initial stores...');
-      for (const store of stores) {
-        await addDoc(collection(db, 'stores'), {
-          ...store,
-          createdAt: serverTimestamp(),
-          source: 'initial_sync'
-        });
-      }
-    }
-  } catch (error) {
-    console.warn('Firebase: Syncing initial stores failed:', error);
-  }
-
-  // Sync inventory
-  try {
-    const inventorySnap = await getDocs(collection(db, 'inventory'));
-    if (inventorySnap.empty && inventory.length > 0) {
-      console.log('Firebase: Syncing initial inventory...');
-      for (const item of inventory) {
-        await addDoc(collection(db, 'inventory'), {
-          ...item,
-          createdAt: serverTimestamp(),
-          source: 'initial_sync'
-        });
-      }
-    }
-  } catch (error) {
-    console.warn('Firebase: Syncing initial inventory failed:', error);
-  }
-
-  // Sync hubs
-  try {
-    const hubsSnap = await getDocs(collection(db, 'hubs'));
-    if (hubsSnap.empty) {
-      console.log('Firebase: Syncing initial hubs...');
-      for (const hub of INITIAL_HUBS) {
-        const { id, ...hubData } = hub;
-        await setDoc(doc(db, 'hubs', id), {
-          ...hubData,
-          createdAt: serverTimestamp(),
-          source: 'initial_sync'
-        });
-      }
-    }
-  } catch (error) {
-    console.warn('Firebase: Syncing initial hubs failed:', error);
-  }
-}
+// syncInitialData() was removed here: it wrote the hardcoded demo catalogue
+// (constants.ts PRODUCTS/STORES/INVENTORY) into production Firestore from the
+// browser whenever a read came back empty. Seeding is a server-side task with
+// admin credentials, never something a visitor's session should be able to do.
 
 
 function getLocalDayKey(date: Date = new Date()): string {
@@ -2518,9 +2524,8 @@ export async function adminManualActivate(
   const now = new Date();
   const expiry = new Date(now);
   expiry.setMonth(expiry.getMonth() + durationMonths);
-  const PRICE_PER_SEAT: Record<number, number> = { 1: 21, 3: 54, 6: 90, 12: 144 };
-  const pricePerSeat = PRICE_PER_SEAT[durationMonths] ?? 21;
-  const totalAmount = seats * pricePerSeat;
+  const plan = await loadPlan(durationMonths);
+  const totalAmount = plan ? computeAmount(plan, seats) : 0;
   const ts = serverTimestamp();
 
   await setDoc(userRef, {
@@ -4318,12 +4323,15 @@ export interface WaIncomingMessage {
   timestamp: any;
   receivedAt: any;
   rawPayload?: any;
+  mediaId?: string | null;
+  mimeType?: string | null;
 }
 
 export interface WaResolvedUser {
   name: string;
   businessName: string;
-  role: "retailer" | "manufacturer" | "salesExecutive" | "admin" | "customer" | "unknown";
+  // "consumer" (mobile app) is normalised to "customer" before this reaches the UI
+  role: "retailer" | "manufacturer" | "salesExecutive" | "admin" | "customer" | "farmer" | "unknown";
 }
 
 export interface WaConvMeta {
@@ -4347,6 +4355,11 @@ export interface WaOutMessage {
   messageId: string;
   status: "sent" | "delivered" | "read" | "failed";
   sentBy: string;
+  // document-specific (optional)
+  fileName?: string | null;
+  mimeType?: string | null;
+  fileSize?: number | null;
+  mediaId?: string | null;
 }
 
 export interface WaNote {
@@ -4356,19 +4369,55 @@ export interface WaNote {
   createdBy: string;
 }
 
+// Normalise any role string coming out of Firestore to a known WaResolvedUser role.
+// "consumer" is the mobile-app alias for "customer" and must resolve the same way.
+function normalizeWaRole(raw: string): WaResolvedUser["role"] {
+  switch (raw.toLowerCase().trim()) {
+    case "retailer":       return "retailer";
+    case "manufacturer":   return "manufacturer";
+    case "salesexecutive": return "salesExecutive";
+    case "admin":          return "admin";
+    case "customer":
+    case "consumer":       return "customer";
+    case "farmer":         return "farmer";
+    default:               return "unknown";
+  }
+}
+
 export async function resolveWaUserByPhone(phone: string): Promise<WaResolvedUser | null> {
-  const tenDigit = phone.replace(/^91/, "");
-  const candidates = Array.from(new Set([phone, tenDigit]));
+  // Build the full candidate set.
+  //
+  // The critical addition is `+${digits}` — saveUserProfile() calls toE164() which
+  // returns "+91XXXXXXXXXX" (WITH the leading plus), so user documents are stored
+  // at users/+919876543210, not users/919876543210. Without this candidate the
+  // lookup always misses for consumers/customers and any web-onboarded user.
+  const digits = phone.replace(/\D/g, "");
+  const tenDigit = digits.startsWith("91") && digits.length === 12 ? digits.slice(2) : digits;
+  const withPlus = `+${digits}`;
+  const withPlusFull = `+91${tenDigit}`;
+
+  const candidates = Array.from(new Set([
+    phone,          // as-is from Meta webhook ("919876543210")
+    digits,         // stripped of non-digits (same as above for Meta format)
+    withPlus,       // "+919876543210" — what saveUserProfile/toE164 writes ← KEY FIX
+    withPlusFull,   // "+91" + 10-digit — handles edge-case format variance
+    tenDigit,       // "9876543210" — 10-digit for admin-pre-created accounts
+  ]));
+
+  console.log(`[WA Resolve] phone="${phone}" candidates:`, candidates);
 
   for (const p of candidates) {
     const userSnap = await getDoc(doc(db, "users", p));
     if (userSnap.exists()) {
       const d = userSnap.data() as any;
-      return {
-        name: d.name || d.ownerName || "",
+      const rawRole = String(d.role ?? "");
+      const result: WaResolvedUser = {
+        name: d.name || d.ownerName || d.fullName || "",
         businessName: d.shopName || d.businessName || "",
-        role: (d.role as WaResolvedUser["role"]) || "unknown",
+        role: normalizeWaRole(rawRole),
       };
+      console.log(`[WA Resolve] HIT users/${p} → name="${result.name}" role="${rawRole}"→"${result.role}"`);
+      return result;
     }
   }
 
@@ -4376,11 +4425,13 @@ export async function resolveWaUserByPhone(phone: string): Promise<WaResolvedUse
     const retailerSnap = await getDoc(doc(db, "retailers", p));
     if (retailerSnap.exists()) {
       const d = retailerSnap.data() as any;
-      return {
+      const result: WaResolvedUser = {
         name: d.name || d.ownerName || "",
         businessName: d.shopName || d.businessName || "",
         role: "retailer",
       };
+      console.log(`[WA Resolve] HIT retailers/${p} → name="${result.name}"`);
+      return result;
     }
   }
 
@@ -4388,14 +4439,17 @@ export async function resolveWaUserByPhone(phone: string): Promise<WaResolvedUse
     const mfrSnap = await getDoc(doc(db, "manufacturers", p));
     if (mfrSnap.exists()) {
       const d = mfrSnap.data() as any;
-      return {
+      const result: WaResolvedUser = {
         name: d.name || d.ownerName || "",
         businessName: d.businessName || d.shopName || "",
         role: "manufacturer",
       };
+      console.log(`[WA Resolve] HIT manufacturers/${p} → name="${result.name}"`);
+      return result;
     }
   }
 
+  console.log(`[WA Resolve] MISS — no document found for any candidate`);
   return null;
 }
 

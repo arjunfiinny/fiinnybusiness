@@ -1,5 +1,7 @@
+import { useEffect } from 'react';
 import { FileText, BarChart3, Package2 } from 'lucide-react';
 import { useHashTab } from '../hooks/useHashTab';
+import { useFeaturePermissions } from '../hooks/useFeaturePermissions';
 import FinancialReportsPage from './FinancialReportsPage';
 import GSTReportsPage from './GSTReportsPage';
 import StockReportPage from './StockReportPage';
@@ -13,8 +15,28 @@ const TABS: { id: ReportTab; label: string; icon: React.ReactNode }[] = [
     { id: 'gst',       label: 'GST Report',       icon: <FileText size={16} /> },
 ];
 
+// Feature-permission id per sub-tab (Super Admin → Feature Permissions).
+const TAB_PERM: Record<ReportTab, string> = {
+    stock:     'reports.stock.view',
+    financial: 'reports.financial.view',
+    gst:       'reports.gst.view',
+};
+
 export default function ReportsPage() {
     const [active, setActive] = useHashTab<ReportTab>(VALID_TABS, 'stock', 'fiinny-tab-reports');
+    const can = useFeaturePermissions();
+
+    // Sub-tab visibility is driven SOLELY by the Feature Matrix (single source of
+    // truth). Analyst's Financial/GST denial now lives in DEFAULT_FEATURE_PERMISSIONS.
+    // Routes/functionality are unchanged; direct routes still work for all roles.
+    const visibleTabs = TABS.filter(tab => can(TAB_PERM[tab.id]));
+
+    // If the active tab is not permitted, fall back to the first visible one so
+    // denied content is never shown on load.
+    const activeAllowed = visibleTabs.some(t => t.id === active);
+    useEffect(() => {
+        if (!activeAllowed && visibleTabs.length > 0) setActive(visibleTabs[0].id);
+    }, [activeAllowed, visibleTabs, setActive]);
 
     return (
         <div className="animate-fade-in" style={{ width: '100%' }}>
@@ -32,7 +54,7 @@ export default function ReportsPage() {
                 marginTop: '-2rem', paddingTop: '0.75rem',
                 marginBottom: '1.75rem',
             }}>
-                {TABS.map(tab => {
+                {visibleTabs.map(tab => {
                     const isActive = active === tab.id;
                     return (
                         <button
@@ -62,9 +84,9 @@ export default function ReportsPage() {
             </div>
 
             {/* Tab Content */}
-            {active === 'financial' && <FinancialReportsPage />}
-            {active === 'gst'       && <GSTReportsPage />}
-            {active === 'stock'     && <StockReportPage />}
+            {activeAllowed && active === 'financial' && <FinancialReportsPage />}
+            {activeAllowed && active === 'gst'       && <GSTReportsPage />}
+            {activeAllowed && active === 'stock'     && <StockReportPage />}
         </div>
     );
 }

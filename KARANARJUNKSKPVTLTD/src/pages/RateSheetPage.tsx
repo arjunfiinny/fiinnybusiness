@@ -1,19 +1,25 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Package, Plus, Edit2, Trash2, Loader2, Save, X, Download,
-  FileSpreadsheet, FileDown, Search, AlertTriangle,
+  FileSpreadsheet, FileDown, AlertTriangle,
 } from 'lucide-react';
 import { query, onSnapshot, addDoc, updateDoc, serverTimestamp, getDocs, where } from 'firebase/firestore';
 import { ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 import { softDelete } from '../utils/softDelete';
 import { db, storage } from '../firebase';
 import { useAuth } from '../contexts/AuthContext';
+import { useFeaturePermissions } from '../hooks/useFeaturePermissions';
 import { getTenantCollection, getTenantDoc } from '../utils/tenantPath';
 import { logAudit } from '../utils/auditLog';
 import { AGRI_CATEGORIES } from '../utils/constants';
 import Papa from 'papaparse';
+import {
+  type NumFilter, EMPTY_NUM, matchNum, isNumActive,
+  HDR_COL_STYLE, SortLabel, ColumnTextFilter, ColumnNumFilter, ColumnSelectFilter,
+} from '../components/tableFilters';
+import { useColumnLayout } from '../hooks/useColumnLayout';
 
 // ── Interfaces ────────────────────────────────────────────────────────────────
 
@@ -126,6 +132,48 @@ const emptyForm = () => ({
   batchNumber: '', mfgDate: '', expiryDate: '',
 });
 
+// ── Column sort ───────────────────────────────────────────────────────────────
+type SortCol =
+  | 'batchNumber' | 'name' | 'type' | 'mfgCompany' | 'unitSize' | 'unitMeasure'
+  | 'gstPct' | 'mrp' | 'purchase' | 'retail' | 'sales' | 'stock';
+
+// ── Column layout config (drives resize / freeze / reorder / persistence) ──────
+type PMColKey =
+  | 'sr' | 'photo' | 'batchNumber' | 'name' | 'category' | 'mfg' | 'size' | 'unit'
+  | 'gst' | 'mrp' | 'purchase' | 'retail' | 'sales' | 'stock' | 'actions';
+
+// Order: # → Photo → Product Name → Category → Manufacturer → Batch No. → Size →
+// Unit → GST % → MRP → Purch Rate → Retail Price → Sales Rate → Stock → Actions.
+// Batch No. (a single reference string on the product master) sits after
+// Manufacturer. The old "Batches" count column (an aggregate over the separate
+// inventoryBatches collection) was removed to avoid conflating the two concepts.
+const PM_ALL_KEYS: PMColKey[] = [
+  'sr', 'photo', 'name', 'category', 'mfg', 'batchNumber', 'size', 'unit',
+  'gst', 'mrp', 'purchase', 'retail', 'sales', 'stock', 'actions',
+];
+
+const PM_LABELS: Record<PMColKey, string> = {
+  sr: '#', photo: 'Photo', batchNumber: 'Batch No.', name: 'Product Name',
+  category: 'Category', mfg: 'Manufacturer', size: 'Size', unit: 'Unit',
+  gst: 'GST %', mrp: 'MRP', purchase: 'Purch Rate', retail: 'Retail Price',
+  sales: 'Sales Rate', stock: 'Stock', actions: 'Actions',
+};
+
+// Batch No. kept intentionally compact (task requirement); the rest are sized to
+// fit their filter control + header comfortably.
+const PM_DEFAULT_WIDTHS: Record<PMColKey, number> = {
+  sr: 56, photo: 68, batchNumber: 112, name: 220, category: 150, mfg: 165,
+  size: 105, unit: 115, gst: 105, mrp: 120, purchase: 120, retail: 120,
+  sales: 120, stock: 115, actions: 96,
+};
+
+const PM_ALIGN: Record<PMColKey, 'left' | 'right'> = {
+  sr: 'left', photo: 'left', batchNumber: 'left', name: 'left', category: 'left',
+  mfg: 'left', size: 'left', unit: 'left', gst: 'left', mrp: 'right',
+  purchase: 'right', retail: 'right', sales: 'right', stock: 'right',
+  actions: 'left',
+};
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function RateSheetPage() {
@@ -145,11 +193,68 @@ export default function RateSheetPage() {
   const [imageBlob, setImageBlob] = useState<Blob | null>(null); // compressed photo pending upload
   const [existingImagePath, setExistingImagePath] = useState<string | null>(null); // for delete-on-replace
   const [dupWarning, setDupWarning] = useState<string | null>(null);
+  const [modalDirty, setModalDirty] = useState(false);
+  const [confirmModalDiscard, setConfirmModalDiscard] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
 
   const canManage = userRole === 'admin' || userRole === 'analyst';
+
+  // Feature-permission layer (Super Admin → Feature Permissions → Inventory →
+  // Product Master). ANDed with the existing role gates so nothing is loosened.
+  const can = useFeaturePermissions();
+  const canAddProduct  = canManage && can('inventory.productMaster.add');
+  const canEditProduct = canManage && can('inventory.productMaster.edit');
+  const canExportCsv   = can('inventory.productMaster.csv.export');
+  const canCsvTemplate = canManage && can('inventory.productMaster.csv.template');
+  const canUploadCsv   = canManage && can('inventory.productMaster.csv.upload');
+
+  // Editing the purchase rate stays admin-only (unchanged permission).
   const canSeeCost = userRole === 'admin';
+  // Viewing the Purchase Rate column is allowed for Admin and Analyst. This is a
+  // display-only flag — it never gates editing/writing the value (see canSeeCost
+  // in the modal + save path), so no underlying permission or calculation changes.
+  const canSeePurchaseRate = userRole === 'admin' || userRole === 'analyst';
   const canDelete = userRole === 'admin';
+
+  // ── Column filters + sort ─────────────────────────────────────────────────
+  const [fBatch, setFBatch]       = useState('');
+  const [fCategory, setFCategory] = useState('');           // '' = all
+  const [fMfg, setFMfg]           = useState('');
+  const [fUnit, setFUnit]         = useState('');           // '' = all
+  const [fSize, setFSize]         = useState<NumFilter>(EMPTY_NUM);
+  const [fGst, setFGst]           = useState<NumFilter>(EMPTY_NUM);
+  const [fMrp, setFMrp]           = useState<NumFilter>(EMPTY_NUM);
+  const [fPurch, setFPurch]       = useState<NumFilter>(EMPTY_NUM);
+  const [fRetail, setFRetail]     = useState<NumFilter>(EMPTY_NUM);
+  const [fSales, setFSales]       = useState<NumFilter>(EMPTY_NUM);
+  const [fStock, setFStock]       = useState<NumFilter>(EMPTY_NUM);
+
+  const [sortCol, setSortCol] = useState<SortCol | null>(null);
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
+  const toggleSort = (col: SortCol) => {
+    if (sortCol === col) { if (sortDir === 'asc') setSortDir('desc'); else setSortCol(null); }
+    else { setSortCol(col); setSortDir('asc'); }
+  };
+
+  // ── Column layout (resize / freeze / reorder / persistence) ────────────────
+  const activeColKeys = useMemo(
+    () => PM_ALL_KEYS.filter(k => (k !== 'purchase' || canSeePurchaseRate) && (k !== 'actions' || canManage)),
+    [canSeePurchaseRate, canManage],
+  );
+  const layout = useColumnLayout<PMColKey>({
+    keys: activeColKeys,
+    // Place a newly-visible/absent column (e.g. Purchase Rate when it becomes
+    // visible for Analyst, or an older saved order that predates it) at its
+    // default position — after MRP — instead of appending it at the end. Keeps
+    // the intended MRP → Purch Rate → Retail Price → Sales Rate sequence while
+    // preserving the rest of a user's saved custom order.
+    insertMissingAtDefaultIndex: true,
+    defaultWidths: PM_DEFAULT_WIDTHS,
+    labels: PM_LABELS,
+    storageKey: 'fiinny_pm',
+    tenantId,
+  });
 
   // ── Data fetching ───────────────────────────────────────────────────────────
   useEffect(() => {
@@ -256,6 +361,8 @@ export default function RateSheetPage() {
     setImageBlob(null);
     setDupWarning(null);
     setImageError(null);
+    setModalDirty(false);
+    setConfirmModalDiscard(false);
     setIsModalOpen(true);
   };
 
@@ -355,6 +462,7 @@ export default function RateSheetPage() {
       }
       setImageBlob(compressed);
       setImagePreview(URL.createObjectURL(compressed));
+      setModalDirty(true);
     } catch (err) {
       console.error('Product photo compression failed:', err);
       setImageError('Could not process this image. Please try a different file.');
@@ -582,17 +690,104 @@ export default function RateSheetPage() {
     });
   };
 
-  // ── Filter ──────────────────────────────────────────────────────────────────
+  // ── Column-filter helpers ───────────────────────────────────────────────────
+  const rowStock = (p: Product) => batchSummaries.get(p.id)?.totalQty ?? totalStock(p);
+
+  // Distinct Category / Unit values for the header dropdown filters
+  const categoryOptions = useMemo(
+    () => Array.from(new Set(products.map(p => (p.type || '').trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
+    [products],
+  );
+  const unitOptions = useMemo(
+    () => Array.from(new Set(products.map(p => (p.unitMeasure || p.baseUnit || '').trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
+    [products],
+  );
+
+  const anyColumnFilter =
+    fBatch.trim() !== '' || fCategory !== '' || fMfg.trim() !== '' || fUnit !== '' ||
+    [fSize, fGst, fMrp, fPurch, fRetail, fSales, fStock].some(isNumActive);
+
+  // ── Filter + sort ───────────────────────────────────────────────────────────
   const visibleProducts = useMemo(() => {
-    if (!searchTerm.trim()) return products;
-    const q = searchTerm.toLowerCase();
-    return products.filter(p =>
-      p.name.toLowerCase().includes(q) ||
-      (p.productNumber || '').toLowerCase().includes(q) ||
-      (p.mfgCompany || '').toLowerCase().includes(q) ||
-      (p.type || '').toLowerCase().includes(q),
+    const q = searchTerm.trim().toLowerCase();
+    const batchQ = fBatch.trim().toLowerCase();
+    const mfgQ = fMfg.trim().toLowerCase();
+
+    const filtered = products.filter(p => {
+      // Global product search (name / SKU / manufacturer / category)
+      if (q && !(
+        p.name.toLowerCase().includes(q) ||
+        (p.productNumber || '').toLowerCase().includes(q) ||
+        (p.mfgCompany || '').toLowerCase().includes(q) ||
+        (p.type || '').toLowerCase().includes(q)
+      )) return false;
+      // Column filters
+      if (batchQ && !(p.batchNumber || '').toLowerCase().includes(batchQ)) return false;
+      if (fCategory && (p.type || '') !== fCategory) return false;
+      if (mfgQ && !(p.mfgCompany || '').toLowerCase().includes(mfgQ)) return false;
+      if (fUnit && (p.unitMeasure || p.baseUnit || '') !== fUnit) return false;
+      if (!matchNum(p.unitSize ?? 0, fSize)) return false;
+      if (!matchNum(p.gstPct ?? 0, fGst)) return false;
+      if (!matchNum(p.maxRetailPrice || 0, fMrp)) return false;
+      if (!matchNum(p.purchasePrice || 0, fPurch)) return false;
+      if (!matchNum(p.retailerPrice || 0, fRetail)) return false;
+      if (!matchNum(p.sellingPrice || 0, fSales)) return false;
+      if (!matchNum(rowStock(p), fStock)) return false;
+      return true;
+    });
+
+    if (!sortCol) return filtered;
+
+    const dir = sortDir === 'asc' ? 1 : -1;
+    const strOf = (p: Product): string => {
+      switch (sortCol) {
+        case 'batchNumber': return p.batchNumber || '';
+        case 'name':        return p.name || '';
+        case 'type':        return p.type || '';
+        case 'mfgCompany':  return p.mfgCompany || '';
+        case 'unitMeasure': return p.unitMeasure || p.baseUnit || '';
+        default:            return '';
+      }
+    };
+    const numOf = (p: Product): number => {
+      switch (sortCol) {
+        case 'unitSize': return p.unitSize ?? 0;
+        case 'gstPct':   return p.gstPct ?? 0;
+        case 'mrp':      return p.maxRetailPrice || 0;
+        case 'purchase': return p.purchasePrice || 0;
+        case 'retail':   return p.retailerPrice || 0;
+        case 'sales':    return p.sellingPrice || 0;
+        case 'stock':    return rowStock(p);
+        default:         return NaN;
+      }
+    };
+    const isNumericSort = !['batchNumber', 'name', 'type', 'mfgCompany', 'unitMeasure'].includes(sortCol);
+
+    return [...filtered].sort((a, b) =>
+      isNumericSort
+        ? (numOf(a) - numOf(b)) * dir
+        : strOf(a).localeCompare(strOf(b)) * dir,
     );
-  }, [products, searchTerm]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [products, batchSummaries, searchTerm, fBatch, fCategory, fMfg, fUnit, fSize, fGst, fMrp, fPurch, fRetail, fSales, fStock, sortCol, sortDir]);
+
+  const set = (patch: Partial<ReturnType<typeof emptyForm>>) => {
+    setFormData(f => ({ ...f, ...patch }));
+    setModalDirty(true);
+  };
+
+  const requestCloseModal = useCallback(() => {
+    if (modalDirty || imageBlob !== null) { setConfirmModalDiscard(true); return; }
+    handleCloseModal();
+  }, [modalDirty, imageBlob]);
+
+  // ESC key closes modal (with dirty guard)
+  useEffect(() => {
+    if (!isModalOpen) return;
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') requestCloseModal(); };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [isModalOpen, requestCloseModal]);
 
   // ── Render ──────────────────────────────────────────────────────────────────
   if (loading) return (
@@ -601,10 +796,196 @@ export default function RateSheetPage() {
     </div>
   );
 
-  const set = (patch: Partial<ReturnType<typeof emptyForm>>) => setFormData(f => ({ ...f, ...patch }));
+  // ── Dynamic column renderers (colOrder-driven, like the Stock Report) ────────
+  const renderHeaderTh = (key: PMColKey, colIdx: number) => {
+    const align = PM_ALIGN[key];
+    const thBase: React.CSSProperties = {
+      padding: '0.7rem 0.85rem', fontWeight: 600, textAlign: align,
+      whiteSpace: 'nowrap', verticalAlign: 'top', overflow: 'hidden',
+      position: 'sticky', top: 0, zIndex: 2, background: 'var(--surface-base)',
+      ...layout.stickyStyle(colIdx, { header: true, rowBg: 'var(--surface-base)' }),
+      ...(layout.isDragOver(key) ? { borderLeft: '3px solid var(--primary)' } : {}),
+    };
+    let inner: React.ReactNode;
+    switch (key) {
+      case 'sr':    inner = '#'; break;
+      case 'photo': inner = 'Photo'; break;
+      case 'batchNumber': inner = (
+        <div style={HDR_COL_STYLE}>
+          <SortLabel label="Batch No." active={sortCol === 'batchNumber'} dir={sortDir} onClick={() => toggleSort('batchNumber')} />
+          <ColumnTextFilter value={fBatch} onChange={setFBatch} />
+        </div>
+      ); break;
+      case 'name': inner = (
+        <div style={HDR_COL_STYLE}>
+          <SortLabel label="Product Name" active={sortCol === 'name'} dir={sortDir} onClick={() => toggleSort('name')} />
+          {/* Global product search now lives in this column. Same multi-field
+              logic as before (name / SKU / manufacturer / category) — see the
+              `q` filter in visibleProducts. */}
+          <ColumnTextFilter value={searchTerm} onChange={setSearchTerm} placeholder="Search products…" />
+        </div>
+      ); break;
+      case 'category': inner = (
+        <div style={HDR_COL_STYLE}>
+          <SortLabel label="Category" active={sortCol === 'type'} dir={sortDir} onClick={() => toggleSort('type')} />
+          <ColumnSelectFilter value={fCategory} options={categoryOptions} onChange={setFCategory} allLabel="All Categories" />
+        </div>
+      ); break;
+      case 'mfg': inner = (
+        <div style={HDR_COL_STYLE}>
+          <SortLabel label="Manufacturer" active={sortCol === 'mfgCompany'} dir={sortDir} onClick={() => toggleSort('mfgCompany')} />
+          <ColumnTextFilter value={fMfg} onChange={setFMfg} />
+        </div>
+      ); break;
+      case 'size': inner = (
+        <div style={HDR_COL_STYLE}>
+          <SortLabel label="Size" active={sortCol === 'unitSize'} dir={sortDir} onClick={() => toggleSort('unitSize')} />
+          <ColumnNumFilter state={fSize} onChange={setFSize} />
+        </div>
+      ); break;
+      case 'unit': inner = (
+        <div style={HDR_COL_STYLE}>
+          <SortLabel label="Unit" active={sortCol === 'unitMeasure'} dir={sortDir} onClick={() => toggleSort('unitMeasure')} />
+          <ColumnSelectFilter value={fUnit} options={unitOptions} onChange={setFUnit} allLabel="All Units" />
+        </div>
+      ); break;
+      case 'gst': inner = (
+        <div style={HDR_COL_STYLE}>
+          <SortLabel label="GST %" active={sortCol === 'gstPct'} dir={sortDir} onClick={() => toggleSort('gstPct')} />
+          <ColumnNumFilter state={fGst} onChange={setFGst} />
+        </div>
+      ); break;
+      case 'mrp': inner = (
+        <div style={HDR_COL_STYLE}>
+          <SortLabel label="MRP" align="right" active={sortCol === 'mrp'} dir={sortDir} onClick={() => toggleSort('mrp')} />
+          <ColumnNumFilter state={fMrp} onChange={setFMrp} />
+        </div>
+      ); break;
+      case 'purchase': inner = (
+        <div style={HDR_COL_STYLE}>
+          <SortLabel label="Purch Rate" align="right" active={sortCol === 'purchase'} dir={sortDir} onClick={() => toggleSort('purchase')} />
+          <ColumnNumFilter state={fPurch} onChange={setFPurch} />
+        </div>
+      ); break;
+      case 'retail': inner = (
+        <div style={HDR_COL_STYLE}>
+          <SortLabel label="Retail Price" align="right" active={sortCol === 'retail'} dir={sortDir} onClick={() => toggleSort('retail')} />
+          <ColumnNumFilter state={fRetail} onChange={setFRetail} />
+        </div>
+      ); break;
+      case 'sales': inner = (
+        <div style={HDR_COL_STYLE}>
+          <SortLabel label="Sales Rate" align="right" active={sortCol === 'sales'} dir={sortDir} onClick={() => toggleSort('sales')} />
+          <ColumnNumFilter state={fSales} onChange={setFSales} />
+        </div>
+      ); break;
+      case 'stock': inner = (
+        <div style={HDR_COL_STYLE}>
+          <SortLabel label="Stock" align="right" active={sortCol === 'stock'} dir={sortDir} onClick={() => toggleSort('stock')} />
+          <ColumnNumFilter state={fStock} onChange={setFStock} />
+        </div>
+      ); break;
+      case 'actions': inner = 'Actions'; break;
+      default: inner = PM_LABELS[key];
+    }
+    return (
+      <th key={key} style={thBase} {...layout.getDragProps(key)}>
+        {inner}
+        {layout.resizeHandle(key)}
+      </th>
+    );
+  };
+
+  interface RowCtx {
+    stock: number; isLow: boolean;
+    rowExpiring: boolean; index: number;
+  }
+
+  const renderBodyTd = (key: PMColKey, colIdx: number, p: Product, ctx: RowCtx): React.ReactNode => {
+    const align = PM_ALIGN[key];
+    const tdBase: React.CSSProperties = {
+      padding: '0.65rem 0.85rem', textAlign: align, overflow: 'hidden', textOverflow: 'ellipsis',
+      ...layout.stickyStyle(colIdx, { rowBg: ctx.rowExpiring ? 'hsl(0,70%,97%)' : 'var(--surface-base)' }),
+    };
+    switch (key) {
+      case 'sr':
+        return <td key={key} style={{ ...tdBase, color: 'var(--text-tertiary)', fontWeight: 500 }}>{ctx.index + 1}</td>;
+      case 'photo':
+        return (
+          <td key={key} style={tdBase}>
+            <div style={{ width: 34, height: 34, borderRadius: 8, overflow: 'hidden', background: 'hsla(152,60%,40%,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              {p.imageUrl
+                ? <img src={p.imageUrl} alt={p.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                : <Package size={15} color="var(--primary-light)" />}
+            </div>
+          </td>
+        );
+      case 'batchNumber':
+        return (
+          <td key={key} style={{ ...tdBase, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
+            {p.batchNumber || '—'}
+            {ctx.rowExpiring && (
+              <div style={{ fontSize: '0.68rem', color: '#ef4444', fontWeight: 600, marginTop: '0.1rem' }}>
+                Exp {fmtDate(p.expiryDate)}
+              </div>
+            )}
+          </td>
+        );
+      case 'name':
+        // Wrap long product names so they're fully readable within the column
+        // (overrides tdBase's ellipsis/nowrap for this cell only).
+        return (
+          <td key={key} style={{ ...tdBase, whiteSpace: 'normal', overflow: 'visible', textOverflow: 'clip' }}>
+            <div style={{ fontWeight: 600, color: 'var(--text-primary)', whiteSpace: 'normal', wordBreak: 'break-word' }}>{p.name}</div>
+            {p.productNumber && <div style={{ fontSize: '0.72rem', color: 'var(--text-tertiary)' }}>{p.productNumber}</div>}
+          </td>
+        );
+      case 'category':
+        return <td key={key} style={{ ...tdBase, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>{p.type || '—'}</td>;
+      case 'mfg':
+        return <td key={key} style={{ ...tdBase, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>{p.mfgCompany || '—'}</td>;
+      case 'size':
+        return <td key={key} style={{ ...tdBase, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>{p.unitSize ?? '—'}</td>;
+      case 'unit':
+        return <td key={key} style={{ ...tdBase, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>{p.unitMeasure || p.baseUnit || '—'}</td>;
+      case 'gst':
+        return <td key={key} style={{ ...tdBase, color: 'var(--text-secondary)' }}>{p.gstPct ?? 0}%</td>;
+      case 'mrp':
+        return <td key={key} style={{ ...tdBase, fontWeight: 600, whiteSpace: 'nowrap' }}>₹{(p.maxRetailPrice || 0).toFixed(2)}</td>;
+      case 'purchase':
+        return <td key={key} style={{ ...tdBase, color: 'var(--text-tertiary)', whiteSpace: 'nowrap' }}>₹{(p.purchasePrice || 0).toFixed(2)}</td>;
+      case 'retail':
+        return <td key={key} style={{ ...tdBase, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>₹{(p.retailerPrice || 0).toFixed(2)}</td>;
+      case 'sales':
+        return <td key={key} style={{ ...tdBase, whiteSpace: 'nowrap' }}>₹{(p.sellingPrice || 0).toFixed(2)}</td>;
+      case 'stock':
+        return (
+          <td key={key} style={{ ...tdBase, whiteSpace: 'nowrap' }}>
+            <span style={{ fontWeight: 700, color: ctx.isLow ? '#ef4444' : 'var(--text-primary)' }}>{ctx.stock}</span>
+            {ctx.isLow && (
+              <span style={{ marginLeft: '0.35rem', fontSize: '0.65rem', padding: '0.1rem 0.35rem', borderRadius: '999px', background: 'hsla(0,84%,60%,0.12)', color: '#ef4444', fontWeight: 700 }}>LOW</span>
+            )}
+          </td>
+        );
+      case 'actions':
+        return (
+          <td key={key} style={tdBase}>
+            <div style={{ display: 'flex', gap: '0.4rem' }}>
+              {canEditProduct && (
+                <button onClick={() => handleOpenModal(p)} className="btn btn-secondary" style={{ padding: '0.35rem' }}><Edit2 size={13} /></button>
+              )}
+              {canDelete && (
+                <button onClick={() => handleDelete(p.id)} className="btn" style={{ padding: '0.35rem', background: 'hsla(0,84%,60%,0.08)', color: '#ef4444', border: '1px solid hsla(0,84%,60%,0.2)' }}><Trash2 size={13} /></button>
+              )}
+            </div>
+          </td>
+        );
+      default: return <td key={key} style={tdBase} />;
+    }
+  };
 
   return (
-    <div className="animate-fade-in" style={{ maxWidth: '1600px', margin: '0 auto' }}>
+    <div className="animate-fade-in" style={{ width: '100%' }}>
 
       {/* Header */}
       <div style={{ marginBottom: '1.5rem', display: 'flex', flexWrap: 'wrap', gap: '1rem', justifyContent: 'space-between', alignItems: 'flex-start' }}>
@@ -617,169 +998,120 @@ export default function RateSheetPage() {
           </p>
         </div>
         <div style={{ display: 'flex', gap: '0.65rem', flexWrap: 'wrap' }}>
-          <button onClick={handleExport} className="btn btn-secondary" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem' }}>
-            <FileDown size={15} /> Export CSV
-          </button>
-          {canManage && (
-            <>
-              <input type="file" accept=".csv" ref={fileInputRef} style={{ display: 'none' }} onChange={handleFileUpload} />
-              <button onClick={handleDownloadTemplate} className="btn btn-secondary" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem' }}>
-                <Download size={15} /> CSV Template
-              </button>
-              <button onClick={() => fileInputRef.current?.click()} className="btn btn-secondary" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem' }}>
-                <FileSpreadsheet size={15} /> Upload CSV
-              </button>
-              <button onClick={() => handleOpenModal()} className="btn btn-primary" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                <Plus size={16} /> Add Product
-              </button>
-            </>
+          {canExportCsv && (
+            <button onClick={handleExport} className="btn btn-secondary" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem' }}>
+              <FileDown size={15} /> Export CSV
+            </button>
+          )}
+          {canUploadCsv && (
+            <input type="file" accept=".csv" ref={fileInputRef} style={{ display: 'none' }} onChange={handleFileUpload} />
+          )}
+          {canCsvTemplate && (
+            <button onClick={handleDownloadTemplate} className="btn btn-secondary" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem' }}>
+              <Download size={15} /> CSV Template
+            </button>
+          )}
+          {canUploadCsv && (
+            <button onClick={() => fileInputRef.current?.click()} className="btn btn-secondary" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem' }}>
+              <FileSpreadsheet size={15} /> Upload CSV
+            </button>
+          )}
+          {canAddProduct && (
+            <button onClick={() => handleOpenModal()} className="btn btn-primary" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+              <Plus size={16} /> Add Product
+            </button>
           )}
         </div>
       </div>
 
-      {/* Search */}
-      <div style={{ position: 'relative', marginBottom: '1.25rem' }}>
-        <Search size={18} style={{ position: 'absolute', left: '1rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-tertiary)' }} />
-        <input
-          className="input-field"
-          placeholder={`Search by name, SKU, manufacturer, category… (${visibleProducts.length} of ${products.length} products)`}
-          value={searchTerm}
-          onChange={e => setSearchTerm(e.target.value)}
-          style={{ paddingLeft: '2.75rem', paddingRight: '2.5rem', margin: 0, height: '48px', fontSize: '0.95rem', width: '100%', boxSizing: 'border-box' }}
-        />
-        {searchTerm && (
-          <button onClick={() => setSearchTerm('')} style={{ position: 'absolute', right: '0.75rem', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)' }}>
-            <X size={16} />
-          </button>
+      {/* Table customization hint. Product search now lives in the Product Name
+          column header (ColumnTextFilter), so the old top search bar was removed. */}
+      <div style={{ display: 'flex', gap: '0.8rem', alignItems: 'center', marginBottom: '0.6rem', fontSize: '0.72rem', color: 'var(--text-tertiary)', flexWrap: 'wrap' }}>
+        <span style={{ fontWeight: 600, color: 'var(--text-secondary)' }}>{visibleProducts.length} of {products.length} products</span>
+        <span>Search products in the Product Name column.</span>
+        <span>Drag column headers to reorder.</span>
+        <span>Drag column edges to resize.</span>
+        <span>Right-click a header to freeze or reset.</span>
+        {layout.freezeCount > 0 && (
+          <span style={{ marginLeft: 'auto', color: 'var(--primary)', fontWeight: 600 }}>
+            Frozen up to “{PM_LABELS[layout.colOrder[layout.freezeCount - 1]]}”
+          </span>
         )}
       </div>
 
+      {/* Full-screen capture div during column resize — prevents cursor flicker */}
+      {layout.isResizing && <div style={{ position: 'fixed', inset: 0, zIndex: 9999, cursor: 'col-resize' }} />}
+
+      {/* Right-click column context menu (freeze / reset widths / reset order) */}
+      {layout.ContextMenu()}
+
       {/* Table */}
-      <div className="glass-panel" style={{ overflowX: 'auto' }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.875rem' }}>
-          <thead>
-            <tr style={{ borderBottom: '2px solid var(--surface-border)', color: 'var(--text-secondary)' }}>
-              {['#', 'Photo', 'Batch No.', 'Product Name', 'Category', 'Manufacturer', 'Size', 'Unit', 'GST %', 'MRP', ...(canSeeCost ? ['Purch Rate'] : []), 'Retail Price', 'Sales Rate', 'Stock', 'Batches', ...(canManage ? ['Actions'] : [])].map(h => (
-                <th key={h} style={{ padding: '0.7rem 0.85rem', fontWeight: 600, textAlign: ['MRP', 'Purch Rate', 'Retail Price', 'Sales Rate', 'Stock'].includes(h) ? 'right' : 'left', whiteSpace: 'nowrap' }}>{h}</th>
+      <div className="glass-panel" style={{ overflow: 'hidden' }}>
+        <div style={{ overflowX: 'auto', maxHeight: '72vh', overflowY: 'auto' }} onContextMenu={layout.handleTableContextMenu}>
+          <table style={{ width: layout.totalTableWidth, tableLayout: 'fixed', borderCollapse: 'collapse', fontSize: '0.875rem' }}>
+            <colgroup>
+              {layout.colOrder.map(key => (
+                <col key={key} ref={layout.registerColEl(key)} style={{ width: layout.colWidths[key] }} />
               ))}
-            </tr>
-          </thead>
-          <tbody>
-            {visibleProducts.map((p, i) => {
-              const bs = batchSummaries.get(p.id);
-              const stock = bs?.totalQty ?? totalStock(p);
-              const isLow = stock < LOW_STOCK;
-              const soonestExpiry = bs?.soonest;
-              const expDays = soonestExpiry ? daysUntil(soonestExpiry) : 999;
-              const isExpired = expDays < 0;
-              const isExpiring = expDays >= 0 && expDays <= EXPIRY_WARN_DAYS;
-
-              // Product-level expiry (from the Add/Edit Product form) — distinct
-              // from `bs`/batchSummaries above, which comes from the separate
-              // Inventory Batches collection. Drives the whole-row warning only;
-              // does not touch or duplicate the existing per-batch expiry pill.
-              // Already-expired dates are treated the same as "expiring soon"
-              // here (both surfaced as the row warning) rather than as a
-              // separate visual state, so there's one consistent red signal.
-              const productExpDays = p.expiryDate ? daysUntil(p.expiryDate) : null;
-              const rowExpiring = productExpDays !== null && productExpDays <= EXPIRY_WARN_DAYS;
-
-              return (
-                <tr
-                  key={p.id}
-                  style={{
-                    borderBottom: '1px solid var(--surface-border)',
-                    transition: 'background 0.15s',
-                    background: rowExpiring ? 'hsla(0,84%,60%,0.08)' : undefined,
-                  }}
-                  onMouseOver={e => (e.currentTarget.style.background = rowExpiring ? 'hsla(0,84%,60%,0.14)' : 'var(--surface-raised)')}
-                  onMouseOut={e => (e.currentTarget.style.background = rowExpiring ? 'hsla(0,84%,60%,0.08)' : 'transparent')}
-                >
-                  <td style={{ padding: '0.65rem 0.85rem', color: 'var(--text-tertiary)', fontWeight: 500 }}>{i + 1}</td>
-                  <td style={{ padding: '0.65rem 0.85rem' }}>
-                    <div style={{ width: 34, height: 34, borderRadius: 8, overflow: 'hidden', background: 'hsla(152,60%,40%,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                      {p.imageUrl
-                        ? <img src={p.imageUrl} alt={p.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                        : <Package size={15} color="var(--primary-light)" />}
-                    </div>
-                  </td>
-                  <td style={{ padding: '0.65rem 0.85rem', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
-                    {p.batchNumber || '—'}
-                    {rowExpiring && (
-                      <div style={{ fontSize: '0.68rem', color: '#ef4444', fontWeight: 600, marginTop: '0.1rem' }}>
-                        Exp {fmtDate(p.expiryDate)}
-                      </div>
-                    )}
-                  </td>
-                  <td style={{ padding: '0.65rem 0.85rem' }}>
-                    <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{p.name}</div>
-                    {p.productNumber && <div style={{ fontSize: '0.72rem', color: 'var(--text-tertiary)' }}>{p.productNumber}</div>}
-                  </td>
-                  <td style={{ padding: '0.65rem 0.85rem', color: 'var(--text-secondary)' }}>{p.type || '—'}</td>
-                  <td style={{ padding: '0.65rem 0.85rem', color: 'var(--text-secondary)' }}>{p.mfgCompany || '—'}</td>
-                  <td style={{ padding: '0.65rem 0.85rem', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
-                    {p.unitSize ?? '—'}
-                  </td>
-                  <td style={{ padding: '0.65rem 0.85rem', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
-                    {p.unitMeasure || p.baseUnit || '—'}
-                  </td>
-                  <td style={{ padding: '0.65rem 0.85rem', color: 'var(--text-secondary)' }}>{p.gstPct ?? 0}%</td>
-                  <td style={{ padding: '0.65rem 0.85rem', textAlign: 'right', fontWeight: 600 }}>₹{(p.maxRetailPrice || 0).toFixed(2)}</td>
-                  {canSeeCost && (
-                    <td style={{ padding: '0.65rem 0.85rem', textAlign: 'right', color: 'var(--text-tertiary)' }}>₹{(p.purchasePrice || 0).toFixed(2)}</td>
-                  )}
-                  <td style={{ padding: '0.65rem 0.85rem', textAlign: 'right', color: 'var(--text-secondary)' }}>₹{(p.retailerPrice || 0).toFixed(2)}</td>
-                  <td style={{ padding: '0.65rem 0.85rem', textAlign: 'right' }}>₹{(p.sellingPrice || 0).toFixed(2)}</td>
-                  <td style={{ padding: '0.65rem 0.85rem', textAlign: 'right', whiteSpace: 'nowrap' }}>
-                    <span style={{ fontWeight: 700, color: isLow ? '#ef4444' : 'var(--text-primary)' }}>{stock}</span>
-                    {isLow && (
-                      <span style={{ marginLeft: '0.35rem', fontSize: '0.65rem', padding: '0.1rem 0.35rem', borderRadius: '999px', background: 'hsla(0,84%,60%,0.12)', color: '#ef4444', fontWeight: 700 }}>
-                        LOW
-                      </span>
-                    )}
-                  </td>
-                  <td style={{ padding: '0.65rem 0.85rem' }}>
-                    {bs ? (
-                      <span style={{ fontSize: '0.75rem', padding: '0.2rem 0.55rem', borderRadius: '999px', fontWeight: 600, background: isExpired ? 'hsla(0,84%,60%,0.12)' : isExpiring ? 'hsla(38,92%,50%,0.12)' : 'hsla(152,60%,40%,0.12)', color: isExpired ? '#ef4444' : isExpiring ? '#f59e0b' : 'var(--primary-light)' }}>
-                        {bs.count} batch{bs.count !== 1 ? 'es' : ''}
-                        {isExpired && ' · ⚠ expired'}
-                        {!isExpired && isExpiring && ` · exp ${fmtDate(soonestExpiry)}`}
-                      </span>
-                    ) : <span style={{ color: 'var(--text-tertiary)', fontSize: '0.78rem' }}>—</span>}
-                  </td>
-                  {canManage && (
-                    <td style={{ padding: '0.65rem 0.85rem' }}>
-                      <div style={{ display: 'flex', gap: '0.4rem' }}>
-                        <button onClick={() => handleOpenModal(p)} className="btn btn-secondary" style={{ padding: '0.35rem' }}><Edit2 size={13} /></button>
-                        {canDelete && (
-                          <button onClick={() => handleDelete(p.id)} className="btn" style={{ padding: '0.35rem', background: 'hsla(0,84%,60%,0.08)', color: '#ef4444', border: '1px solid hsla(0,84%,60%,0.2)' }}><Trash2 size={13} /></button>
-                        )}
-                      </div>
-                    </td>
-                  )}
-                </tr>
-              );
-            })}
-            {visibleProducts.length === 0 && (
-              <tr>
-                <td colSpan={20} style={{ padding: '3rem', textAlign: 'center', color: 'var(--text-secondary)' }}>
-                  <Package size={36} style={{ margin: '0 auto 0.75rem', opacity: 0.25, display: 'block' }} />
-                  {searchTerm ? `No products match "${searchTerm}".` : 'No products yet.'}
-                  {canManage && !searchTerm && (
-                    <button onClick={() => handleOpenModal()} className="btn btn-primary" style={{ marginTop: '1rem', display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}>
-                      <Plus size={15} /> Add First Product
-                    </button>
-                  )}
-                </td>
+            </colgroup>
+            <thead>
+              <tr style={{ borderBottom: '2px solid var(--surface-border)', color: 'var(--text-secondary)', background: 'var(--surface-base)' }}>
+                {layout.colOrder.map((key, colIdx) => renderHeaderTh(key, colIdx))}
               </tr>
-            )}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {visibleProducts.map((p, i) => {
+                // Stock rolls up the separate inventoryBatches collection when it
+                // has records for this product, else falls back to the product's
+                // own loose/box counts.
+                const stock = batchSummaries.get(p.id)?.totalQty ?? totalStock(p);
+                const isLow = stock < LOW_STOCK;
+
+                // Product-level expiry (from the Add/Edit Product form) drives the
+                // whole-row warning and the "Exp …" sub-line under Batch No.
+                const productExpDays = p.expiryDate ? daysUntil(p.expiryDate) : null;
+                const rowExpiring = productExpDays !== null && productExpDays <= EXPIRY_WARN_DAYS;
+
+                const ctx: RowCtx = { stock, isLow, rowExpiring, index: i };
+
+                return (
+                  <tr
+                    key={p.id}
+                    style={{
+                      borderBottom: '1px solid var(--surface-border)',
+                      background: rowExpiring ? 'hsla(0,84%,60%,0.08)' : undefined,
+                    }}
+                  >
+                    {layout.colOrder.map((key, colIdx) => renderBodyTd(key, colIdx, p, ctx))}
+                  </tr>
+                );
+              })}
+              {visibleProducts.length === 0 && (
+                <tr>
+                  <td colSpan={layout.colOrder.length} style={{ padding: '3rem', textAlign: 'center', color: 'var(--text-secondary)' }}>
+                    <Package size={36} style={{ margin: '0 auto 0.75rem', opacity: 0.25, display: 'block' }} />
+                    {searchTerm ? `No products match "${searchTerm}".` : anyColumnFilter ? 'No products match the active column filters.' : 'No products yet.'}
+                    {canAddProduct && !searchTerm && !anyColumnFilter && (
+                      <button onClick={() => handleOpenModal()} className="btn btn-primary" style={{ marginTop: '1rem', display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <Plus size={15} /> Add First Product
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       {/* Add/Edit Modal */}
       {isModalOpen && createPortal(
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, backdropFilter: 'blur(8px)', padding: '1rem' }}>
+        <>
+        <div
+          ref={overlayRef}
+          onMouseDown={e => { if (e.target === overlayRef.current) requestCloseModal(); }}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, backdropFilter: 'blur(8px)', padding: '1rem' }}
+        >
           <div className="glass-panel animate-scale-in" style={{ width: '95vw', maxWidth: '740px', maxHeight: '90vh', display: 'flex', flexDirection: 'column', overflow: 'hidden', boxShadow: 'var(--neon-glow)' }}>
 
             {/* Modal header */}
@@ -790,7 +1122,7 @@ export default function RateSheetPage() {
                   This record is shared across POS, B2B Invoice, and Purchase Invoices.
                 </p>
               </div>
-              <button onClick={handleCloseModal} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', display: 'flex' }}><X size={18} /></button>
+              <button onClick={requestCloseModal} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', display: 'flex' }}><X size={18} /></button>
             </div>
 
             {/* Dedup warning */}
@@ -957,7 +1289,34 @@ export default function RateSheetPage() {
               </button>
             </form>
           </div>
-        </div>,
+        </div>
+
+        {confirmModalDiscard && (
+          <div
+            style={{ position: 'fixed', inset: 0, zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem', background: 'hsla(220, 30%, 4%, 0.6)' }}
+            role="alertdialog"
+            aria-modal="true"
+            aria-label="Discard changes confirmation"
+          >
+            <div className="glass-panel" style={{ padding: '1.5rem', borderRadius: '14px', maxWidth: '380px', width: '100%' }}>
+              <h3 style={{ fontSize: '1.05rem', fontWeight: 700, marginBottom: '0.5rem' }}>Discard changes?</h3>
+              <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '1.25rem' }}>
+                You have unsaved changes. Are you sure you want to discard them?
+              </p>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem' }}>
+                <button className="btn btn-secondary" onClick={() => setConfirmModalDiscard(false)}>Keep Editing</button>
+                <button
+                  className="btn btn-primary"
+                  onClick={() => { setConfirmModalDiscard(false); handleCloseModal(); }}
+                  style={{ background: 'hsla(0,72%,51%,0.85)', borderColor: 'hsla(0,72%,51%,0.5)' }}
+                >
+                  Discard
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        </>,
         document.body,
       )}
     </div>

@@ -1,8 +1,17 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { getPublishedPosts } from "../lib/seo/blog-server";
 
 // Incremental Static Regeneration — cached at the edge, refreshed hourly.
 export const revalidate = 3600;
+
+// This page defined no metadata, so it inherited the root layout's canonical and
+// declared the homepage as its original — while the sitemap submitted /blog.
+// Google honours the tag over the sitemap, which is how a submitted URL ends up
+// reported as "Alternative page with proper canonical tag" and never indexed.
+export const metadata: Metadata = {
+  alternates: { canonical: "/blog" },
+};
 
 const SITE_URL =
   process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/$/, "") || "https://krishidukan.com";

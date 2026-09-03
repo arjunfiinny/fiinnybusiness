@@ -42,3 +42,16 @@ next-env.d.ts
 # Firebase CLI debug logs
 firebase-debug.log
 firebase-debug.*.log
+
+# Engineering wiki — deliberately NOT in this repository.
+# It documents live production internals, including an audit page with working
+# exploit chains, and the gate app hardcodes the wiki password. This repo is a
+# PUBLIC fork, so the wiki is kept local and published only to the
+# password-gated site (krishidukan-wiki.web.app).
+wiki/
+wiki-site/
+firebase.wiki.json
+
+# Firebase CLI debug log (repo root)
+firebase-debug.log
+firebase-debug.*.log

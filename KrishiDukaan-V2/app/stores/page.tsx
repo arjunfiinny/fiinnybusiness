@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import SellerPricingLine from "../../components/shared/seller-pricing-line";
 import { getStoreGeography, getAllStores } from "../lib/seo/stores-server";
 
 const SITE_URL =
@@ -127,8 +128,8 @@ export default async function StoresIndexPage() {
             Run an agricultural shop?
           </h2>
           <p className="mt-2 text-sm leading-relaxed text-on-surface-variant">
-            Add your store to this directory so farmers nearby can find you. 0%
-            commission on every sale — you pay ₹21 per product listing.
+            Add your store to this directory so farmers nearby can find you.{" "}
+            <SellerPricingLine />
           </p>
           <Link
             href="/sell"

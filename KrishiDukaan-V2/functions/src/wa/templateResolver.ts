@@ -88,6 +88,34 @@ export function resolveTemplateComponents(
         { type: "button", sub_type: "url", index: 0, parameters: [t(p("inviteCode"))] },
       ];
 
+    case "payment_failed_app_update":
+      // Marathi Utility template (Meta ID 2083284825612732).
+      // Body {{1}} = ownerName → businessName → shopName → "User"
+      // Buttons are static CTAs: "ॲप अपडेट करा" and "पुन्हा पेमेंट करा".
+      return [body(name())];
+
+    case "retailer_seat_promotion": {
+      // Manual admin campaign — never triggered automatically.
+      // Header: static IMAGE (must be passed explicitly — Meta requires it even for static headers).
+      // Body {{1}} = businessName → shopName → name → "Business"
+      // Button: static URL — no component needed.
+      // Image media ID: upload once via WhatsApp Media API; refresh if it expires (~30d unused).
+      // Stored in WA_SEAT_PROMO_HEADER_ID env var; falls back to the upload from 2026-09-02.
+      const headerImageId =
+        process.env.WA_SEAT_PROMO_HEADER_ID || "2252388985496002";
+      return [
+        { type: "header", parameters: [{ type: "image", image: { id: headerImageId } }] },
+        body(p("businessName") || p("shopName") || p("name") || "Business"),
+      ];
+    }
+
+    case "add_product_reminder":
+      // Manual admin campaign — never triggered automatically.
+      // Sent to active-subscribed retailers who have zero products.
+      // {{1}} = businessName → shopName → name → "Business"
+      // No buttons.
+      return [body(p("businessName") || p("shopName") || p("name") || "Business")];
+
     case "generic":
     default:
       // No template — caller must provide a plain-text message instead

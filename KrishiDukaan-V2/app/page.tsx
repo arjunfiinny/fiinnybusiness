@@ -24,7 +24,7 @@ import RetailerJoinView from './views/RetailerJoinView';
 import HelpView from './views/HelpView';
 import { fetchManufacturerProfile } from './dashboard/_lib/brand-page-firestore';
 import { motion, AnimatePresence } from 'framer-motion';
-import { auth, db, fetchMarketplaceProducts, fetchStores, syncInitialData, getUserProfile, fetchHubs, createOrdersFromCart, updateOrderPayment, trackPageView, requestRoleUpgrade } from './firebase';
+import { auth, db, fetchMarketplaceProducts, fetchStores, getUserProfile, fetchHubs, createOrdersFromCart, updateOrderPayment, trackPageView, requestRoleUpgrade } from './firebase';
 import { acceptManufacturerInvite } from './lib/invite/invite-acceptance-service';
 import { fetchInviteDetailsForSignup } from './lib/invite/fetch-invite-for-signup';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
@@ -520,12 +520,11 @@ export default function App() {
       let stores = await fetchStores();
       let fetchedHubs = await fetchHubs();
 
-      if (products.length === 0 || stores.length === 0 || fetchedHubs.length === 0) {
-        await syncInitialData(PRODUCTS, STORES, INVENTORY);
-        products = await fetchMarketplaceProducts();
-        stores = await fetchStores();
-        fetchedHubs = await fetchHubs();
-      }
+      // An empty read is NOT a reason to write. This used to call
+      // syncInitialData(PRODUCTS, STORES, INVENTORY), which had every visitor's
+      // browser seed the hardcoded demo catalogue into production Firestore --
+      // the likeliest source of the test shops in the live store locator. An
+      // empty result now renders as empty, which is the truth.
 
       setAllProducts(products);
       setAllStores(stores);

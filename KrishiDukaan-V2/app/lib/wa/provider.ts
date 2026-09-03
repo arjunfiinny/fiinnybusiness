@@ -17,8 +17,11 @@ export interface WaSendResult {
   waId: string;
 }
 
+export type WaTemplateComponent = Record<string, unknown>;
+
 export interface WaProvider {
   sendTextMessage(to: string, text: string): Promise<WaSendResult>;
+  sendTemplateMessage(to: string, templateName: string, languageCode: string, components?: WaTemplateComponent[]): Promise<WaSendResult>;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -40,6 +43,20 @@ function buildTextBody(to: string, text: string): Record<string, unknown> {
     to,
     type: "text",
     text: { preview_url: false, body: text },
+  };
+}
+
+function buildTemplateBody(to: string, templateName: string, languageCode: string, components?: WaTemplateComponent[]): Record<string, unknown> {
+  return {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to,
+    type: "template",
+    template: {
+      name: templateName,
+      language: { code: languageCode },
+      ...(components && components.length > 0 ? { components } : {}),
+    },
   };
 }
 
@@ -100,6 +117,17 @@ function getMockProvider(): WaProvider {
       console.log("[WA:mock] payload:\n" + JSON.stringify(payload, null, 2));
       return { metaMessageId: `mock-text-${Date.now()}`, waId: to };
     },
+    async sendTemplateMessage(phone, templateName, languageCode, components) {
+      const to = toE164(phone);
+      const payload = buildTemplateBody(to, templateName, languageCode, components);
+      console.log("[WA:mock] ── pre-send diagnostics ──────────────────────────");
+      console.log("[WA:mock]  provider      : mock (no API call will be made)");
+      console.log(`[WA:mock]  to            : ${to}`);
+      console.log(`[WA:mock]  template      : ${templateName} (${languageCode})`);
+      console.log("[WA:mock] ──────────────────────────────────────────────────");
+      console.log("[WA:mock] payload:\n" + JSON.stringify(payload, null, 2));
+      return { metaMessageId: `mock-tmpl-${Date.now()}`, waId: to };
+    },
   };
 }
 
@@ -145,6 +173,18 @@ function getTestProvider(): WaProvider {
 
       return graphPost(phoneNumberId, accessToken, buildTextBody(to, text), "test");
     },
+    async sendTemplateMessage(phone, templateName, languageCode, components) {
+      const { accessToken, phoneNumberId, verifiedRecipients } = getTestConfig();
+      const to = toE164(phone);
+
+      if (verifiedRecipients.size > 0 && !verifiedRecipients.has(to)) {
+        throw new Error(
+          `[WA:test] Recipient ${to} is not in WA_TEST_RECIPIENTS — add it to allow test sends`
+        );
+      }
+
+      return graphPost(phoneNumberId, accessToken, buildTemplateBody(to, templateName, languageCode, components), "test");
+    },
   };
 }
 
@@ -165,6 +205,10 @@ function getProductionProvider(): WaProvider {
     async sendTextMessage(phone, text) {
       const to = toE164(phone);
       return graphPost(phoneNumberId, accessToken, buildTextBody(to, text), "production");
+    },
+    async sendTemplateMessage(phone, templateName, languageCode, components) {
+      const to = toE164(phone);
+      return graphPost(phoneNumberId, accessToken, buildTemplateBody(to, templateName, languageCode, components), "production");
     },
   };
 }

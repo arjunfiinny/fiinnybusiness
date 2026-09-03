@@ -93,7 +93,9 @@ export default function DispatchBoardPage() {
         if (!tenantId) return;
         setMovingId(order.id);
         try {
-            await updateDoc(getTenantDoc(db, tenantId, 'salesOrders', order.id), { status: newStatus, updatedAt: serverTimestamp() });
+            const fields: Record<string, unknown> = { status: newStatus, updatedAt: serverTimestamp() };
+            if (newStatus === 'delivered') fields.manuallyUnlocked = false;
+            await updateDoc(getTenantDoc(db, tenantId, 'salesOrders', order.id), fields);
             showToast(`Moved to ${TABS.find(t => t.id === newStatus)?.label ?? newStatus}`, 'success');
             // No manual refetch needed — onSnapshot fires automatically for admins.
         } catch { showToast('Failed to update status', 'error'); }
@@ -134,7 +136,7 @@ export default function DispatchBoardPage() {
     }
 
     return (
-        <div className="animate-fade-in" style={{ maxWidth: '1100px', margin: '0 auto' }}>
+        <div className="animate-fade-in" style={{ width: '100%' }}>
             {addTransporterOpen && <AddTransporterModal onClose={() => setAddTransporterOpen(false)} />}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '1.5rem', flexWrap: 'wrap', gap: '1rem' }}>
                 <div>

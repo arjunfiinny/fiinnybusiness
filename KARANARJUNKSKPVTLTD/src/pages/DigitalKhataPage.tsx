@@ -10,8 +10,9 @@ import { useAuth } from '../contexts/AuthContext';
 import { softDelete } from '../utils/softDelete';
 import { getTenantCollection, getTenantDoc } from '../utils/tenantPath';
 import { useToast } from '../contexts/ToastContext';
+import { resolveDateRange } from '../utils/dateRanges';
 import {
-    BookOpen, Search, IndianRupee, Clock, CheckCircle2, AlertCircle, Phone, User, Calendar, ArrowUpRight,
+    BookOpen, Search, IndianRupee, AlertCircle, Phone, User, Calendar, ArrowUpRight,
     ArrowLeft, FileText, Printer, Pencil, Plus, Receipt, X, Trash2, Wallet, AlertTriangle, Ban,
     Download, ChevronUp, ChevronDown,
 } from 'lucide-react';
@@ -111,12 +112,23 @@ function SuggestionItem({
     );
 }
 
-export default function DigitalKhataPage() {
+// `fullWidth` is set when this page is embedded as a POS sub-tab, where it
+// should span the full-width POS layout instead of the standalone /digital-khata
+// route's centered 1100px column. Defaults false so the standalone route is
+// unchanged.
+export default function DigitalKhataPage({ fullWidth = false }: { fullWidth?: boolean } = {}) {
     const { tenantId, currentUser, userName, userRole } = useAuth();
     const [entries, setEntries] = useState<KhataEntry[]>([]);
     const [loading, setLoading] = useState(true);
     const [search, setSearch] = useState('');
     const [tab, setTab] = useState<FilterTab>('all');
+    // Date filter — scoped to the customer-list toolbar only (does not touch
+    // exportPendingCustomers, which intentionally always exports every
+    // pending/partial customer regardless of the toolbar filters).
+    type DateFilterKey = 'all' | 'today' | 'yesterday' | 'last7' | 'last30' | 'custom';
+    const [dateFilter, setDateFilter] = useState<DateFilterKey>('all');
+    const [customFrom, setCustomFrom] = useState('');
+    const [customTo, setCustomTo] = useState('');
     type SortCol = 'name' | 'outstanding' | 'total' | 'paid' | 'lastTs';
     // Default to most-recent-first: the rows people need are the ones just
     // billed, not the largest balances. Both columns stay sortable.
@@ -562,16 +574,6 @@ export default function DigitalKhataPage() {
         return () => document.removeEventListener('mousedown', handler);
     }, [nameSuggestions.length, phoneSuggestions.length]);
 
-    // KPIs — now counted per customer, not per bill.
-    const kpi = useMemo(() => {
-        const totalOutstanding = customers.reduce((s, c) => s + c.outstanding, 0);
-        const totalPending = customers.filter(c => c.status === 'pending').length;
-        const totalPartial = customers.filter(c => c.status === 'partial').length;
-        const totalCollected = customers.filter(c => c.status === 'paid').length;
-        const grossKhata = customers.reduce((s, c) => s + c.total, 0);
-        return { totalOutstanding, totalPending, totalPartial, totalCollected, grossKhata };
-    }, [customers]);
-
     // Filtered customer list
     const filtered = useMemo(() => {
         let list = customers;
@@ -585,8 +587,24 @@ export default function DigitalKhataPage() {
                 c.bills.some(b => billNo(b).toLowerCase().includes(q))
             );
         }
+        // Filters on lastTs — the same "Last Bill" timestamp already shown in
+        // the customer-list column, so this uses the one authoritative date
+        // the page already computes rather than introducing a second source.
+        if (dateFilter !== 'all') {
+            let range: { start: Date | null; end: Date };
+            if (dateFilter === 'last30') {
+                const from = new Date(); from.setDate(from.getDate() - 29); from.setHours(0, 0, 0, 0);
+                const to = new Date(); to.setHours(23, 59, 59, 999);
+                range = { start: from, end: to };
+            } else if (dateFilter === 'custom') {
+                range = resolveDateRange('customRange', undefined, customFrom, customTo);
+            } else {
+                range = resolveDateRange(dateFilter === 'last7' ? 'last7days' : dateFilter);
+            }
+            list = list.filter(c => (!range.start || c.lastTs >= range.start) && c.lastTs <= range.end);
+        }
         return list;
-    }, [customers, tab, search]);
+    }, [customers, tab, search, dateFilter, customFrom, customTo]);
 
     const sorted = useMemo(() => {
         const mult = sortDir === 'asc' ? 1 : -1;
@@ -987,19 +1005,6 @@ export default function DigitalKhataPage() {
         </>
     );
 
-    const tabStyle = (t: FilterTab) => ({
-        padding: '0.45rem 1.2rem',
-        borderRadius: '20px',
-        border: `1px solid ${tab === t ? 'var(--primary-light)' : 'var(--surface-border)'}`,
-        background: tab === t ? 'var(--primary-light)' : 'transparent',
-        color: tab === t ? '#fff' : 'var(--text-secondary)',
-        fontWeight: 600,
-        fontSize: '0.82rem',
-        cursor: 'pointer',
-        fontFamily: 'inherit',
-        transition: 'all 0.15s',
-    });
-
     const statusBadge = (status: string) => {
         const map: Record<string, { bg: string; color: string; label: string }> = {
             pending: { bg: '#ef444422', color: '#ef4444', label: 'Pending' },
@@ -1027,7 +1032,7 @@ export default function DigitalKhataPage() {
     if (selected) {
         const cellStyle: React.CSSProperties = { padding: '0.85rem 1rem', whiteSpace: 'nowrap' };
         return (
-            <div className="animate-fade-in" style={{ maxWidth: '1100px', margin: '0 auto' }}>
+            <div className="animate-fade-in" style={{ maxWidth: fullWidth ? 'none' : '1100px', margin: '0 auto' }}>
                 <button onClick={() => setSelectedKey(null)} className="btn btn-secondary"
                     style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1.25rem', fontSize: '0.875rem', padding: '0.5rem 1rem' }}>
                     <ArrowLeft size={16} /> Back to Khata
@@ -1159,7 +1164,7 @@ export default function DigitalKhataPage() {
     }
 
     return (
-        <div className="animate-fade-in" style={{ maxWidth: '1100px', margin: '0 auto' }}>
+        <div className="animate-fade-in" style={{ maxWidth: fullWidth ? 'none' : '1100px', margin: '0 auto' }}>
 
             {/* Header */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '2rem', flexWrap: 'wrap', gap: '1rem' }}>
@@ -1178,45 +1183,52 @@ export default function DigitalKhataPage() {
                 </button>
             </div>
 
-            {/* KPI Cards */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '1rem', marginBottom: '2rem' }}>
-                {[
-                    { label: 'Total Outstanding', value: fmtINR(kpi.totalOutstanding), icon: AlertCircle, border: '#ef4444', bg: 'rgba(239,68,68,0.07)' },
-                    { label: 'Pending Customers', value: String(kpi.totalPending), icon: Clock, border: '#f59e0b', bg: 'rgba(245,158,11,0.07)' },
-                    { label: 'Partial Customers', value: String(kpi.totalPartial), icon: IndianRupee, border: '#8b5cf6', bg: 'rgba(139,92,246,0.07)' },
-                    { label: 'Cleared Customers', value: String(kpi.totalCollected), icon: CheckCircle2, border: '#10b981', bg: 'rgba(16,185,129,0.07)' },
-                    { label: 'Gross Khata', value: fmtINR(kpi.grossKhata), icon: BookOpen, border: '#38bdf8', bg: 'rgba(56,189,248,0.07)' },
-                ].map(c => (
-                    <div key={c.label} className="glass-panel" style={{ padding: '1.1rem 1.25rem', borderLeft: `4px solid ${c.border}`, background: c.bg, overflow: 'hidden' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                            <div>
-                                <p style={{ color: 'var(--text-secondary)', fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '0.25rem' }}>{c.label}</p>
-                                <h2 style={{ margin: 0, fontSize: 'clamp(1rem, 2vw, 1.4rem)', fontWeight: 800, color: c.border }}>{c.value}</h2>
-                            </div>
-                            <div style={{ background: `${c.border}22`, borderRadius: '10px', padding: '0.55rem' }}>
-                                <c.icon size={18} color={c.border} />
-                            </div>
-                        </div>
-                    </div>
-                ))}
-            </div>
-
             {/* Filters */}
-            <div className="glass-panel" style={{ padding: '1rem 1.25rem', marginBottom: '1.5rem', display: 'flex', gap: '1rem', alignItems: 'center', flexWrap: 'wrap' }}>
-                {/* Tab pills */}
-                <div style={{ display: 'flex', gap: '0.4rem' }}>
-                    <button style={tabStyle('pending')} onClick={() => setTab('pending')}>⏳ Pending</button>
-                    <button style={tabStyle('partial')} onClick={() => setTab('partial')}>🔶 Partial</button>
-                    <button style={tabStyle('all')} onClick={() => setTab('all')}>📋 All</button>
-                </div>
+            <div className="glass-panel" style={{ padding: '1rem 1.25rem', marginBottom: '1.5rem', display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                {/* Status */}
+                <select
+                    value={tab}
+                    onChange={e => setTab(e.target.value as FilterTab)}
+                    className="input-field"
+                    style={{ margin: 0, height: '38px', width: '150px', flexShrink: 0, cursor: 'pointer', padding: '0.4rem 0.6rem' }}
+                >
+                    <option value="pending">Pending</option>
+                    <option value="partial">Partial</option>
+                    <option value="all">All</option>
+                </select>
+
+                {/* Date Range */}
+                <select
+                    value={dateFilter}
+                    onChange={e => setDateFilter(e.target.value as DateFilterKey)}
+                    className="input-field"
+                    style={{ margin: 0, height: '38px', width: '170px', flexShrink: 0, cursor: 'pointer', padding: '0.4rem 0.6rem' }}
+                >
+                    <option value="all">All Time</option>
+                    <option value="today">Today</option>
+                    <option value="yesterday">Yesterday</option>
+                    <option value="last7">Last 7 Days</option>
+                    <option value="last30">Last 30 Days</option>
+                    <option value="custom">Custom Range</option>
+                </select>
+                {dateFilter === 'custom' && (
+                    <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+                        <input type="date" className="input-field" style={{ margin: 0, height: '38px', width: '150px' }}
+                            value={customFrom} onChange={e => setCustomFrom(e.target.value)} />
+                        <span style={{ color: 'var(--text-tertiary)', fontSize: '0.8rem' }}>–</span>
+                        <input type="date" className="input-field" style={{ margin: 0, height: '38px', width: '150px' }}
+                            value={customTo} onChange={e => setCustomTo(e.target.value)} />
+                    </div>
+                )}
+
                 {/* Search */}
-                <div style={{ flex: '1 1 260px', position: 'relative' }}>
+                <div style={{ flex: '1 1 260px', maxWidth: '480px', position: 'relative' }}>
                     <Search size={16} style={{ position: 'absolute', left: '0.85rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-tertiary)' }} />
                     <input
                         type="text"
-                        placeholder="Search by customer name, phone or bill no."
+                        placeholder="Search customer, phone or bill no."
                         className="input-field"
-                        style={{ paddingLeft: '2.2rem', margin: 0, height: '38px' }}
+                        style={{ paddingLeft: '2.2rem', margin: 0, height: '38px', width: '100%' }}
                         value={search}
                         onChange={e => setSearch(e.target.value)}
                     />
@@ -1225,11 +1237,11 @@ export default function DigitalKhataPage() {
                 <button
                     onClick={exportPendingCustomers}
                     title="Export pending & partial customers to Excel"
-                    style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.45rem 1rem', borderRadius: '20px', border: '1px solid #ef4444', background: 'rgba(239,68,68,0.08)', color: '#ef4444', fontWeight: 600, fontSize: '0.82rem', cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap', transition: 'all 0.15s' }}
+                    style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', padding: '0.45rem 0.85rem', borderRadius: '20px', border: '1px solid #ef4444', background: 'rgba(239,68,68,0.08)', color: '#ef4444', fontWeight: 600, fontSize: '0.78rem', cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap', transition: 'all 0.15s' }}
                     onMouseOver={e => (e.currentTarget.style.background = 'rgba(239,68,68,0.18)')}
                     onMouseOut={e => (e.currentTarget.style.background = 'rgba(239,68,68,0.08)')}
                 >
-                    <Download size={14} /> Download Pending Customers
+                    <Download size={13} /> Download Pending Customers
                 </button>
             </div>
 
@@ -1262,6 +1274,27 @@ export default function DigitalKhataPage() {
                                             </th>
                                         );
                                     })}
+                                </tr>
+                                <tr style={{ borderBottom: '2px solid var(--surface-border)', background: 'var(--surface-raised)' }}>
+                                    <td style={{ padding: '0.6rem 1rem', fontWeight: 700, color: 'var(--text-secondary)', fontSize: '0.82rem', whiteSpace: 'nowrap' }}>
+                                        {filtered.length} customer{filtered.length !== 1 ? 's' : ''}
+                                    </td>
+                                    <td style={{ padding: '0.6rem 1rem', color: 'var(--text-tertiary)', fontWeight: 600 }}>—</td>
+                                    <td style={{ padding: '0.6rem 1rem', fontWeight: 700, color: 'var(--text-secondary)', fontSize: '0.82rem' }}>
+                                        {filtered.reduce((s, c) => s + c.bills.length, 0)}
+                                    </td>
+                                    <td style={{ padding: '0.6rem 1rem', color: 'var(--text-tertiary)', fontWeight: 600 }}>—</td>
+                                    <td style={{ padding: '0.6rem 1rem', fontWeight: 800, color: 'var(--text-primary)', whiteSpace: 'nowrap' }}>
+                                        {fmtINR(filtered.reduce((s, c) => s + c.total, 0))}
+                                    </td>
+                                    <td style={{ padding: '0.6rem 1rem', fontWeight: 800, color: '#10b981', whiteSpace: 'nowrap' }}>
+                                        {fmtINR(filtered.reduce((s, c) => s + c.paid, 0))}
+                                    </td>
+                                    <td style={{ padding: '0.6rem 1rem', fontWeight: 800, color: '#ef4444', whiteSpace: 'nowrap' }}>
+                                        {fmtINR(filtered.reduce((s, c) => s + c.outstanding, 0))}
+                                    </td>
+                                    <td style={{ padding: '0.6rem 1rem', color: 'var(--text-tertiary)', fontWeight: 600 }}>—</td>
+                                    <td style={{ padding: '0.6rem 1rem' }} />
                                 </tr>
                             </thead>
                             <tbody>

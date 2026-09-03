@@ -69,10 +69,9 @@ env:
 
   # ─── Cron ──────────────────────────────────────────────────────────────────
   - variable: CRON_SECRET
-    value: krishidukan-cron-2026
+    # Rotated value lives in Secret Manager, never in this file.
+    secret: CRON_SECRET
 
-  - variable: NEXT_PUBLIC_CRON_SECRET
-    value: krishidukan-cron-2026
 
   # ─── Firebase Admin SDK ────────────────────────────────────────────────────
   - variable: FIREBASE_PROJECT_ID

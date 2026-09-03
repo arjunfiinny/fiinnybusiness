@@ -47,6 +47,8 @@ export interface SeoStore {
   role: "retailer" | "manufacturer";
   /** Set only for manufacturers that already have a /brand/[slug] page. */
   brandSlug?: string;
+  /** Last write to the underlying record, for sitemap <lastmod>. */
+  updatedAtMs?: number;
 }
 
 export interface StoreProduct {
@@ -59,6 +61,29 @@ export interface StoreProduct {
 
 function str(v: unknown, fallback = ""): string {
   return v == null ? fallback : String(v);
+}
+
+/**
+ * Firestore Timestamp | Date | ISO string → epoch ms, or undefined.
+ *
+ * undefined rather than Date.now(): this feeds the sitemap's <lastmod>, and a
+ * record with no timestamp must produce no lastmod at all. Substituting "now"
+ * tells Google every page changed on every regeneration, which is how the
+ * signal stops being believed.
+ */
+function millis(v: unknown): number | undefined {
+  try {
+    const d = (v as { toDate?: () => Date })?.toDate?.();
+    if (d instanceof Date && !isNaN(d.getTime())) return d.getTime();
+    if (typeof v === "number" && isFinite(v)) return v;
+    if (v) {
+      const parsed = new Date(v as string);
+      if (!isNaN(parsed.getTime())) return parsed.getTime();
+    }
+  } catch {
+    /* ignore */
+  }
+  return undefined;
 }
 
 function num(v: unknown): number | undefined {
@@ -144,8 +169,10 @@ export function slugifyGeo(value: string): string {
  * shortId is the LAST 6 CHARS of the doc id rather than the whole thing,
  * because most doc ids here are phone numbers and a full phone number does not
  * belong in a URL (sitemaps, referrer headers, server logs). Six characters is
- * enough to disambiguate within a single city, and resolution always happens
- * against that city's already-loaded store list — see findStore().
+ * enough to disambiguate within a single city. Resolution is no longer scoped
+ * to a city, though — see resolveStore(), which matches across all stores so a
+ * shop that changed city keeps its old URL working, and breaks the rare
+ * six-character tie on the requested geography.
  */
 export function buildStoreSlug(name: string, id: string): string {
   const base = slugifyGeo(name).slice(0, 60);
@@ -174,6 +201,7 @@ type Raw = {
   lng?: number;
   logo?: string;
   role: "retailer" | "manufacturer";
+  updatedAtMs?: number;
   /** Richness score — higher wins when the same phone appears twice. */
   score: number;
 };
@@ -243,6 +271,7 @@ export async function getAllStores(): Promise<SeoStore[]> {
         id: d.id, phone, name, ownerName: str(data.ownerName) || undefined,
         line1, city, state, pincode, ...readGeo(data),
         logo: str(data.logo) || undefined, role: "manufacturer",
+        updatedAtMs: millis(data.updatedAt),
         score: 4 + (name ? 2 : 0),
       });
     }
@@ -264,6 +293,7 @@ export async function getAllStores(): Promise<SeoStore[]> {
         ownerName: str(data.ownerName) || undefined,
         line1, city, state, pincode, ...readGeo(data),
         logo: str(data.logo) || undefined, role: "retailer",
+        updatedAtMs: millis(data.updatedAt),
         score: (data.retailerId ? 3 : 0) + (data.userId ? 3 : 0) + 2,
       });
     }
@@ -283,6 +313,7 @@ export async function getAllStores(): Promise<SeoStore[]> {
         ownerName: str(data.ownerName) || undefined,
         line1, city, state, pincode, ...readGeo(data),
         logo: str(data.logo) || undefined, role,
+        updatedAtMs: millis(data.updatedAt),
         score: 4 + (name ? 2 : 0),
       });
     }
@@ -297,6 +328,7 @@ export async function getAllStores(): Promise<SeoStore[]> {
         id: d.id, phone: phoneOf(d.id, data), name,
         line1, city, state, pincode, ...readGeo(data),
         logo: str(data.logo) || undefined, role: "retailer",
+        updatedAtMs: millis(data.updatedAt),
         score: 1,
       });
     }
@@ -309,7 +341,15 @@ export async function getAllStores(): Promise<SeoStore[]> {
       const withGeo = entry.score + (entry.lat && entry.lng ? 1 : 0);
       const existingWithGeo =
         existing ? existing.score + (existing.lat && existing.lng ? 1 : 0) : -1;
-      if (!existing || withGeo > existingWithGeo) byKey.set(key, entry);
+      // The richest record wins the content, but the timestamp is the newest
+      // across every copy: a shop edited through one collection is a shop that
+      // changed, whichever record the merge happens to prefer.
+      const newest = Math.max(entry.updatedAtMs ?? 0, existing?.updatedAtMs ?? 0);
+      if (!existing || withGeo > existingWithGeo) {
+        byKey.set(key, { ...entry, updatedAtMs: newest || undefined });
+      } else if (newest && newest !== existing.updatedAtMs) {
+        byKey.set(key, { ...existing, updatedAtMs: newest });
+      }
     }
 
     _cache = Array.from(byKey.values())
@@ -327,6 +367,7 @@ export async function getAllStores(): Promise<SeoStore[]> {
         pincode: s.pincode, lat: s.lat, lng: s.lng, logo: s.logo,
         role: s.role,
         brandSlug: s.phone ? brandSlugByPhone.get(s.phone) : undefined,
+        updatedAtMs: s.updatedAtMs,
       }))
       .sort((a, b) => a.name.localeCompare(b.name));
 
@@ -345,6 +386,11 @@ export interface CityEntry {
   state: string;
   stateSlug: string;
   count: number;
+  /**
+   * Newest change among this city's stores — the city page IS its list of
+   * stores, so the page changed when the freshest of them did.
+   */
+  updatedAtMs?: number;
 }
 
 export interface StateEntry {
@@ -352,6 +398,8 @@ export interface StateEntry {
   stateSlug: string;
   count: number;
   cities: CityEntry[];
+  /** Newest change among this state's stores. */
+  updatedAtMs?: number;
 }
 
 /** State → city tree, built only from cities that actually contain stores. */
@@ -370,6 +418,9 @@ export async function getStoreGeography(): Promise<StateEntry[]> {
       states.set(stateSlug, st);
     }
     st.count += 1;
+    if (s.updatedAtMs && s.updatedAtMs > (st.updatedAtMs ?? 0)) {
+      st.updatedAtMs = s.updatedAtMs;
+    }
 
     let ct = st.cities.find((c) => c.citySlug === citySlug);
     if (!ct) {
@@ -377,6 +428,9 @@ export async function getStoreGeography(): Promise<StateEntry[]> {
       st.cities.push(ct);
     }
     ct.count += 1;
+    if (s.updatedAtMs && s.updatedAtMs > (ct.updatedAtMs ?? 0)) {
+      ct.updatedAtMs = s.updatedAtMs;
+    }
   }
 
   // Array.from rather than iterating the Map directly — this tsconfig targets
@@ -398,14 +452,69 @@ export async function getStoresInCity(
   );
 }
 
-export async function findStore(
+/**
+ * The canonical path for a store. The ONLY definition of that URL — the page,
+ * the sitemap and the internal links all call this, so a submitted URL and a
+ * canonical tag cannot drift apart by being written out twice.
+ */
+export function storeUrlPath(s: SeoStore): string {
+  return `/stores/${slugifyGeo(s.state)}/${slugifyGeo(s.city)}/${buildStoreSlug(
+    s.name,
+    s.id,
+  )}`;
+}
+
+export interface ResolvedStore {
+  store: SeoStore;
+  /** Where this store lives now, which may not be where it was asked for. */
+  canonicalPath: string;
+}
+
+/**
+ * Resolve a store from ANY url it has ever had, not just its current one.
+ *
+ * WHY THIS IS NOT A LOOKUP WITHIN THE CITY
+ * ----------------------------------------
+ * A store's URL encodes three mutable things: its state, its city and its name.
+ * The previous version fetched the stores in the requested city and matched on
+ * the short id within that list, so correcting a shop's city in Firestore moved
+ * its page and left the indexed URL returning 404 — 96 of them at the last
+ * count, every one a page Google had already ranked. Renaming a shop was
+ * survivable only by accident: the id still matched, so the old URL kept
+ * answering 200 and quietly became a duplicate of the new one.
+ *
+ * Matching on the short id across ALL stores makes both cases recoverable: the
+ * caller learns which store this is and where it now lives, and can redirect
+ * instead of 404ing or serving a duplicate.
+ *
+ * Short ids are the last six characters of a doc id, and most doc ids are phone
+ * numbers, so a collision is unlikely but not impossible. Where several stores
+ * share one, the requested geography breaks the tie; if it cannot, this returns
+ * null. Sending a visitor to a different shop than the one they asked for is
+ * worse than showing them a 404.
+ */
+export async function resolveStore(
   stateSlug: string,
   citySlug: string,
   storeSlug: string,
-): Promise<SeoStore | null> {
-  const inCity = await getStoresInCity(stateSlug, citySlug);
+): Promise<ResolvedStore | null> {
   const shortId = shortIdFromSlug(storeSlug);
-  return inCity.find((s) => s.id.slice(-6) === shortId) ?? null;
+  if (!shortId) return null;
+
+  const stores = await getAllStores();
+  const matches = stores.filter((s) => s.id.slice(-6) === shortId);
+  if (matches.length === 0) return null;
+
+  const store =
+    matches.length === 1
+      ? matches[0]!
+      : matches.find(
+          (s) =>
+            slugifyGeo(s.state) === stateSlug && slugifyGeo(s.city) === citySlug,
+        );
+  if (!store) return null;
+
+  return { store, canonicalPath: storeUrlPath(store) };
 }
 
 // ─── Products stocked by a store ────────────────────────────────────────────

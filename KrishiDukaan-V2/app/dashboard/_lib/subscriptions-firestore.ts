@@ -12,6 +12,7 @@ import {
   type WriteBatch,
 } from "firebase/firestore";
 import { db } from "../../firebase";
+import { authedJsonHeaders } from "../../lib/authed-fetch";
 import type {
   RetailerSeatListing,
   SeatStats,
@@ -156,7 +157,7 @@ export async function createSubscription(input: CreateSubscriptionInput): Promis
     if (userData?.email) {
       fetch("/api/email/subscription-confirmation", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await authedJsonHeaders(),
         body: JSON.stringify({
           userEmail: userData.email,
           userName: (userData.name as string) || "",

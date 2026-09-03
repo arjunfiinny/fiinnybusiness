@@ -1,12 +1,11 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import SellerPricingLine from "../../../../components/shared/seller-pricing-line";
 import { notFound } from "next/navigation";
 import {
   getStoresInCity,
   getStoreGeography,
-  buildStoreSlug,
-  slugifyGeo,
-  type SeoStore,
+  storeUrlPath,
 } from "../../../lib/seo/stores-server";
 
 const SITE_URL =
@@ -25,9 +24,6 @@ export async function generateStaticParams() {
     st.cities.map((c) => ({ state: st.stateSlug, city: c.citySlug })),
   );
 }
-
-const storeUrl = (s: SeoStore) =>
-  `/stores/${slugifyGeo(s.state)}/${slugifyGeo(s.city)}/${buildStoreSlug(s.name, s.id)}`;
 
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
   const { state, city } = await params;
@@ -91,7 +87,7 @@ export default async function CityStoresPage({ params }: PageProps) {
       item: {
         "@type": "Store",
         name: s.name,
-        url: `${SITE_URL}${storeUrl(s)}`,
+        url: `${SITE_URL}${storeUrlPath(s)}`,
         address: {
           "@type": "PostalAddress",
           ...(s.line1 ? { streetAddress: s.line1 } : {}),
@@ -166,7 +162,7 @@ export default async function CityStoresPage({ params }: PageProps) {
             {stores.map((s) => (
               <li key={s.id}>
                 <Link
-                  href={storeUrl(s)}
+                  href={storeUrlPath(s)}
                   className="flex h-full flex-col rounded-2xl border border-surface-container bg-white p-5 transition-colors hover:border-primary"
                 >
                   <span className="inline-block w-fit rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-black uppercase tracking-wide text-primary">
@@ -214,8 +210,8 @@ export default async function CityStoresPage({ params }: PageProps) {
             Run an agricultural shop in {cityName}?
           </h2>
           <p className="mt-2 text-sm leading-relaxed text-on-surface-variant">
-            Add your store so farmers searching in {cityName} can find you. 0%
-            commission on every sale — you pay ₹21 per product listing.
+            Add your store so farmers searching in {cityName} can find you.{" "}
+            <SellerPricingLine />
           </p>
           <Link
             href="/sell"

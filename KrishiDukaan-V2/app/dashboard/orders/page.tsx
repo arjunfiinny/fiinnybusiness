@@ -22,7 +22,7 @@ import {
 import { auth, fetchIncomingOrdersForSeller, updateOrderStatus } from "../../firebase";
 import { PageHeader } from "../_components/page-header";
 import { formatCustomerAddress, normalizeOrderItems } from "../../../types/order";
-import { ORDER_STATUS_FLOW, type OrderDoc, type OrderStatus, type PaymentInfo } from "../../../types/order";
+import { ORDER_STATUS_FLOW, type OrderDoc, type OrderStatus } from "../../../types/order";
 import { useI18n } from "../../i18n/I18nContext";
 import { openInvoice } from "../../utils/invoice-generator";
 
@@ -87,33 +87,39 @@ function formatDateStr(iso: string | undefined): string {
 /**
  * Payout breakdown for one order.
  *
- * KrishiDukan's commission is ₹0 by policy, so the only deduction between the
- * order total and the seller's money is the payment gateway's own fee. That
- * fee is not in the client-side payment payload — it appears on Razorpay's
- * payment entity after capture — so it is fetched once via /api/payment/fee
- * and cached onto the order doc. Orders that predate the fee capture, or whose
- * payment never captured, render an honest "—" rather than a guessed number.
+ * Two deductions sit between the order total and the seller's money: the
+ * KrishiDukan platform fee, and the payment gateway's own fee. Both come from
+ * /api/payment/fee — the platform fee derived there from settings/route (the
+ * document the payment split itself uses), the gateway fee read off Razorpay's
+ * payment entity after capture and cached onto the order doc, because it is not
+ * in the client-side payment payload.
+ *
+ * This panel used to hardcode a "KrishiDukan charge ₹0.00" row. Orders that
+ * predate the fee capture, or whose payment never captured, render an honest
+ * "—" rather than a guessed number — the same rule now applies to both rows.
  */
 function PayoutBreakdown({ order }: { order: OrderDoc }) {
   // undefined = still resolving, null = genuinely unavailable
   const [gatewayFee, setGatewayFee] = useState<number | null | undefined>(undefined);
-  const payment = order.payment as PaymentInfo | undefined;
+  const [platformFee, setPlatformFee] = useState<number | null | undefined>(undefined);
+  const payment = (order as any).payment as
+    | { razorpayPaymentId?: string; gatewayFee?: number }
+    | undefined;
   const gross = Number(order.grandTotal ?? order.subtotal ?? 0);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      if (typeof payment?.gatewayFee === "number") {
-        setGatewayFee(payment.gatewayFee);
-        return;
-      }
-      if (!payment?.razorpayPaymentId) {
-        setGatewayFee(null);
-        return;
-      }
+      // No early return on a cached or missing gateway fee any more: the
+      // platform fee is derived server-side from settings/route and has to be
+      // fetched regardless, including for an order whose payment never
+      // captured. The route answers both cases without hitting Razorpay.
       try {
         const token = await auth.currentUser?.getIdToken();
-        if (!token) { if (!cancelled) setGatewayFee(null); return; }
+        if (!token) {
+          if (!cancelled) { setGatewayFee(null); setPlatformFee(null); }
+          return;
+        }
         const res = await fetch("/api/payment/fee", {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
@@ -122,20 +128,26 @@ function PayoutBreakdown({ order }: { order: OrderDoc }) {
         const json = await res.json();
         if (cancelled) return;
         setGatewayFee(typeof json.gatewayFee === "number" ? json.gatewayFee : null);
+        setPlatformFee(typeof json.platformFee === "number" ? json.platformFee : null);
       } catch {
-        if (!cancelled) setGatewayFee(null);
+        if (!cancelled) {
+          setGatewayFee(null);
+          setPlatformFee(null);
+        }
       }
     })();
     return () => { cancelled = true; };
   }, [order.id, payment?.gatewayFee, payment?.razorpayPaymentId]);
 
-  // Read from the order, never assumed: an admin can record a KrishiDukan
-  // charge on an individual order, and showing a hardcoded ₹0.00 next to it
-  // would tell the seller they receive more than actually reaches their bank.
-  const platformFee = payment?.platformFee ?? 0;
-  const net = typeof gatewayFee === "number"
-    ? Math.max(0, gross - gatewayFee - platformFee)
-    : null;
+  // Net is shown only when BOTH deductions are known. Subtracting one of two
+  // known charges and calling the result "you receive" overstates the payout.
+  const net =
+    typeof gatewayFee === "number" && typeof platformFee === "number"
+      ? gross - gatewayFee - platformFee
+      : null;
+
+  const money = (v: number | null | undefined) =>
+    v === undefined ? "…" : v === null ? "—" : `− ₹${v.toFixed(2)}`;
 
   return (
     <div className="rounded-xl border border-surface-container bg-surface-container-lowest p-4">
@@ -148,20 +160,12 @@ function PayoutBreakdown({ order }: { order: OrderDoc }) {
           <span className="font-semibold text-on-surface">₹{gross.toFixed(2)}</span>
         </div>
         <div className="flex justify-between">
-          <span className="text-on-surface-variant">Payment gateway charge</span>
-          <span className="font-semibold text-on-surface">
-            {gatewayFee === undefined
-              ? "…"
-              : gatewayFee === null
-                ? "—"
-                : `− ₹${gatewayFee.toFixed(2)}`}
-          </span>
+          <span className="text-on-surface-variant">KrishiDukan platform fee</span>
+          <span className="font-semibold text-on-surface">{money(platformFee)}</span>
         </div>
         <div className="flex justify-between">
-          <span className="text-on-surface-variant">KrishiDukan charge</span>
-          <span className={platformFee > 0 ? "font-semibold text-on-surface" : "font-semibold text-green-700"}>
-            {platformFee > 0 ? `− ₹${platformFee.toFixed(2)}` : "₹0.00"}
-          </span>
+          <span className="text-on-surface-variant">Payment gateway charge</span>
+          <span className="font-semibold text-on-surface">{money(gatewayFee)}</span>
         </div>
         <div className="mt-1 flex justify-between border-t border-surface-container pt-2">
           <span className="font-bold text-on-surface">You receive</span>
@@ -173,7 +177,12 @@ function PayoutBreakdown({ order }: { order: OrderDoc }) {
       <p className="mt-2.5 text-[10px] text-on-surface-variant">
         {order.status === "delivered"
           ? "Transferred to your registered bank account."
-          : "Transferred to your bank account once you mark this order delivered."}
+          : "Transferred to your bank account once you mark this order delivered."}{" "}
+        Figures are before GST and other applicable taxes. See the{" "}
+        <a href="/seller-terms" className="font-semibold text-primary hover:underline">
+          Seller &amp; Manufacturer Subscription Terms
+        </a>
+        .
       </p>
     </div>
   );

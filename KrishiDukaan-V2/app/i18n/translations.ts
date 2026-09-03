@@ -263,6 +263,7 @@ export const translations = {
     footerPrivacy: 'Privacy',
     footerTerms: 'Terms',
     footerCookies: 'Cookies',
+    footerSellerTerms: 'Seller Terms',
 
     // Loading/Errors
     connectingFirebase: 'Loading...',
@@ -2111,6 +2112,7 @@ export const translations = {
     footerPrivacy: 'गोपनीयता',
     footerTerms: 'अटी',
     footerCookies: 'कुकीज',
+    footerSellerTerms: 'विक्रेता अटी',
 
     // Loading/Errors
     connectingFirebase: 'लोड होत आहे ...',
@@ -3960,6 +3962,7 @@ export const translations = {
     footerPrivacy: 'गोपनीयता',
     footerTerms: 'शर्तें',
     footerCookies: 'कुकीज़',
+    footerSellerTerms: 'विक्रेता शर्तें',
 
     // Loading/Errors
     connectingFirebase: 'Firebase से कनेक्ट हो रहा है...',

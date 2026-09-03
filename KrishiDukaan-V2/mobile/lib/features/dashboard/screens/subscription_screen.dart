@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:http/http.dart' as http;
+import 'package:url_launcher/url_launcher.dart';
 import '../../../core/payments/app_razorpay.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -18,8 +20,10 @@ import '../../../core/utils/currency_utils.dart';
 import '../../cart/data/payment_service.dart' show PaymentService;
 import '../providers/dashboard_provider.dart';
 
-// Server-side price per seat (matches API: PRICE_PER_SEAT in create-order/route.ts)
-const _pricePerSeat = {1: 21, 3: 54, 6: 90, 12: 144};
+/// Firestore document holding the live pricing ladder — the same one the web
+/// admin Pricing screen writes and `api/payment/create-order` charges from.
+const _pricingCollection = 'settings';
+const _pricingDoc = 'pricing';
 
 /// Seats are sold in blocks of this size, and this is also the minimum buy.
 /// Must stay in sync with SEAT_STEP in app/lib/pricing.ts, which
@@ -39,19 +43,150 @@ int _normalizeSeats(int raw) {
   return ((raw + _seatStep - 1) ~/ _seatStep) * _seatStep;
 }
 
-const _durations = [
-  _Duration(months: 1, label: '1 Month'),
-  _Duration(months: 3, label: '3 Months', badge: 'SAVE 14%'),
-  _Duration(months: 6, label: '6 Months', badge: 'SAVE 29%'),
-  _Duration(months: 12, label: '1 Year', badge: 'BEST VALUE'),
+/// The published legal documents a subscription is sold under.
+///
+/// Mirrors `app/lib/legal-constants.ts` on the web. Both checkouts must show and
+/// record the same thing — the whole point of the standard Seller &
+/// Manufacturer Subscription Terms is that there is one deal, not one per
+/// client. Keep [_termsVersion] in step with TERMS_VERSION over there.
+const _termsPath = '/terms';
+const _sellerTermsPath = '/seller-terms';
+const _termsVersion = '2026-08-26';
+
+/// Fallback ladder, used only when the settings doc is missing or unreadable.
+///
+/// These are the values that used to be hardcoded here, so a failed read
+/// behaves exactly like the old build rather than showing the seller nothing.
+/// Anything else — including every price change made in admin — comes from
+/// Firestore at runtime. This screen must never be the reason a price the
+/// seller sees differs from the amount Razorpay captures.
+const _defaultPlans = [
+  _Duration(months: 1, label: '1 Month', pricePerSeat: 21),
+  _Duration(months: 3, label: '3 Months', pricePerSeat: 54, badge: 'SAVE 14%'),
+  _Duration(months: 6, label: '6 Months', pricePerSeat: 90, badge: 'SAVE 29%'),
+  _Duration(months: 12, label: '1 Year', pricePerSeat: 144, badge: 'BEST VALUE'),
 ];
 
+String _durationLabel(int months) {
+  if (months == 12) return '1 Year';
+  if (months % 12 == 0) return '${months ~/ 12} Years';
+  return months == 1 ? '1 Month' : '$months Months';
+}
+
 class _Duration {
+  /// Ladder-unique key. A bundle and a per-listing rate can share a period, so
+  /// the period alone cannot identify a plan; this is what gets sent to
+  /// create-order as `planId`.
+  final String? id;
   final int months;
   final String label;
   final String? badge;
-  const _Duration({required this.months, required this.label, this.badge});
-  int totalPrice(int seats) => seats * (_pricePerSeat[months] ?? months * 21);
+  final int pricePerSeat;
+
+  /// Flat price for the whole period, overriding [pricePerSeat] when set.
+  final int? flatPrice;
+
+  /// Listings a flat plan includes. Seats above this are clamped, not billed.
+  final int? includedListings;
+
+  /// Account roles allowed to buy this plan. Empty means everyone.
+  final List<String> roles;
+
+  const _Duration({
+    required this.months,
+    required this.label,
+    required this.pricePerSeat,
+    this.id,
+    this.badge,
+    this.flatPrice,
+    this.includedListings,
+    this.roles = const [],
+  });
+
+  /// Mirror of isPlanAllowed() in app/lib/pricing.ts. The binding check is the
+  /// server-side one in create-order; this only decides what to display.
+  bool allowsRole(String? role) {
+    if (roles.isEmpty) return true;
+    final r = (role ?? '').trim().toLowerCase();
+    return r.isNotEmpty && roles.contains(r);
+  }
+
+  String get key => id ?? '$months';
+
+  bool get isFlat => flatPrice != null;
+
+  /// Seats actually granted. Mirrors billableSeats() in app/lib/pricing.ts.
+  int billableSeats(int seats) {
+    final n = seats < 1 ? 1 : seats;
+    if (flatPrice != null && includedListings != null) {
+      return n < includedListings! ? n : includedListings!;
+    }
+    return n;
+  }
+
+  /// Mirrors computeAmount() in app/lib/pricing.ts. Display only — the amount
+  /// actually recorded after payment comes back from verify/.
+  int totalPrice(int seats) =>
+      flatPrice ?? billableSeats(seats) * pricePerSeat;
+}
+
+/// Parse the settings/pricing document. Returns null (never a partial ladder)
+/// so callers fall back cleanly to [_defaultPlans].
+List<_Duration>? _parsePlans(Map<String, dynamic>? data) {
+  final raw = data?['durations'];
+  if (raw is! List || raw.isEmpty) return null;
+
+  final out = <_Duration>[];
+  final seen = <String>{};
+  for (final item in raw) {
+    if (item is! Map) return null;
+    final months = (item['months'] as num?)?.toInt();
+    final price = (item['pricePerSeat'] as num?)?.toInt();
+    if (months == null || months <= 0) return null;
+    if (price == null || price < 0) return null;
+
+    final flat = (item['flatPrice'] as num?)?.toInt();
+    final incl = (item['includedListings'] as num?)?.toInt();
+    // A flat price with no listing cap would sell unlimited listings for a flat
+    // fee. Reject the ladder rather than guess a cap.
+    if ((flat == null) != (incl == null)) return null;
+    if (flat != null && flat < 0) return null;
+    if (incl != null && incl <= 0) return null;
+
+    final rawId = item['id'];
+    final id = rawId is String && rawId.trim().isNotEmpty ? rawId.trim() : null;
+    final rawRoles = item['roles'];
+    var roles = const <String>[];
+    if (rawRoles != null) {
+      if (rawRoles is! List) return null;
+      final cleaned = rawRoles
+          .map((r) => (r ?? '').toString().trim().toLowerCase())
+          .where((r) => r.isNotEmpty)
+          .toSet()
+          .toList();
+      roles = cleaned;
+    }
+
+    final rawBadge = item['badge'];
+    final badge =
+        rawBadge is String && rawBadge.trim().isNotEmpty ? rawBadge.trim() : null;
+
+    final plan = _Duration(
+      id: id,
+      months: months,
+      label: _durationLabel(months),
+      pricePerSeat: price,
+      badge: badge,
+      flatPrice: flat,
+      includedListings: incl,
+      roles: roles,
+    );
+    if (!seen.add(plan.key)) return null;
+    out.add(plan);
+  }
+
+  out.sort((a, b) => a.months.compareTo(b.months));
+  return out;
 }
 
 class SubscriptionScreen extends ConsumerStatefulWidget {
@@ -80,7 +215,8 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
   late final AppRazorpay _razorpay;
   int _seats = _seatStep;
   late final TextEditingController _seatCtrl;
-  _Duration _duration = _durations[0];
+  List<_Duration> _plans = _defaultPlans;
+  _Duration _duration = _defaultPlans[0];
   bool _loading = false;
   String? _error;
   String? _razorpayOrderId;
@@ -105,12 +241,49 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
 
     final months = widget.initialMonths;
     if (months != null) {
-      for (final d in _durations) {
+      for (final d in _plans) {
         if (d.months == months) {
           _duration = d;
           break;
         }
       }
+    }
+
+    _loadPlans();
+  }
+
+  /// Pull the live ladder from settings/pricing.
+  ///
+  /// Prices used to be a const map in this file, so changing them in admin
+  /// updated what Razorpay charged while the app kept displaying — and
+  /// recording — the old number. Reading them at runtime is what keeps a price
+  /// change a config change instead of a store release.
+  Future<void> _loadPlans() async {
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection(_pricingCollection)
+          .doc(_pricingDoc)
+          .get();
+      final all = _parsePlans(snap.data());
+      if (all == null || all.isEmpty || !mounted) return;
+      // Don't show a plan checkout would refuse: create-order rejects a plan the
+      // account's role isn't allowed to buy.
+      final role = ref.read(currentUserProvider).value?.role;
+      final parsed = all.where((p) => p.allowsRole(role)).toList();
+      if (parsed.isEmpty) return;
+      setState(() {
+        _plans = parsed;
+        // Keep the selection valid if admin removed or renamed the chosen plan.
+        _duration = parsed.firstWhere(
+          (p) => p.key == _duration.key,
+          orElse: () => parsed.firstWhere(
+            (p) => p.months == _duration.months && !p.isFlat,
+            orElse: () => parsed.first,
+          ),
+        );
+      });
+    } catch (_) {
+      /* unreachable settings doc keeps the built-in ladder */
     }
   }
 
@@ -132,6 +305,26 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
     }
   }
 
+  /// What the seller was shown, and therefore accepted, by pressing Pay.
+  Map<String, dynamic> _termsAcceptanceRecord() => {
+        'version': _termsVersion,
+        'documents': [_termsPath, _sellerTermsPath],
+        'acceptedAt': DateTime.now().toUtc().toIso8601String(),
+        'surface': 'mobile:subscription-checkout',
+      };
+
+  Future<void> _openLegalDoc(String path) async {
+    final uri = Uri.parse('${AppConfig.apiBaseUrl}$path');
+    // An external browser, not an in-app webview: the seller should be able to
+    // read the terms without losing the checkout they are part-way through.
+    final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!opened && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not open ${uri.toString()}')),
+      );
+    }
+  }
+
   Future<void> _startPayment() async {
     final user = ref.read(currentUserProvider).value;
     if (user == null) return;
@@ -143,19 +336,38 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
 
     try {
       // Create Razorpay order server-side so amount is tamper-proof.
+      // The token is what the server resolves the buyer's role from — a
+      // role-restricted plan cannot be bought without it.
+      final idToken = await FirebaseAuth.instance.currentUser?.getIdToken();
       final res = await http
           .post(
             Uri.parse('${AppConfig.apiBaseUrl}/api/payment/create-order'),
-            headers: {'Content-Type': 'application/json'},
+            headers: {
+              'Content-Type': 'application/json',
+              if (idToken != null) 'Authorization': 'Bearer $idToken',
+            },
             body: jsonEncode({
               'seatCount': _seats,
               'durationMonths': _duration.months,
+              'planId': _duration.key,
               'userId': user.uid,
             }),
           )
           .timeout(const Duration(seconds: 15));
 
       if (res.statusCode != 200) {
+        // 403 is a deliberate refusal (e.g. a plan this account type may not
+        // buy) and carries a message worth showing verbatim.
+        String? serverMessage;
+        try {
+          serverMessage =
+              (jsonDecode(res.body) as Map<String, dynamic>)['error'] as String?;
+        } catch (_) {
+          /* non-JSON body */
+        }
+        if (serverMessage != null && serverMessage.isNotEmpty) {
+          throw Exception(serverMessage);
+        }
         throw Exception('Payment server error (${res.statusCode}). '
             'Check that RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET are set '
             'in your production environment.');
@@ -233,6 +445,7 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
         razorpayOrderId: response.orderId,
         razorpayPaymentId: response.paymentId,
         seatCount: verifiedSeatCount,
+        amountPaid: (verifyData['amountPaid'] as num?)?.toInt(),
       );
     } catch (e) {
       if (mounted) {
@@ -253,6 +466,7 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
     required String razorpayOrderId,
     required String razorpayPaymentId,
     required int seatCount,
+    int? amountPaid,
   }) async {
     final user = ref.read(currentUserProvider).value!;
     final firebaseUser = FirebaseAuth.instance.currentUser!;
@@ -278,8 +492,7 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
       ...roleUpdate,
     });
 
-    final pricePerSeat = _pricePerSeat[_duration.months] ?? 21;
-    final totalAmount = seatsToAdd * pricePerSeat;
+    final totalAmount = amountPaid ?? _duration.totalPrice(seatsToAdd);
 
     final now = DateTime.now();
     final expiry = DateTime.now().add(Duration(days: _duration.months * 30));
@@ -296,6 +509,7 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
       'razorpayPaymentId': razorpayPaymentId,
       'timestamp': FieldValue.serverTimestamp(),
       'status': 'success',
+      'termsAcceptance': _termsAcceptanceRecord(),
     });
 
     final subRef = FirebaseFirestore.instance.collection('subscriptions').doc();
@@ -315,6 +529,10 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
       'expiryDate': Timestamp.fromDate(expiry),
       'createdAt': FieldValue.serverTimestamp(),
       'updatedAt': FieldValue.serverTimestamp(),
+      // Which standard terms this subscription was sold under. Same shape the
+      // web checkout writes (app/firebase.ts TermsAcceptance), so a query
+      // across subscriptions does not have to care which client was used.
+      'termsAcceptance': _termsAcceptanceRecord(),
     });
 
     await batch.commit();
@@ -627,8 +845,8 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
           _SectionCard(
             title: 'Duration',
             child: Column(
-              children: _durations.map((d) {
-                final selected = _duration.months == d.months;
+              children: _plans.map((d) {
+                final selected = _duration.key == d.key;
                 return GestureDetector(
                   onTap: () => setState(() => _duration = d),
                   child: Container(
@@ -711,7 +929,9 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      '$_seats seat${_seats != 1 ? 's' : ''} × ${_duration.label}',
+                      _duration.isFlat
+                          ? 'Up to ${_duration.includedListings} listings × ${_duration.label}'
+                          : '$_seats seat${_seats != 1 ? 's' : ''} × ${_duration.label}',
                       style: AppTextStyles.bodySmall,
                     ),
                     Text(
@@ -723,7 +943,10 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    Text('₹${_pricePerSeat[_duration.months]}/seat',
+                    Text(
+                        _duration.isFlat
+                            ? 'bundle price'
+                            : '₹${_duration.pricePerSeat}/seat',
                         style: AppTextStyles.caption),
                     Text('one-time payment',
                         style: AppTextStyles.caption
@@ -788,6 +1011,44 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
               ),
             ),
 
+          Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Text.rich(
+              TextSpan(
+                style: AppTextStyles.caption
+                    .copyWith(color: AppColors.onSurfaceVariant, height: 1.5),
+                children: [
+                  const TextSpan(text: 'By proceeding, you agree to KrishiDukan’s '),
+                  TextSpan(
+                    text: 'Terms & Conditions',
+                    style: AppTextStyles.caption.copyWith(
+                      color: AppColors.primary,
+                      fontWeight: FontWeight.bold,
+                      decoration: TextDecoration.underline,
+                      height: 1.5,
+                    ),
+                    recognizer: TapGestureRecognizer()
+                      ..onTap = () => _openLegalDoc(_termsPath),
+                  ),
+                  const TextSpan(text: ' and '),
+                  TextSpan(
+                    text: 'Seller & Manufacturer Subscription Terms',
+                    style: AppTextStyles.caption.copyWith(
+                      color: AppColors.primary,
+                      fontWeight: FontWeight.bold,
+                      decoration: TextDecoration.underline,
+                      height: 1.5,
+                    ),
+                    recognizer: TapGestureRecognizer()
+                      ..onTap = () => _openLegalDoc(_sellerTermsPath),
+                  ),
+                  const TextSpan(text: '.'),
+                ],
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ),
+
           SizedBox(
             width: double.infinity,
             child: FilledButton(
@@ -803,7 +1064,7 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
                       child: CircularProgressIndicator(
                           strokeWidth: 2, color: Colors.white))
                   : Text(
-                      'Pay ${CurrencyUtils.format(totalPrice.toDouble())} · Unlock $_seats seat${_seats != 1 ? 's' : ''}',
+                      'Pay ${CurrencyUtils.format(totalPrice.toDouble())} · Unlock ${_duration.billableSeats(_seats)} seat${_duration.billableSeats(_seats) != 1 ? 's' : ''}',
                       style: AppTextStyles.button,
                     ),
             ),
