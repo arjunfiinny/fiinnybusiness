@@ -2221,6 +2221,14 @@ class _EditListingSheetState extends State<_EditListingSheet> {
           .where((v) => v.label.isNotEmpty)
           .toList();
 
+      // stockQuantity is the AGGREGATE across pack sizes, so when variants exist
+      // it is their sum rather than the flat field. Using the flat number hid the
+      // whole product whenever it read 0, even with stock left in other sizes,
+      // because availability is derived from it. Matches addListing (totalStock)
+      // and the web seller dashboard.
+      final effectiveStock = variants.isNotEmpty
+          ? variants.fold<int>(0, (acc, v) => acc + (v.stock ?? 0))
+          : stock;
 
       // A blank or non-positive entry means "use the default", stored as null.
       final parsedThreshold = int.tryParse(_lowStockCtrl.text.trim());
@@ -2230,8 +2238,8 @@ class _EditListingSheetState extends State<_EditListingSheet> {
       final effectiveDiscountPct = _discountActive ? _discountPct : 0.0;
       final updates = <String, dynamic>{
         'price': price,
-        'stock': stock > 0 ? 'In Stock' : 'Out of Stock',
-        'stockQuantity': stock,
+        'stock': effectiveStock > 0 ? 'In Stock' : 'Out of Stock',
+        'stockQuantity': effectiveStock,
         'isActive': _isActive,
         // Null clears any per-product override, putting the product back on
         // the server default rather than pinning it at some stale number.
@@ -2270,14 +2278,14 @@ class _EditListingSheetState extends State<_EditListingSheet> {
         await repo.syncMarketMirror(
           widget.listing.id,
           sellingPrice: price,
-          stockLevel: stock > 0 ? 'In Stock' : 'Out of Stock',
+          stockLevel: effectiveStock > 0 ? 'In Stock' : 'Out of Stock',
           discountPct: effectiveDiscountPct,
           isProductActive: _isActive,
         );
         await repo.syncInventoryDoc(
           widget.listing.id,
           sellingPrice: price,
-          stockQuantity: stock,
+          stockQuantity: effectiveStock,
           isProductActive: _isActive,
           discountEnabled: _discountActive,
           discountPct: _discountPct,

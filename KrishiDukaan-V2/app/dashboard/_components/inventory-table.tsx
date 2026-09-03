@@ -572,6 +572,7 @@ function MobileProductCard({
             stockQuantity={row.stockQuantity}
             sellingPrice={row.sellingPrice}
             reorderThreshold={row.reorderThreshold}
+            variants={row.variants}
             onSaved={async () => { onToggleStock?.(); await onUpdated(); }}
             onCancel={() => onToggleStock?.()}
           />
@@ -749,6 +750,7 @@ export function InventoryTable({
                               stockQuantity={r.stockQuantity}
                               sellingPrice={r.sellingPrice}
                               reorderThreshold={r.reorderThreshold}
+                              variants={r.variants}
                               onSaved={async () => { setStockId(null); await onUpdated(); }}
                               onCancel={() => setStockId(null)}
                             />

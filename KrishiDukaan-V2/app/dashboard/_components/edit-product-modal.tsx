@@ -603,10 +603,17 @@ export function EditProductModal({ row, accountDeliveryEnabled, onClose, onSaved
         await updateProductSellMode(row.productId, effectiveSellMode);
       }
 
-      // Update inventory: use first variant's stock; fall back to existing stockQuantity.
+      // Update inventory. stockQuantity is the AGGREGATE across pack sizes, so it
+      // is the sum — taking the first variant's stock (as this did) hid the whole
+      // product from the marketplace whenever the first size ran out, even with
+      // plenty of the others left, because isAvailable is derived from this number.
       // Preserve the existing reorder threshold so retailer low-stock alerts aren't wiped.
-      const firstVariantStock = parsedVariants[0]?.stock;
-      const stockQty = firstVariantStock !== undefined ? firstVariantStock : Number(variants[0]?.stock ?? "");
+      const variantStocks = parsedVariants
+        .map(v => v.stock)
+        .filter((n): n is number => typeof n === "number" && Number.isFinite(n));
+      const stockQty = variantStocks.length
+        ? variantStocks.reduce((sum, n) => sum + n, 0)
+        : Number(variants[0]?.stock ?? "");
       if (row.inventoryId && Number.isFinite(stockQty) && stockQty >= 0) {
         await updateInventoryRecord(row.inventoryId, {
           stockQuantity: stockQty,
