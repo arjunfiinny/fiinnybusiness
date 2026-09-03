@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -346,8 +347,8 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
               'Content-Type': 'application/json',
               if (idToken != null) 'Authorization': 'Bearer $idToken',
               // Same reason as the cart call: without this the attempt is
-              // recorded as a web purchase.
-              'x-client': 'mobile',
+              // recorded as a web purchase, and same browser caveat.
+              if (!kIsWeb) 'x-client': 'mobile',
             },
             body: jsonEncode({
               'seatCount': _seats,

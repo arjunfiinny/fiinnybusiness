@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
@@ -84,7 +85,12 @@ class PaymentService {
         // create-cart-order defaults source to 'web', so every app failure
         // showed up as a web one in Admin -> Payments and an app-specific
         // checkout problem would have been invisible in the numbers.
-        'x-client': 'mobile',
+        //
+        // Not sent from a browser build: a custom header has to be named in
+        // the server's Access-Control-Allow-Headers or the browser blocks the
+        // whole request ("Failed to fetch"), and running in a browser IS a
+        // web client, so 'web' is the honest label there anyway.
+        if (!kIsWeb) 'x-client': 'mobile',
       },
       body: jsonEncode({
         // Map mobile cart fields → web API contract
