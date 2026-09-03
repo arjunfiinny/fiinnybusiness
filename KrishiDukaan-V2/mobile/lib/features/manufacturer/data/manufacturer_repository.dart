@@ -151,6 +151,7 @@ class ManufacturerRepository {
     required String ownerName,
     required String retailerPhone,
     String? email,
+    String? line1,
     String? city,
     String? state,
     String? pincode,
@@ -170,7 +171,7 @@ class ManufacturerRepository {
       'ownerName': ownerName.trim(),
       'email': email?.trim().toLowerCase() ?? '',
       'address': {
-        'line1': '',
+        'line1': line1?.trim() ?? '',
         'city': city?.trim() ?? '',
         'state': state?.trim() ?? '',
         'pincode': pincode?.trim() ?? '',
@@ -210,7 +211,7 @@ class ManufacturerRepository {
       'createdBy': manufacturerId,
       'addedAt': now,
       'address': {
-        'line1': '',
+        'line1': line1?.trim() ?? '',
         'city': city?.trim() ?? '',
         'state': state?.trim() ?? '',
         'pincode': pincode?.trim() ?? '',
