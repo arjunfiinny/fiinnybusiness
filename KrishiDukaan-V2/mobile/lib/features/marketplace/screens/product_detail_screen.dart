@@ -1,4 +1,5 @@
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -2268,6 +2269,60 @@ class _SellerTile extends ConsumerStatefulWidget {
 class _SellerTileState extends ConsumerState<_SellerTile> {
   bool _expanded = false;
 
+  /// This store's own bulk/quantity discount ladder, fetched from their
+  /// `inventory` doc — mirrors web's ProductDetailView, which queries the
+  /// same collection by ownerPhone + productId (or originalProductId) rather
+  /// than trusting availability[], since bulk tiers are never mirrored there.
+  List<BulkDiscountTierModel> _bulkTiers = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadBulkTiers();
+  }
+
+  Future<void> _loadBulkTiers() async {
+    final phone = widget.listing.sellerPhone;
+    final productId = widget.catalogId;
+    if (phone.isEmpty || productId.isEmpty) return;
+    try {
+      final db = FirebaseFirestore.instance;
+      final results = await Future.wait([
+        db
+            .collection('inventory')
+            .where('ownerPhone', isEqualTo: phone)
+            .where('productId', isEqualTo: productId)
+            .limit(1)
+            .get(),
+        db
+            .collection('inventory')
+            .where('ownerPhone', isEqualTo: phone)
+            .where('originalProductId', isEqualTo: productId)
+            .limit(1)
+            .get(),
+      ]);
+      for (final snap in results) {
+        for (final doc in snap.docs) {
+          final data = doc.data();
+          if (data['bulkDiscountEnabled'] == true) {
+            final tiers = (data['bulkDiscountTiers'] as List? ?? [])
+                .whereType<Map>()
+                .map((t) =>
+                    BulkDiscountTierModel.fromMap(Map<String, dynamic>.from(t)))
+                .toList()
+              ..sort((a, b) => a.minQty - b.minQty);
+            if (tiers.isNotEmpty && mounted) {
+              setState(() => _bulkTiers = tiers);
+              return;
+            }
+          }
+        }
+      }
+    } catch (_) {
+      // Non-critical — the tile still works without a bulk-savings table.
+    }
+  }
+
   /// This store's list price for the SELECTED size. Falls back to the
   /// listing's own price only for single-size products, where the parent
   /// passes no variantPrice.
@@ -2638,6 +2693,58 @@ class _SellerTileState extends ConsumerState<_SellerTile> {
                               bold: true,
                               valueColor: const Color(0xFF15803D),
                             ),
+                          ],
+                        ),
+                      ),
+                    ],
+
+                    if (_bulkTiers.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: AppColors.surfaceVariant,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Buy more, save more',
+                              style: AppTextStyles.caption.copyWith(
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: 0.4,
+                                color: AppColors.onSurfaceVariant,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            ..._bulkTiers.map((t) {
+                              final tierPrice = (_basePrice *
+                                      (1 - t.discountPct / 100))
+                                  .clamp(0.0, _basePrice);
+                              return Padding(
+                                padding: const EdgeInsets.symmetric(vertical: 2),
+                                child: Row(
+                                  children: [
+                                    Text('${t.minQty}+ units',
+                                        style: AppTextStyles.bodySmall),
+                                    const Spacer(),
+                                    Text(
+                                      CurrencyUtils.format(tierPrice),
+                                      style: AppTextStyles.bodySmall.copyWith(
+                                        fontWeight: FontWeight.w700,
+                                        color: const Color(0xFF15803D),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Text('${t.discountPct.toInt()}% OFF',
+                                        style: AppTextStyles.caption
+                                            .copyWith(color: const Color(0xFF16A34A))),
+                                  ],
+                                ),
+                              );
+                            }),
                           ],
                         ),
                       ),
