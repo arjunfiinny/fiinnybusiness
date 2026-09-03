@@ -345,6 +345,9 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
             headers: {
               'Content-Type': 'application/json',
               if (idToken != null) 'Authorization': 'Bearer $idToken',
+              // Same reason as the cart call: without this the attempt is
+              // recorded as a web purchase.
+              'x-client': 'mobile',
             },
             body: jsonEncode({
               'seatCount': _seats,

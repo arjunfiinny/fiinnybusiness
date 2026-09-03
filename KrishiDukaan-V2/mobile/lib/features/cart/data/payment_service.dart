@@ -80,6 +80,11 @@ class PaymentService {
       headers: {
         'Authorization': 'Bearer $token',
         'Content-Type': 'application/json',
+        // Tags the paymentAttempts record as coming from the app. Without it
+        // create-cart-order defaults source to 'web', so every app failure
+        // showed up as a web one in Admin -> Payments and an app-specific
+        // checkout problem would have been invisible in the numbers.
+        'x-client': 'mobile',
       },
       body: jsonEncode({
         // Map mobile cart fields → web API contract
