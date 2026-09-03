@@ -607,6 +607,34 @@
           "order": "DESCENDING"
         }
       ]
+    },
+    {
+      "collectionGroup": "products",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "originalProductId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "ownerPhone",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "products",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "originalProductId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "retailerPhone",
+          "order": "ASCENDING"
+        }
+      ]
     }
   ],
   "fieldOverrides": []

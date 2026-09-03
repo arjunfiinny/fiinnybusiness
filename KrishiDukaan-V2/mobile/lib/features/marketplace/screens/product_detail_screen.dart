@@ -2287,39 +2287,59 @@ class _SellerTileState extends ConsumerState<_SellerTile> {
     if (phone.isEmpty || productId.isEmpty) return;
     try {
       final db = FirebaseFirestore.instance;
-      final results = await Future.wait([
+
+      // Read the seller's own `products` copy, NOT their `inventory` doc.
+      // firestore.rules restricts inventory reads to the owner, so a shopper
+      // querying it is always permission-denied — web's ProductDetailView
+      // reads inventory here and its bulk table therefore never appeared for
+      // a customer either. `products` is `allow read: if true`, and
+      // setDiscount writes the bulk fields to both, so the data is the same.
+      final snaps = await Future.wait([
         db
-            .collection('inventory')
+            .collection('products')
+            .where('originalProductId', isEqualTo: productId)
             .where('ownerPhone', isEqualTo: phone)
-            .where('productId', isEqualTo: productId)
             .limit(1)
             .get(),
         db
-            .collection('inventory')
-            .where('ownerPhone', isEqualTo: phone)
+            .collection('products')
             .where('originalProductId', isEqualTo: productId)
+            .where('retailerPhone', isEqualTo: phone)
             .limit(1)
             .get(),
       ]);
-      for (final snap in results) {
-        for (final doc in snap.docs) {
-          final data = doc.data();
-          if (data['bulkDiscountEnabled'] == true) {
-            final tiers = (data['bulkDiscountTiers'] as List? ?? [])
-                .whereType<Map>()
-                .map((t) =>
-                    BulkDiscountTierModel.fromMap(Map<String, dynamic>.from(t)))
-                .toList()
-              ..sort((a, b) => a.minQty - b.minQty);
-            if (tiers.isNotEmpty && mounted) {
-              setState(() => _bulkTiers = tiers);
-              return;
-            }
+
+      final docs = [
+        for (final s in snaps) ...s.docs.map((d) => d.data()),
+      ];
+
+      // A retailer selling their OWN product has no separate copy — the
+      // canonical doc is theirs, so fall back to it when it belongs to them.
+      if (docs.isEmpty) {
+        final canonical = await db.collection('products').doc(productId).get();
+        final d = canonical.data();
+        if (d != null &&
+            (d['ownerPhone'] == phone || d['retailerPhone'] == phone)) {
+          docs.add(d);
+        }
+      }
+
+      for (final data in docs) {
+        if (data['bulkDiscountEnabled'] == true) {
+          final tiers = (data['bulkDiscountTiers'] as List? ?? [])
+              .whereType<Map>()
+              .map((t) =>
+                  BulkDiscountTierModel.fromMap(Map<String, dynamic>.from(t)))
+              .toList()
+            ..sort((a, b) => a.minQty - b.minQty);
+          if (tiers.isNotEmpty && mounted) {
+            setState(() => _bulkTiers = tiers);
+            return;
           }
         }
       }
     } catch (_) {
-      // Non-critical — the tile still works without a bulk-savings table.
+      // Non-critical - the tile still works without a bulk-savings table.
     }
   }
 
