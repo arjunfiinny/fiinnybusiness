@@ -616,6 +616,7 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
         r.message,
         orderId: orderId,
         amount: _razorpayAmount,
+        kind: 'subscription',
       ));
     }
 

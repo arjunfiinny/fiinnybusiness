@@ -190,6 +190,16 @@ class PaymentService {
     String message, {
     String? orderId,
     int? amount,
+    /// 'cart' or 'subscription'.
+    ///
+    /// A cart failure is recorded ONLY server-side, in paymentAttempts
+    /// (Admin -> Payments), which already holds the buyer, the basket and the
+    /// failure reason. It deliberately does not also go to `failedPayments`:
+    /// that collection backs Admin -> Subscriptions -> Failed Payments, whose
+    /// every row offers an "Activate Subscription" button — an action that
+    /// makes no sense for a product order and could grant a subscription off
+    /// the back of a failed grocery purchase.
+    required String kind,
   }) async {
     try {
       final user = FirebaseAuth.instance.currentUser;
@@ -216,6 +226,10 @@ class PaymentService {
         }
       }
 
+      // Subscription failures additionally go to the legacy queue, which is
+      // where an admin can act on them (activate the subscription manually).
+      if (kind != 'subscription') return;
+
       String? phone;
       try {
         final idx = await db.collection('uidIndex').doc(user.uid).get();
@@ -223,6 +237,7 @@ class PaymentService {
       } catch (_) {}
 
       await db.collection('failedPayments').add({
+        'kind': kind,
         'userId': user.uid,
         'userPhone': phone ?? user.uid,
         'userUid': user.uid,
