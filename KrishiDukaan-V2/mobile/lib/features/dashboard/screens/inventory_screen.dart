@@ -2464,296 +2464,301 @@ class _DiscountSheetState extends State<_DiscountSheet> {
         top: 20,
         bottom: MediaQuery.of(context).viewInsets.bottom + 20,
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('Discount Settings', style: AppTextStyles.heading2),
-          const SizedBox(height: 16),
+      // Must scroll: with the base discount, dates, preview AND the bulk tier
+      // ladder this sheet is taller than a phone screen, and a bare Column
+      // silently clips everything past the fold — including the Save button.
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Discount Settings', style: AppTextStyles.heading2),
+            const SizedBox(height: 16),
 
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('Enable Discount'),
-            value: _isActive,
-            activeThumbColor: AppColors.primary,
-            onChanged: (v) => setState(() => _isActive = v),
-          ),
-          const SizedBox(height: 12),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Enable Discount'),
+              value: _isActive,
+              activeThumbColor: AppColors.primary,
+              onChanged: (v) => setState(() => _isActive = v),
+            ),
+            const SizedBox(height: 12),
 
-          // Type selector — web offers percentage OR a flat rupee amount.
-          SegmentedButton<String>(
-            segments: const [
-              ButtonSegment(value: 'percentage', label: Text('Percentage')),
-              ButtonSegment(value: 'fixed_amount', label: Text('Fixed ₹')),
-            ],
-            selected: {_type},
-            onSelectionChanged: _isActive
-                ? (sel) => setState(() => _type = sel.first)
-                : null,
-            showSelectedIcon: false,
-          ),
-          const SizedBox(height: 12),
+            // Type selector — web offers percentage OR a flat rupee amount.
+            SegmentedButton<String>(
+              segments: const [
+                ButtonSegment(value: 'percentage', label: Text('Percentage')),
+                ButtonSegment(value: 'fixed_amount', label: Text('Fixed ₹')),
+              ],
+              selected: {_type},
+              onSelectionChanged: _isActive
+                  ? (sel) => setState(() => _type = sel.first)
+                  : null,
+              showSelectedIcon: false,
+            ),
+            const SizedBox(height: 12),
 
-          if (_type == 'percentage')
+            if (_type == 'percentage')
+              Row(
+                children: [
+                  Text(
+                    'Discount: ${_percentage.toInt()}%',
+                    style: AppTextStyles.bodyMedium,
+                  ),
+                  Expanded(
+                    child: Slider(
+                      value: _percentage.clamp(1, 99),
+                      min: 1,
+                      // Web validates 1–99; the app's old 80 cap silently
+                      // refused discounts web allows.
+                      max: 99,
+                      divisions: 98,
+                      activeColor: AppColors.primary,
+                      onChanged: _isActive
+                          ? (v) => setState(() => _percentage = v)
+                          : null,
+                    ),
+                  ),
+                ],
+              )
+            else
+              TextField(
+                controller: _fixedCtrl,
+                enabled: _isActive,
+                keyboardType:
+                    const TextInputType.numberWithOptions(decimal: true),
+                onChanged: (_) => setState(() {}),
+                decoration: InputDecoration(
+                  labelText: 'Discount amount (₹)',
+                  prefixText: '₹ ',
+                  isDense: true,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+            const SizedBox(height: 12),
+
+            // Live price preview, same as web's panel.
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: AppColors.surfaceVariant,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Row(
+                children: [
+                  Text('Buyer pays', style: AppTextStyles.bodySmall),
+                  const Spacer(),
+                  if (_isActive && _previewPrice < widget.listing.price) ...[
+                    Text(
+                      '₹${widget.listing.price.toStringAsFixed(0)}',
+                      style: AppTextStyles.bodySmall.copyWith(
+                        color: AppColors.onSurfaceVariant,
+                        decoration: TextDecoration.lineThrough,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                  ],
+                  Text(
+                    '₹${_previewPrice.toStringAsFixed(0)}',
+                    style: AppTextStyles.bodyMedium.copyWith(
+                      color: AppColors.primary,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+
             Row(
               children: [
-                Text(
-                  'Discount: ${_percentage.toInt()}%',
-                  style: AppTextStyles.bodyMedium,
-                ),
                 Expanded(
-                  child: Slider(
-                    value: _percentage.clamp(1, 99),
-                    min: 1,
-                    // Web validates 1–99; the app's old 80 cap silently
-                    // refused discounts web allows.
-                    max: 99,
-                    divisions: 98,
-                    activeColor: AppColors.primary,
-                    onChanged: _isActive
-                        ? (v) => setState(() => _percentage = v)
-                        : null,
+                  child: _DatePickerField(
+                    label: 'Start Date',
+                    value: _startDate,
+                    enabled: _isActive,
+                    onPicked: (d) => setState(() => _startDate = d),
                   ),
                 ),
-              ],
-            )
-          else
-            TextField(
-              controller: _fixedCtrl,
-              enabled: _isActive,
-              keyboardType:
-                  const TextInputType.numberWithOptions(decimal: true),
-              onChanged: (_) => setState(() {}),
-              decoration: InputDecoration(
-                labelText: 'Discount amount (₹)',
-                prefixText: '₹ ',
-                isDense: true,
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                ),
-              ),
-            ),
-          const SizedBox(height: 12),
-
-          // Live price preview, same as web's panel.
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: AppColors.surfaceVariant,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Row(
-              children: [
-                Text('Buyer pays', style: AppTextStyles.bodySmall),
-                const Spacer(),
-                if (_isActive && _previewPrice < widget.listing.price) ...[
-                  Text(
-                    '₹${widget.listing.price.toStringAsFixed(0)}',
-                    style: AppTextStyles.bodySmall.copyWith(
-                      color: AppColors.onSurfaceVariant,
-                      decoration: TextDecoration.lineThrough,
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                ],
-                Text(
-                  '₹${_previewPrice.toStringAsFixed(0)}',
-                  style: AppTextStyles.bodyMedium.copyWith(
-                    color: AppColors.primary,
-                    fontWeight: FontWeight.bold,
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _DatePickerField(
+                    label: 'End Date',
+                    value: _endDate,
+                    enabled: _isActive,
+                    onPicked: (d) => setState(() => _endDate = d),
                   ),
                 ),
               ],
             ),
-          ),
-          const SizedBox(height: 8),
+            const SizedBox(height: 20),
 
-          Row(
-            children: [
-              Expanded(
-                child: _DatePickerField(
-                  label: 'Start Date',
-                  value: _startDate,
-                  enabled: _isActive,
-                  onPicked: (d) => setState(() => _startDate = d),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: _DatePickerField(
-                  label: 'End Date',
-                  value: _endDate,
-                  enabled: _isActive,
-                  onPicked: (d) => setState(() => _endDate = d),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 20),
-
-          // ── Bulk (quantity-tier) discounts — matches web's Bulk Discounts
-          // panel exactly. Independent of the base discount above: a seller
-          // can run one, the other, or both at once.
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: _bulkEnabled
-                  ? AppColors.primary.withValues(alpha: 0.05)
-                  : AppColors.surfaceVariant,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(
+            // ── Bulk (quantity-tier) discounts — matches web's Bulk Discounts
+            // panel exactly. Independent of the base discount above: a seller
+            // can run one, the other, or both at once.
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
                 color: _bulkEnabled
-                    ? AppColors.primary.withValues(alpha: 0.3)
-                    : AppColors.divider,
-              ),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Icon(Icons.layers_outlined,
-                        size: 18, color: AppColors.onSurfaceVariant),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text('Bulk Discounts',
-                          style: AppTextStyles.bodyMedium
-                              .copyWith(fontWeight: FontWeight.w600)),
-                    ),
-                    Switch(
-                      value: _bulkEnabled,
-                      activeThumbColor: AppColors.primary,
-                      onChanged: (v) => setState(() => _bulkEnabled = v),
-                    ),
-                  ],
+                    ? AppColors.primary.withValues(alpha: 0.05)
+                    : AppColors.surfaceVariant,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: _bulkEnabled
+                      ? AppColors.primary.withValues(alpha: 0.3)
+                      : AppColors.divider,
                 ),
-                if (_bulkEnabled) ...[
-                  const SizedBox(height: 4),
-                  Text(
-                    'Customers buying more units get a bigger discount. '
-                    'Higher tiers override lower ones.',
-                    style: AppTextStyles.bodySmall
-                        .copyWith(color: AppColors.onSurfaceVariant),
-                  ),
-                  const SizedBox(height: 10),
-                  ...List.generate(_bulkTiers.length, (i) {
-                    final t = _bulkTiers[i];
-                    return Padding(
-                      padding: const EdgeInsets.only(bottom: 8),
-                      child: Row(
-                        children: [
-                          const Text('Buy'),
-                          const SizedBox(width: 6),
-                          SizedBox(
-                            width: 56,
-                            child: TextFormField(
-                              key: ValueKey('tier-qty-$i-${t.minQty}'),
-                              initialValue: t.minQty.toString(),
-                              keyboardType: TextInputType.number,
-                              textAlign: TextAlign.center,
-                              decoration: const InputDecoration(isDense: true),
-                              onChanged: (v) {
-                                final n = int.tryParse(v);
-                                if (n != null && n >= 1) {
-                                  _updateTier(i, minQty: n);
-                                }
-                              },
-                            ),
-                          ),
-                          const SizedBox(width: 6),
-                          const Text('+ units →'),
-                          const SizedBox(width: 6),
-                          SizedBox(
-                            width: 56,
-                            child: TextFormField(
-                              key: ValueKey('tier-pct-$i-${t.discountPct}'),
-                              initialValue: t.discountPct.toInt().toString(),
-                              keyboardType: TextInputType.number,
-                              textAlign: TextAlign.center,
-                              decoration: const InputDecoration(isDense: true),
-                              onChanged: (v) {
-                                final n = double.tryParse(v);
-                                if (n != null && n >= 1 && n <= 99) {
-                                  _updateTier(i, discountPct: n);
-                                }
-                              },
-                            ),
-                          ),
-                          const SizedBox(width: 6),
-                          const Text('% off'),
-                          const Spacer(),
-                          IconButton(
-                            icon: const Icon(Icons.delete_outline, size: 18),
-                            color: AppColors.error,
-                            onPressed: () => _removeTier(i),
-                          ),
-                        ],
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.layers_outlined,
+                          size: 18, color: AppColors.onSurfaceVariant),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text('Bulk Discounts',
+                            style: AppTextStyles.bodyMedium
+                                .copyWith(fontWeight: FontWeight.w600)),
                       ),
-                    );
-                  }),
-                  if (_bulkTiers.length < 6)
-                    TextButton.icon(
-                      onPressed: _addTier,
-                      icon: const Icon(Icons.add, size: 16),
-                      label: const Text('Add tier'),
-                    ),
-                  if (_bulkTiers.isNotEmpty && widget.listing.price > 0) ...[
+                      Switch(
+                        value: _bulkEnabled,
+                        activeThumbColor: AppColors.primary,
+                        onChanged: (v) => setState(() => _bulkEnabled = v),
+                      ),
+                    ],
+                  ),
+                  if (_bulkEnabled) ...[
                     const SizedBox(height: 4),
-                    ...(List.of(_bulkTiers)
-                          ..sort((a, b) => a.minQty - b.minQty))
-                        .map((t) {
-                      final finalPrice = (widget.listing.price *
-                              (1 - t.discountPct / 100))
-                          .clamp(0, widget.listing.price);
+                    Text(
+                      'Customers buying more units get a bigger discount. '
+                      'Higher tiers override lower ones.',
+                      style: AppTextStyles.bodySmall
+                          .copyWith(color: AppColors.onSurfaceVariant),
+                    ),
+                    const SizedBox(height: 10),
+                    ...List.generate(_bulkTiers.length, (i) {
+                      final t = _bulkTiers[i];
                       return Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 2),
+                        padding: const EdgeInsets.only(bottom: 8),
                         child: Row(
                           children: [
-                            Text('Buy ${t.minQty}+ units',
-                                style: AppTextStyles.bodySmall
-                                    .copyWith(color: AppColors.onSurfaceVariant)),
-                            const Spacer(),
-                            Text(
-                              '₹${finalPrice.toStringAsFixed(0)}',
-                              style: AppTextStyles.bodySmall.copyWith(
-                                  fontWeight: FontWeight.w700,
-                                  color: AppColors.success),
+                            const Text('Buy'),
+                            const SizedBox(width: 6),
+                            SizedBox(
+                              width: 56,
+                              child: TextFormField(
+                                key: ValueKey('tier-qty-$i-${t.minQty}'),
+                                initialValue: t.minQty.toString(),
+                                keyboardType: TextInputType.number,
+                                textAlign: TextAlign.center,
+                                decoration: const InputDecoration(isDense: true),
+                                onChanged: (v) {
+                                  final n = int.tryParse(v);
+                                  if (n != null && n >= 1) {
+                                    _updateTier(i, minQty: n);
+                                  }
+                                },
+                              ),
                             ),
                             const SizedBox(width: 6),
-                            Text('${t.discountPct.toInt()}% OFF',
-                                style: AppTextStyles.caption
-                                    .copyWith(color: AppColors.success)),
+                            const Text('+ units →'),
+                            const SizedBox(width: 6),
+                            SizedBox(
+                              width: 56,
+                              child: TextFormField(
+                                key: ValueKey('tier-pct-$i-${t.discountPct}'),
+                                initialValue: t.discountPct.toInt().toString(),
+                                keyboardType: TextInputType.number,
+                                textAlign: TextAlign.center,
+                                decoration: const InputDecoration(isDense: true),
+                                onChanged: (v) {
+                                  final n = double.tryParse(v);
+                                  if (n != null && n >= 1 && n <= 99) {
+                                    _updateTier(i, discountPct: n);
+                                  }
+                                },
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            const Text('% off'),
+                            const Spacer(),
+                            IconButton(
+                              icon: const Icon(Icons.delete_outline, size: 18),
+                              color: AppColors.error,
+                              onPressed: () => _removeTier(i),
+                            ),
                           ],
                         ),
                       );
                     }),
+                    if (_bulkTiers.length < 6)
+                      TextButton.icon(
+                        onPressed: _addTier,
+                        icon: const Icon(Icons.add, size: 16),
+                        label: const Text('Add tier'),
+                      ),
+                    if (_bulkTiers.isNotEmpty && widget.listing.price > 0) ...[
+                      const SizedBox(height: 4),
+                      ...(List.of(_bulkTiers)
+                            ..sort((a, b) => a.minQty - b.minQty))
+                          .map((t) {
+                        final finalPrice = (widget.listing.price *
+                                (1 - t.discountPct / 100))
+                            .clamp(0, widget.listing.price);
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 2),
+                          child: Row(
+                            children: [
+                              Text('Buy ${t.minQty}+ units',
+                                  style: AppTextStyles.bodySmall
+                                      .copyWith(color: AppColors.onSurfaceVariant)),
+                              const Spacer(),
+                              Text(
+                                '₹${finalPrice.toStringAsFixed(0)}',
+                                style: AppTextStyles.bodySmall.copyWith(
+                                    fontWeight: FontWeight.w700,
+                                    color: AppColors.success),
+                              ),
+                              const SizedBox(width: 6),
+                              Text('${t.discountPct.toInt()}% OFF',
+                                  style: AppTextStyles.caption
+                                      .copyWith(color: AppColors.success)),
+                            ],
+                          ),
+                        );
+                      }),
+                    ],
                   ],
                 ],
-              ],
+              ),
             ),
-          ),
-          const SizedBox(height: 20),
+            const SizedBox(height: 20),
 
-          SizedBox(
-            width: double.infinity,
-            child: FilledButton(
-              onPressed: _saving ? null : _save,
-              style: FilledButton.styleFrom(backgroundColor: AppColors.primary),
-              child: _saving
-                  ? const SizedBox(
-                      height: 18,
-                      width: 18,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: Colors.white,
-                      ),
-                    )
-                  : const Text('Save Discount'),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton(
+                onPressed: _saving ? null : _save,
+                style: FilledButton.styleFrom(backgroundColor: AppColors.primary),
+                child: _saving
+                    ? const SizedBox(
+                        height: 18,
+                        width: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Text('Save Discount'),
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
