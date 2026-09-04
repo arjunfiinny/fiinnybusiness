@@ -18,9 +18,16 @@ import { db } from "../../firebase";
  * Firestore to check an admin role). They come from /api/admin/payout-kyc as
  * URLs that expire in minutes, so a copied link isn't a lasting leak.
  *
- * The linked account itself is created in the Razorpay Dashboard — the
- * Accounts API is a Partner API and is not callable with a merchant key
- * (verified against the live account). This page records the resulting id.
+ * The linked account itself may be created either way:
+ *   - In the Razorpay Dashboard (Route → Linked Accounts), pasting the
+ *     resulting id here, OR
+ *   - Via the Accounts API (POST /v2/accounts, then a product-configuration
+ *     PATCH with the settlement bank details) — verified working against this
+ *     live account with the plain merchant key/secret on 2026-09-04, no
+ *     Partner-API access needed. An earlier version of this comment claimed
+ *     the opposite; that was wrong.
+ * Either way, this page only ever RECORDS the resulting id — it never creates
+ * an account itself, so a bad id can't silently start routing money.
  */
 
 type PayoutStatus = "pending_verification" | "verified" | "rejected";
