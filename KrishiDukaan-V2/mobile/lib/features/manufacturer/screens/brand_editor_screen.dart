@@ -1,6 +1,7 @@
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/app_text_styles.dart';
 import '../../../core/providers/user_provider.dart';
@@ -86,6 +87,16 @@ class _BrandEditorScreenState extends ConsumerState<BrandEditorScreen>
               style: AppTextStyles.heading2.copyWith(color: Colors.white),
             ),
             actions: [
+              // Opens the same BrandScreen a shopper sees at /brand/:phone —
+              // web's Company page links out to /brand/{slug} for the
+              // identical purpose. Shows the last SAVED state, same as web's
+              // link (neither previews unsaved edits), so save first to see
+              // a change reflected here.
+              IconButton(
+                tooltip: 'Preview brand page',
+                icon: const Icon(Icons.visibility_outlined, color: Colors.white),
+                onPressed: () => context.push('/brand/${user.phone}'),
+              ),
               TextButton(
                 onPressed: _saving ? null : () => _save(user.phone),
                 child: Text(
