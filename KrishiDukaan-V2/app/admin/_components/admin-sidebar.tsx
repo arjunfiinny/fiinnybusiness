@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Box, LayoutDashboard, Layers, Users, X, Mail, MessageSquare, Building2, BarChart3, CreditCard, BookOpen, Tag, Package, MessageCircle, Video, UserCog, ShoppingCart, IndianRupee, Banknote, ReceiptText, Zap } from "lucide-react";
+import { Box, LayoutDashboard, Layers, Users, X, Mail, MessageSquare, Building2, BarChart3, CreditCard, BookOpen, Tag, Package, MessageCircle, Video, UserCog, ShoppingCart, IndianRupee, Banknote, ReceiptText, Zap, ShieldAlert } from "lucide-react";
 import { cn } from "../../dashboard/_lib/cn";
 import { useAdminAuth, hasSection, type AdminSection } from "../_context/admin-auth-context";
 
@@ -18,6 +18,9 @@ const navItems = [
   { href: "/admin/pricing", label: "Pricing & Promos", icon: IndianRupee, section: "pricing" as AdminSection },
   { href: "/admin/products", label: "Products", icon: Box, section: "products" as AdminSection },
   { href: "/admin/reels", label: "Reels", icon: Video, section: "reels" as AdminSection },
+  // Apple Guideline 1.2 requires reports on user-generated content to reach a
+  // human who can act within 24 hours — this is that queue.
+  { href: "/admin/moderation", label: "Moderation", icon: ShieldAlert, section: "moderation" as AdminSection },
   { href: "/admin/whatsapp", label: "WhatsApp", icon: MessageCircle, section: "whatsapp" as AdminSection },
   { href: "/admin/messages", label: "Messages", icon: MessageSquare, section: "messages" as AdminSection },
   { href: "/admin/discounts", label: "Discounts", icon: Tag, section: "discounts" as AdminSection },

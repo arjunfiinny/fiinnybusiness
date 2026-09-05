@@ -33,6 +33,7 @@ const SECTION_LABELS: Record<AdminSection, string> = {
   subscriptions: "Subscriptions",
   payouts: "Seller Payouts",
   routePayouts: "Route Payouts",
+  moderation: "Moderation",
   pricing: "Pricing & Promos",
   products: "Products",
   reels: "Reels",
