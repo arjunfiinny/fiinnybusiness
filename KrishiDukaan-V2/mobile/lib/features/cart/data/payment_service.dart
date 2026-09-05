@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
@@ -80,6 +81,16 @@ class PaymentService {
       headers: {
         'Authorization': 'Bearer $token',
         'Content-Type': 'application/json',
+        // Tags the paymentAttempts record as coming from the app. Without it
+        // create-cart-order defaults source to 'web', so every app failure
+        // showed up as a web one in Admin -> Payments and an app-specific
+        // checkout problem would have been invisible in the numbers.
+        //
+        // Not sent from a browser build: a custom header has to be named in
+        // the server's Access-Control-Allow-Headers or the browser blocks the
+        // whole request ("Failed to fetch"), and running in a browser IS a
+        // web client, so 'web' is the honest label there anyway.
+        if (!kIsWeb) 'x-client': 'mobile',
       },
       body: jsonEncode({
         // Map mobile cart fields → web API contract
@@ -179,6 +190,16 @@ class PaymentService {
     String message, {
     String? orderId,
     int? amount,
+    /// 'cart' or 'subscription'.
+    ///
+    /// A cart failure is recorded ONLY server-side, in paymentAttempts
+    /// (Admin -> Payments), which already holds the buyer, the basket and the
+    /// failure reason. It deliberately does not also go to `failedPayments`:
+    /// that collection backs Admin -> Subscriptions -> Failed Payments, whose
+    /// every row offers an "Activate Subscription" button — an action that
+    /// makes no sense for a product order and could grant a subscription off
+    /// the back of a failed grocery purchase.
+    required String kind,
   }) async {
     try {
       final user = FirebaseAuth.instance.currentUser;
@@ -205,6 +226,10 @@ class PaymentService {
         }
       }
 
+      // Subscription failures additionally go to the legacy queue, which is
+      // where an admin can act on them (activate the subscription manually).
+      if (kind != 'subscription') return;
+
       String? phone;
       try {
         final idx = await db.collection('uidIndex').doc(user.uid).get();
@@ -212,6 +237,7 @@ class PaymentService {
       } catch (_) {}
 
       await db.collection('failedPayments').add({
+        'kind': kind,
         'userId': user.uid,
         'userPhone': phone ?? user.uid,
         'userUid': user.uid,

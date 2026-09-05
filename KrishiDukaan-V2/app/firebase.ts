@@ -3782,6 +3782,11 @@ export async function logFailedPayment(
     const resolvedPhone = phone || null;
 
     await addDoc(collection(db, 'failedPayments'), {
+      // This collection backs Admin -> Subscriptions -> Failed Payments, where
+      // every row offers "Activate Subscription". Only subscription attempts
+      // belong here; a failed product order goes to paymentAttempts instead
+      // (Admin -> Payments), which also records what was in the basket.
+      kind: 'subscription',
       userId: uid,
       // Write both uid and phone so admin panel matching works whether the
       // subscription record was keyed by uid or phone.
@@ -3813,6 +3818,12 @@ export async function fetchFailedPayments(): Promise<any[]> {
   const snapshot = await getDocs(collection(db, 'failedPayments'));
   return snapshot.docs
     .map(d => ({ id: d.id, ...d.data() }))
+    // Product-order failures belong in Admin -> Payments, not here: every row
+    // in this tab offers "Activate Subscription", which is meaningless for a
+    // cart order. Mobile used to write both kinds into this one collection.
+    // Rows predating the `kind` field are left visible rather than hidden,
+    // since an untagged row cannot be proven to be an order.
+    .filter((r: any) => r.kind !== 'cart')
     .sort((a: any, b: any) => {
       const ta = a.timestamp?.toMillis?.() ?? a.timestamp?.seconds ?? 0;
       const tb = b.timestamp?.toMillis?.() ?? b.timestamp?.seconds ?? 0;

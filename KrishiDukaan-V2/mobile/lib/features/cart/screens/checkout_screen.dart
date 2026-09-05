@@ -250,6 +250,7 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
           response.message,
           orderId: orderId,
           amount: _razorpayAmount,
+          kind: 'cart',
         ),
       );
     }
