@@ -135,7 +135,8 @@ class CatalogRepository {
       for (final p in raw) {
         final key = p.name.toLowerCase().trim();
         recordSellerDiscount(key, p.id, p.retailerPhone, p.maxDiscountPct);
-        markOnline(key, p.isOnline == true);
+        final pIsOnline = p.sellMode != 'offline_store_only' && p.isOnline != false;
+        markOnline(key, pIsOnline);
 
         final ids = idsByKey[key] ?? [];
         ids.add(p.id);
@@ -177,7 +178,7 @@ class CatalogRepository {
             storeName: secondary.store,
             stockLevel: secondary.stock ?? 'In Stock',
             sellingPrice: secondary.price,
-            isOnline: secondary.isOnline,
+            isOnline: secondary.sellMode != 'offline_store_only' && secondary.isOnline != false,
             variants: secondary.variants,
           ));
         }
@@ -208,7 +209,8 @@ class CatalogRepository {
           idsByKey[key] = copyIds;
         }
 
-        markOnline(key, copy.isOnline == true);
+        final copyIsOnline = copy.sellMode != 'offline_store_only' && copy.isOnline != false;
+        markOnline(key, copyIsOnline);
 
         final copyDiscountPct = copy.maxDiscountPct;
         recordSellerDiscount(key, copyStoreId, copyPhone, copyDiscountPct);
@@ -223,13 +225,15 @@ class CatalogRepository {
             storeName: copy.store,
             stockLevel: copy.stock ?? 'In Stock',
             sellingPrice: copy.price,
-            isOnline: copy.isOnline,
+            isOnline: copyIsOnline,
             variants: copy.variants,
           );
           byName[key] = copy.copyWith(
             availability: [avEntry],
             variants: copy.variants,
             maxDiscountPct: copyDiscountPct,
+            isOnline: copyIsOnline,
+            sellMode: copyIsOnline ? 'online_delivery' : 'offline_store_only',
           );
           continue;
         }
@@ -254,7 +258,7 @@ class CatalogRepository {
             storeName: existing.storeName,
             stockLevel: existing.stockLevel,
             sellingPrice: copy.price,
-            isOnline: copy.isOnline ?? existing.isOnline,
+            isOnline: copyIsOnline,
             variants: copy.variants ?? existing.variants,
           );
         } else {
@@ -264,7 +268,7 @@ class CatalogRepository {
             storeName: copy.store,
             stockLevel: copy.stock ?? 'In Stock',
             sellingPrice: copy.price,
-            isOnline: copy.isOnline,
+            isOnline: copyIsOnline,
             variants: copy.variants,
           ));
         }
@@ -326,7 +330,7 @@ class CatalogRepository {
                   storeName: p.store,
                   stockLevel: p.stock ?? 'In Stock',
                   sellingPrice: p.price,
-                  isOnline: p.isOnline,
+                  isOnline: p.sellMode != 'offline_store_only' && p.isOnline != false,
                 ),
               ];
 

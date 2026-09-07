@@ -616,6 +616,37 @@ class DashboardRepository {
       }
     }
 
+    if (collectionPath == 'products') {
+      try {
+        final docRef = _db.collection(collectionPath).doc(listingId);
+        final docSnap = await docRef.get();
+        if (docSnap.exists) {
+          final p = docSnap.data();
+          final rawAv = p?['availability'];
+          if (rawAv is List && rawAv.isNotEmpty) {
+            final updatedAv = rawAv.map((e) {
+              final entry = Map<String, dynamic>.from(e as Map);
+              if (data.containsKey('isOnline')) {
+                entry['isOnline'] = data['isOnline'] == true;
+              }
+              if (data.containsKey('price')) {
+                entry['sellingPrice'] = data['price'];
+              }
+              if (data.containsKey('stockQuantity')) {
+                final qty = data['stockQuantity'];
+                entry['stockLevel'] =
+                    (qty is num && qty > 0) ? 'In Stock' : 'Out of Stock';
+              }
+              return entry;
+            }).toList();
+            data['availability'] = updatedAv;
+          }
+        }
+      } catch (e) {
+        dev.log('Failed to sync availability in updateListing: $e');
+      }
+    }
+
     await _db.collection(collectionPath).doc(listingId).update({
       ...data,
       'updatedAt': FieldValue.serverTimestamp(),
@@ -772,6 +803,7 @@ class DashboardRepository {
     DateTime? discountStartDate,
     DateTime? discountEndDate,
     bool? isProductActive,
+    bool? isOnline,
   }) async {
     try {
       final sellerSnap = await _db
@@ -815,6 +847,7 @@ class DashboardRepository {
           } else if (stockLevel != null) {
             entry['stockLevel'] = stockLevel;
           }
+          if (isOnline != null) entry['isOnline'] = isOnline;
           if (discountPct != null) entry['discountPct'] = discountPct;
           if (discountEnabled != null) entry['discountEnabled'] = discountEnabled;
           if (discountStartDate != null) {
