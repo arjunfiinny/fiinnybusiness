@@ -17,9 +17,10 @@ import {
   Search,
   ShoppingCart,
   CreditCard,
+  Download,
   X,
 } from "lucide-react";
-import { db } from "../../firebase";
+import { auth, db } from "../../firebase";
 
 /**
  * Admin → Payments.
@@ -54,6 +55,10 @@ type Attempt = {
   userId: string;
   userPhone: string | null;
   userName: string | null;
+  /** Razorpay's own contact/email on the payment — present on
+   *  webhook/backfill rows, which may have no matching user doc at all. */
+  razorpayContact: string | null;
+  razorpayEmail: string | null;
   amount: number;
   subtotal: number | null;
   deliveryCharge: number | null;
@@ -79,6 +84,13 @@ type Attempt = {
  * on purpose, to avoid flagging a customer who is still mid-UPI as a lost sale.
  */
 const ABANDON_AFTER_MS = 30 * 60 * 1000;
+
+const SOURCE_LABEL: Record<string, string> = {
+  web: "web",
+  mobile: "app",
+  razorpay_webhook: "Razorpay (live)",
+  razorpay_backfill: "Razorpay (synced)",
+};
 
 type Bucket = "failed" | "abandoned" | "paid";
 
@@ -107,6 +119,8 @@ export default function AdminPaymentsPage() {
   const [search, setSearch] = useState("");
   const [tab, setTab] = useState<Bucket>("failed");
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState<string | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -131,6 +145,8 @@ export default function AdminPaymentsPage() {
             status: x.status ?? "created",
             userId: String(x.userId ?? ""),
             userPhone: x.userPhone ?? null,
+            razorpayContact: x.razorpayContact ?? null,
+            razorpayEmail: x.razorpayEmail ?? null,
             userName: x.userName ?? null,
             amount: Number(x.amount ?? 0),
             subtotal: x.subtotal ?? null,
@@ -160,6 +176,55 @@ export default function AdminPaymentsPage() {
   useEffect(() => {
     void load();
   }, []);
+
+  // Pulls failed payments straight from Razorpay's own records — the
+  // retroactive fix for exactly what prompted this: Razorpay's own dashboard
+  // showing failures this page never learned about, because until now the
+  // only way a failure got here was the customer's OWN app successfully
+  // reporting it. Keeps calling the sync route forward (via nextSkip) until
+  // it reports no more pages, then reloads the list.
+  const syncFromRazorpay = async () => {
+    setSyncing(true);
+    setSyncResult(null);
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      if (!token) throw new Error("Not signed in.");
+
+      let skip = 0;
+      let totalScanned = 0;
+      let totalWritten = 0;
+      let hasMore = true;
+      let guard = 0; // hard stop so a server bug can't spin this forever
+
+      while (hasMore && guard < 50) {
+        guard++;
+        const res = await fetch("/api/admin/sync-razorpay-failures", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ skip }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.error ?? "Sync failed");
+
+        totalScanned += data.scanned ?? 0;
+        totalWritten += data.written ?? 0;
+        skip = data.nextSkip ?? skip;
+        hasMore = Boolean(data.hasMore);
+      }
+
+      setSyncResult(
+        `Scanned ${totalScanned} Razorpay payment${totalScanned === 1 ? "" : "s"}, added/updated ${totalWritten} failed record${totalWritten === 1 ? "" : "s"}.`,
+      );
+      await load();
+    } catch (e) {
+      setSyncResult(e instanceof Error ? `Sync failed: ${e.message}` : "Sync failed.");
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   const counts = useMemo(() => {
     const c = { failed: 0, abandoned: 0, paid: 0 };
@@ -200,15 +265,33 @@ export default function AdminPaymentsPage() {
             Failed and abandoned checkouts, with what the customer was trying to buy.
           </p>
         </div>
-        <button
-          onClick={load}
-          disabled={loading}
-          className="flex items-center gap-2 rounded-lg border border-outline/30 px-3 py-2 text-sm font-semibold text-on-surface-variant transition hover:bg-surface-container disabled:opacity-50"
-        >
-          <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={syncFromRazorpay}
+            disabled={syncing}
+            title="Pull failed payments directly from Razorpay — catches failures the app itself never got to report (killed app, dropped connection, old app version)."
+            className="flex items-center gap-2 rounded-lg bg-primary px-3 py-2 text-sm font-semibold text-white transition hover:opacity-90 disabled:opacity-50"
+          >
+            <Download className={`h-4 w-4 ${syncing ? "animate-pulse" : ""}`} />
+            {syncing ? "Syncing…" : "Sync from Razorpay"}
+          </button>
+          <button
+            onClick={load}
+            disabled={loading}
+            className="flex items-center gap-2 rounded-lg border border-outline/30 px-3 py-2 text-sm font-semibold text-on-surface-variant transition hover:bg-surface-container disabled:opacity-50"
+          >
+            <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+            Refresh
+          </button>
+        </div>
       </div>
+
+      {syncResult && (
+        <div className="flex items-start gap-2 rounded-xl bg-primary/5 px-4 py-3 text-sm text-on-surface">
+          <Download className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+          <span>{syncResult}</span>
+        </div>
+      )}
 
       {/* Summary */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -362,15 +445,20 @@ function AttemptRow({
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-semibold text-on-surface">
-              {a.userName || a.userPhone || "Unknown buyer"}
+              {a.userName || a.userPhone || a.razorpayContact || "Unknown buyer"}
             </span>
             <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${badge.cls}`}>
               {badge.text}
             </span>
             <span className="rounded-full bg-surface-container px-2 py-0.5 text-[11px] font-semibold text-on-surface-variant">
-              {a.source}
+              {SOURCE_LABEL[a.source] ?? a.source}
             </span>
           </div>
+          {!a.userPhone && (a.razorpayContact || a.razorpayEmail) && (
+            <p className="mt-0.5 text-xs text-on-surface-variant">
+              {[a.razorpayContact, a.razorpayEmail].filter(Boolean).join(" · ")}
+            </p>
+          )}
 
           <p className="mt-1 truncate text-sm text-on-surface-variant">
             {a.kind === "subscription"
