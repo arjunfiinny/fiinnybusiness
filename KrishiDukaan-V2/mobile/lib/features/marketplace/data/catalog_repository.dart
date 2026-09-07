@@ -197,8 +197,10 @@ class CatalogRepository {
       for (final copy in retailerCopies) {
         if (copy.name.isEmpty || copy.price <= 0.0) continue;
         final key = copy.name.toLowerCase().trim();
-        final canonical = byName[key];
-        if (canonical == null) continue;
+
+        final copyStoreId = copy.retailerId ?? '';
+        final copyPhone = copy.retailerPhone;
+        if (copyStoreId.isEmpty && (copyPhone == null || copyPhone.isEmpty)) continue;
 
         final copyIds = idsByKey[key] ?? [];
         if (!copyIds.contains(copy.id)) {
@@ -206,11 +208,31 @@ class CatalogRepository {
           idsByKey[key] = copyIds;
         }
 
-        final copyStoreId = copy.retailerId ?? '';
-        final copyPhone = copy.retailerPhone;
-        if (copyStoreId.isEmpty && (copyPhone == null || copyPhone.isEmpty)) continue;
-
         markOnline(key, copy.isOnline == true);
+
+        final copyDiscountPct = copy.maxDiscountPct;
+        recordSellerDiscount(key, copyStoreId, copyPhone, copyDiscountPct);
+
+        final canonical = byName[key];
+        if (canonical == null) {
+          // No canonical product exists for this item yet. Promote this copy
+          // to a standalone marketplace product so the retailer's listing is visible.
+          final avEntry = AvailabilityEntry(
+            storeId: copyStoreId,
+            storePhone: copyPhone,
+            storeName: copy.store,
+            stockLevel: copy.stock ?? 'In Stock',
+            sellingPrice: copy.price,
+            isOnline: copy.isOnline,
+            variants: copy.variants,
+          );
+          byName[key] = copy.copyWith(
+            availability: [avEntry],
+            variants: copy.variants,
+            maxDiscountPct: copyDiscountPct,
+          );
+          continue;
+        }
 
         final av = canonical.availability != null ? List<AvailabilityEntry>.from(canonical.availability!) : <AvailabilityEntry>[];
         
@@ -223,9 +245,6 @@ class CatalogRepository {
             break;
           }
         }
-
-        final copyDiscountPct = copy.maxDiscountPct;
-        recordSellerDiscount(key, copyStoreId, copyPhone, copyDiscountPct);
 
         if (existingIndex != -1) {
           final existing = av[existingIndex];
