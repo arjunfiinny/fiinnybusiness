@@ -778,8 +778,13 @@ function AppRoutes() {
           is driven by the Main Navbar Feature Matrix (navbar.teamPerformance.view).
           The Admin sub-tab at /admin#team-performance remains intact. */}
       <Route path="/team-performance" element={<ProtectedRoute requireRole={['admin', 'analyst']}><TeamPerformancePage /></ProtectedRoute>} />
-      <Route path="/customers" element={<ProtectedRoute requireRole={['admin', 'analyst', 'shopkeeper']} appScreen="customers"><CustomersPage /></ProtectedRoute>} />
-      <Route path="/customers/:id" element={<ProtectedRoute requireRole={['admin', 'analyst', 'shopkeeper']} appScreen="customers"><CustomerProfilePage /></ProtectedRoute>} />
+      {/* Customer Profiles are reachable two ways: the standalone Customers screen
+          AND POS Billing → Customers (posBilling.customers.view, rendered inline in
+          /pos). altFeature OR-admits the POS surface so opening a customer — and the
+          profile's "back to list" — never wrongly redirects a role that has POS
+          Customers but not the standalone customers screen. */}
+      <Route path="/customers" element={<ProtectedRoute requireRole={['admin', 'analyst', 'shopkeeper']} appScreen="customers" altScreen="pos" altFeature="posBilling.customers.view"><CustomersPage /></ProtectedRoute>} />
+      <Route path="/customers/:id" element={<ProtectedRoute requireRole={['admin', 'analyst', 'shopkeeper']} appScreen="customers" altScreen="pos" altFeature="posBilling.customers.view"><CustomerProfilePage /></ProtectedRoute>} />
       {/* Legacy /admin/* deep links → hash equivalents (bookmarks stay working) */}
       <Route path="/admin/manage-roles" element={<Navigate to="/admin#feature-permissions" replace />} />
       <Route path="/admin/data-security" element={<Navigate to="/admin#data-security" replace />} />
