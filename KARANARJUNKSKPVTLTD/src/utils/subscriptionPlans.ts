@@ -66,6 +66,68 @@ export const ALL_APP_SCREENS: AppScreen[] = [
 
 export type PlanId = 'retailer' | 'distributor' | 'manufacturer' | (string & {});
 
+/**
+ * Customer-facing pricing & marketing content for a plan. Lives INSIDE the
+ * authoritative `plans/{planId}` document (never in a separate collection), so
+ * there is a single source of truth shared by the Super Admin editor, the public
+ * `/pricing` page, and the Razorpay order/verify Cloud Functions.
+ *
+ * `displayName` is intentionally separate from `Plan.name` (the entitlement
+ * label used in Super Admin tables) so the customer-facing name can be changed
+ * — e.g. "Starter"/"Growth"/"Pro" today — without disturbing the entitlement
+ * identity ("Retailer"/"Distributor"/"Manufacturer").
+ *
+ * Prices are whole INR rupees (NOT paise). The server multiplies by 100 when
+ * creating the Razorpay order.
+ */
+export interface PlanPricing {
+    /** Customer-facing plan name shown on /pricing (e.g. "Starter"). */
+    displayName: string;
+    /** Short one-line pitch under the name. */
+    tagline?: string;
+    /** Longer description (optional). */
+    description?: string;
+    /** Monthly price in whole INR rupees. */
+    monthlyPrice: number;
+    /** Yearly price in whole INR rupees. */
+    yearlyPrice: number;
+    /** Optional override for the savings label; when absent it is computed. */
+    savingsLabel?: string;
+    /** Badge text (e.g. "Most Popular"). */
+    badge?: string;
+    /** Whether the badge is shown. Defaults to true when a badge is set. */
+    badgeVisible?: boolean;
+    /** Feature bullet list. */
+    features: string[];
+    /** Limit bullet list (e.g. "1 Warehouse"). */
+    limits: string[];
+}
+
+/**
+ * The stable pricing-tier id ⇄ entitlement plan id mapping. The public pricing
+ * page and Razorpay client speak in tier ids ('starter'/'growth'/'pro'); the
+ * authoritative catalogue docs are keyed by entitlement plan id. Keep both
+ * directions here so nothing re-derives the mapping ad hoc.
+ */
+export const PRICING_TIER_TO_PLAN_ID: Record<string, PlanId> = {
+    starter: 'retailer',
+    growth: 'distributor',
+    pro: 'manufacturer',
+};
+export const PLAN_ID_TO_PRICING_TIER: Record<string, string> = {
+    retailer: 'starter',
+    distributor: 'growth',
+    manufacturer: 'pro',
+};
+
+/** Compute the % saved by paying yearly vs 12× monthly (0 when not applicable). */
+export function computeSavingsPct(monthlyPrice: number, yearlyPrice: number): number {
+    if (!monthlyPrice || monthlyPrice <= 0) return 0;
+    const full = monthlyPrice * 12;
+    if (yearlyPrice >= full || yearlyPrice <= 0) return 0;
+    return Math.round(((full - yearlyPrice) / full) * 100);
+}
+
 export type SubscriptionStatus =
     | 'active'      // paid & current
     | 'trial'       // trial period, full access
@@ -94,6 +156,12 @@ export interface Plan {
     modules?: string[];
     /** Super-Admin-configured default landing page path for this plan (e.g. '/pos'). */
     defaultLandingPath?: string;
+    /**
+     * Customer-facing pricing & marketing content shown on the public `/pricing`
+     * page and used (server-side) to price the Razorpay order. Optional so plans
+     * that predate this field keep working; falls back to DEFAULT_PLAN_PRICING.
+     */
+    pricing?: PlanPricing;
     createdAt?: unknown;
     updatedAt?: unknown;
 }
@@ -182,6 +250,73 @@ const MANUFACTURER_SCREENS: AppScreen[] = [
 
 const dedupe = (arr: AppScreen[]): AppScreen[] => Array.from(new Set(arr));
 
+// ─── Default customer-facing pricing (seed source of truth) ─────────────────────
+// Mirrors exactly what the /pricing page and Razorpay used to hardcode, keyed by
+// entitlement plan id. Both the Super Admin editor and PricingPage fall back to
+// this when a plan doc has no `pricing` block, and the Cloud Functions fall back
+// to it when the doc/field is missing — so behaviour is unchanged until edited.
+export const DEFAULT_PLAN_PRICING: Record<'retailer' | 'distributor' | 'manufacturer', PlanPricing> = {
+    retailer: {
+        displayName: 'Starter',
+        tagline: 'Perfect for small retailers',
+        monthlyPrice: 999,
+        yearlyPrice: 9990,
+        features: [
+            'Up to 500 invoices / month',
+            'GST Invoice & POS Billing',
+            'GSTR-1 & GSTR-3B Reports',
+            'WhatsApp Payment Reminders',
+            'Basic Inventory (500 SKUs)',
+            'Up to 3 users',
+            'Email Support',
+        ],
+        limits: ['1 Business Profile', '1 Warehouse'],
+    },
+    distributor: {
+        displayName: 'Growth',
+        tagline: 'For growing businesses',
+        monthlyPrice: 1999,
+        yearlyPrice: 19990,
+        badge: 'Most Popular',
+        badgeVisible: true,
+        features: [
+            'Unlimited invoices',
+            'Everything in Starter',
+            'Purchase Orders & Delivery Challans',
+            'Quotations → Invoice conversion',
+            'Inventory Batch + Expiry Tracking',
+            'Barcode Label Printing',
+            'Financial Reports (P&L, Balance Sheet)',
+            'Multi-Warehouse / Godown',
+            'Up to 10 users',
+            'Priority Support',
+        ],
+        limits: ['3 Business Profiles', '5 Warehouses'],
+    },
+    manufacturer: {
+        displayName: 'Pro',
+        tagline: 'For enterprise operations',
+        monthlyPrice: 2999,
+        yearlyPrice: 29990,
+        badge: 'Best Value',
+        badgeVisible: true,
+        features: [
+            'Everything in Growth',
+            'Unlimited users',
+            'Unlimited Business Profiles',
+            'Unlimited Warehouses',
+            'AI Business Advisor (insights, reorders)',
+            'Online Payment Links (Razorpay)',
+            'Multi-Company Support',
+            'Custom Invoice Templates (10+)',
+            'Offline PWA Mode',
+            'Dedicated Account Manager',
+            'API Access',
+        ],
+        limits: ['Unlimited everything'],
+    },
+};
+
 export const DEFAULT_PLAN_CATALOGUE: Record<'retailer' | 'distributor' | 'manufacturer', Plan> = {
     retailer: {
         id: 'retailer',
@@ -190,6 +325,7 @@ export const DEFAULT_PLAN_CATALOGUE: Record<'retailer' | 'distributor' | 'manufa
         tier: 1,
         isActive: true,
         screens: dedupe(RETAILER_SCREENS),
+        pricing: DEFAULT_PLAN_PRICING.retailer,
     },
     distributor: {
         id: 'distributor',
@@ -198,6 +334,7 @@ export const DEFAULT_PLAN_CATALOGUE: Record<'retailer' | 'distributor' | 'manufa
         tier: 2,
         isActive: true,
         screens: dedupe(DISTRIBUTOR_SCREENS),
+        pricing: DEFAULT_PLAN_PRICING.distributor,
     },
     manufacturer: {
         id: 'manufacturer',
@@ -206,6 +343,7 @@ export const DEFAULT_PLAN_CATALOGUE: Record<'retailer' | 'distributor' | 'manufa
         tier: 3,
         isActive: true,
         screens: dedupe(MANUFACTURER_SCREENS),
+        pricing: DEFAULT_PLAN_PRICING.manufacturer,
     },
 };
 

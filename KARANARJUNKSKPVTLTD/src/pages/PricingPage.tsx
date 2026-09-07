@@ -1,9 +1,17 @@
 import { useState, useEffect } from 'react';
+import { collection, onSnapshot } from 'firebase/firestore';
+import { db } from '../firebase';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { Check, Zap, Building2, Rocket, Star, Shield, ArrowRight, Crown, Loader2, CheckCircle2 } from 'lucide-react';
+import {
+  DEFAULT_PLAN_PRICING,
+  PLAN_ID_TO_PRICING_TIER,
+  computeSavingsPct,
+  type PlanPricing,
+} from '../utils/subscriptionPlans';
 
 declare global {
   interface Window {
@@ -16,94 +24,56 @@ interface Plan {
   name: string;
   icon: React.ReactNode;
   tagline: string;
+  description?: string;
   monthlyPrice: number;
   yearlyPrice: number;
   color: string;
   gradient: string;
   badge?: string;
+  badgeVisible?: boolean;
+  savingsLabel?: string;
   features: string[];
   limits: string[];
 }
 
-const PLANS: Plan[] = [
-  {
-    id: 'starter',
-    name: 'Starter',
-    icon: <Zap size={22} />,
-    tagline: 'Perfect for small retailers',
-    monthlyPrice: 999,
-    yearlyPrice: 9990,
-    color: '#6366f1',
-    gradient: 'linear-gradient(135deg, #6366f1, #8b5cf6)',
-    features: [
-      'Up to 500 invoices / month',
-      'GST Invoice & POS Billing',
-      'GSTR-1 & GSTR-3B Reports',
-      'WhatsApp Payment Reminders',
-      'Basic Inventory (500 SKUs)',
-      'Up to 3 users',
-      'Email Support',
-    ],
-    limits: ['1 Business Profile', '1 Warehouse'],
-  },
-  {
-    id: 'growth',
-    name: 'Growth',
-    icon: <Rocket size={22} />,
-    tagline: 'For growing businesses',
-    monthlyPrice: 1999,
-    yearlyPrice: 19990,
-    color: '#10b981',
-    gradient: 'linear-gradient(135deg, #10b981, #059669)',
-    badge: 'Most Popular',
-    features: [
-      'Unlimited invoices',
-      'Everything in Starter',
-      'Purchase Orders & Delivery Challans',
-      'Quotations → Invoice conversion',
-      'Inventory Batch + Expiry Tracking',
-      'Barcode Label Printing',
-      'Financial Reports (P&L, Balance Sheet)',
-      'Multi-Warehouse / Godown',
-      'Up to 10 users',
-      'Priority Support',
-    ],
-    limits: ['3 Business Profiles', '5 Warehouses'],
-  },
-  {
-    id: 'pro',
-    name: 'Pro',
-    icon: <Crown size={22} />,
-    tagline: 'For enterprise operations',
-    monthlyPrice: 2999,
-    yearlyPrice: 29990,
-    color: '#f59e0b',
-    gradient: 'linear-gradient(135deg, #f59e0b, #d97706)',
-    badge: 'Best Value',
-    features: [
-      'Everything in Growth',
-      'Unlimited users',
-      'Unlimited Business Profiles',
-      'Unlimited Warehouses',
-      'AI Business Advisor (insights, reorders)',
-      'Online Payment Links (Razorpay)',
-      'Multi-Company Support',
-      'Custom Invoice Templates (10+)',
-      'Offline PWA Mode',
-      'Dedicated Account Manager',
-      'API Access',
-    ],
-    limits: ['Unlimited everything'],
-  },
+// Per-tier visual styling only. Names, prices, features, limits and badges come
+// from the authoritative `plans/{catalogId}.pricing` docs (Super Admin editor),
+// falling back to DEFAULT_PLAN_PRICING. This keeps a single pricing source of
+// truth shared with Razorpay and never duplicates prices in the client.
+const PLAN_VISUALS: {
+  id: string;
+  catalogId: 'retailer' | 'distributor' | 'manufacturer';
+  icon: React.ReactNode;
+  color: string;
+  gradient: string;
+}[] = [
+  { id: 'starter', catalogId: 'retailer',     icon: <Zap size={22} />,   color: '#6366f1', gradient: 'linear-gradient(135deg, #6366f1, #8b5cf6)' },
+  { id: 'growth',  catalogId: 'distributor',  icon: <Rocket size={22} />, color: '#10b981', gradient: 'linear-gradient(135deg, #10b981, #059669)' },
+  { id: 'pro',     catalogId: 'manufacturer', icon: <Crown size={22} />,  color: '#f59e0b', gradient: 'linear-gradient(135deg, #f59e0b, #d97706)' },
 ];
 
-// Reverse-map the Phase 2A catalog plan id → PricingPage tier id so the
-// "Current Plan" badge matches what the user selected.
-const CATALOG_TO_PRICING_TIER: Record<string, string> = {
-  retailer:     'starter',
-  distributor:  'growth',
-  manufacturer: 'pro',
-};
+// Merge a visual tier with its authoritative pricing content into a render model.
+function buildPlan(
+  visual: typeof PLAN_VISUALS[number],
+  pricing: PlanPricing,
+): Plan {
+  return {
+    id: visual.id,
+    name: pricing.displayName,
+    icon: visual.icon,
+    tagline: pricing.tagline ?? '',
+    description: pricing.description,
+    monthlyPrice: pricing.monthlyPrice,
+    yearlyPrice: pricing.yearlyPrice,
+    color: visual.color,
+    gradient: visual.gradient,
+    badge: pricing.badge,
+    badgeVisible: pricing.badgeVisible ?? !!pricing.badge,
+    savingsLabel: pricing.savingsLabel,
+    features: pricing.features ?? [],
+    limits: pricing.limits ?? [],
+  };
+}
 
 // ─── API helper ──────────────────────────────────────────────────────────────
 // Functions are now onRequest endpoints proxied through Firebase Hosting rewrites.
@@ -164,15 +134,43 @@ export default function PricingPage() {
   const [verifying, setVerifying] = useState<string | null>(null);
   // activating: shown briefly after verification succeeds, before navigating away
   const [activating, setActivating] = useState(false);
+  // Live pricing content keyed by catalog plan id, streamed from `plans/*` so any
+  // Super Admin edit is reflected here immediately.
+  const [pricingByCatalog, setPricingByCatalog] = useState<Record<string, PlanPricing>>({});
+  const [plansLoading, setPlansLoading] = useState(true);
 
   useEffect(() => {
     loadRazorpayScript();
   }, []);
 
+  // Subscribe to the authoritative plan catalogue. Falls back to defaults on error
+  // or missing docs so the page always renders pricing.
+  useEffect(() => {
+    const unsub = onSnapshot(
+      collection(db, 'plans'),
+      snap => {
+        const map: Record<string, PlanPricing> = {};
+        snap.docs.forEach(d => {
+          const data = d.data() as { pricing?: PlanPricing };
+          if (data.pricing) map[d.id] = data.pricing;
+        });
+        setPricingByCatalog(map);
+        setPlansLoading(false);
+      },
+      () => setPlansLoading(false),
+    );
+    return () => unsub();
+  }, []);
+
+  // Render model: authoritative pricing merged with per-tier visuals.
+  const plans: Plan[] = PLAN_VISUALS.map(v =>
+    buildPlan(v, pricingByCatalog[v.catalogId] ?? DEFAULT_PLAN_PRICING[v.catalogId])
+  );
+
   // Derive current plan from AuthContext (same source as the rest of the app).
   // planEntitlements.planId is the catalog id (retailer/distributor/manufacturer).
   const activePlanId = planEntitlements.hasSubscription && planEntitlements.planId
-    ? (CATALOG_TO_PRICING_TIER[planEntitlements.planId] ?? planEntitlements.planId)
+    ? (PLAN_ID_TO_PRICING_TIER[planEntitlements.planId] ?? planEntitlements.planId)
     : null;
 
   const handleSubscribe = async (plan: Plan) => {
@@ -266,7 +264,14 @@ export default function PricingPage() {
   };
 
   const displayPrice = (p: Plan) => cycle === 'yearly' ? Math.round(p.yearlyPrice / 12) : p.monthlyPrice;
-  const savings = (p: Plan) => Math.round(((p.monthlyPrice * 12 - p.yearlyPrice) / (p.monthlyPrice * 12)) * 100);
+  const savings = (p: Plan) => computeSavingsPct(p.monthlyPrice, p.yearlyPrice);
+  // Prefer a Super-Admin-set savings label; otherwise auto-compute "Save X%".
+  const savingsText = (p: Plan) => p.savingsLabel || (savings(p) > 0 ? `Save ${savings(p)}% vs monthly` : '');
+  // Known badges are localized; custom badges render verbatim.
+  const badgeLabel = (badge: string) =>
+    badge === 'Most Popular' ? t('pricing.most_popular')
+    : badge === 'Best Value' ? t('pricing.best_value')
+    : badge;
 
   // Full-page activation overlay shown briefly after server verification succeeds.
   if (activating) {
@@ -298,6 +303,12 @@ export default function PricingPage() {
           {t('pricing.desc')}. All plans include GST compliance, invoicing, and inventory management.
         </p>
 
+        {plansLoading && (
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', color: 'var(--text-tertiary)', fontSize: '0.82rem', marginBottom: '1rem' }}>
+            <Loader2 size={14} className="animate-spin" /> Loading latest pricing…
+          </div>
+        )}
+
         {/* Current Plan Badge — driven by AuthContext planEntitlements */}
         {activePlanId && (
           <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem', padding: '0.5rem 1.25rem', background: 'hsla(38,92%,50%,0.1)', border: '1px solid hsla(38,92%,50%,0.3)', borderRadius: '12px', color: '#f59e0b', fontWeight: 700, fontSize: '0.9rem', marginBottom: '1.5rem' }}>
@@ -320,9 +331,10 @@ export default function PricingPage() {
 
       {/* Plan Cards */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '1.5rem', alignItems: 'start' }}>
-        {PLANS.map(plan => {
+        {plans.map(plan => {
           const isCurrentPlan = activePlanId === plan.id;
-          const isPopular = plan.badge === 'Most Popular';
+          const showBadge = !!plan.badge && plan.badgeVisible !== false;
+          const isPopular = showBadge && plan.badge === 'Most Popular';
           const price = displayPrice(plan);
           const isBusy = paying === plan.id || verifying === plan.id;
           const anyBusy = !!(paying || verifying);
@@ -341,9 +353,9 @@ export default function PricingPage() {
               }}
             >
               {/* Badge */}
-              {plan.badge && (
+              {showBadge && (
                 <div style={{ position: 'absolute' as const, top: '1rem', right: '1rem', padding: '0.25rem 0.75rem', background: plan.gradient, color: '#fff', borderRadius: '20px', fontSize: '0.72rem', fontWeight: 800, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>
-                  {plan.badge === 'Most Popular' ? t('pricing.most_popular') : t('pricing.best_value')}
+                  {badgeLabel(plan.badge!)}
                 </div>
               )}
 
@@ -364,7 +376,7 @@ export default function PricingPage() {
                 </div>
                 {cycle === 'yearly' && (
                   <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
-                    ₹{plan.yearlyPrice.toLocaleString('en-IN')}/yr · Save {savings(plan)}% vs monthly
+                    ₹{plan.yearlyPrice.toLocaleString('en-IN')}/yr{savingsText(plan) ? ` · ${savingsText(plan)}` : ''}
                   </div>
                 )}
               </div>
