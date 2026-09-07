@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
     ShieldCheck, Save, Layers, Building2, RefreshCw, Check, Info, ArrowLeft, Loader2, LayoutDashboard,
-    LayoutGrid, Pencil, X, Calendar, CreditCard,
+    LayoutGrid, Pencil, X, Calendar, CreditCard, Plus, Trash2, Tag, Zap, Rocket, Crown, Eye,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { collection, getDocs, doc, setDoc, serverTimestamp, query, orderBy } from 'firebase/firestore';
@@ -10,9 +10,12 @@ import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import {
     DEFAULT_PLAN_CATALOGUE,
+    DEFAULT_PLAN_PRICING,
     ALWAYS_ALLOWED_SCREENS,
+    computeSavingsPct,
     type Plan,
     type PlanId,
+    type PlanPricing,
     type SubscriptionStatus,
     type TenantSubscription,
 } from '../utils/subscriptionPlans';
@@ -28,6 +31,68 @@ const PLAN_ORDER: PlanId[] = ['retailer', 'distributor', 'manufacturer'];
 // Stable signature of the editor's state — used to detect unsaved edits.
 const serializeEditor = (keys: Set<string>, sections: Set<string>, landing: string) =>
     JSON.stringify({ k: [...keys].sort(), s: [...sections].sort(), l: landing });
+
+// Per-plan card visuals for the live preview — mirrors PLAN_VISUALS on the
+// customer PricingPage so the preview looks like the real /pricing card.
+const PLAN_PREVIEW_VISUALS: Record<string, { icon: typeof Zap; color: string; gradient: string }> = {
+    retailer:     { icon: Zap,    color: '#6366f1', gradient: 'linear-gradient(135deg, #6366f1, #8b5cf6)' },
+    distributor:  { icon: Rocket, color: '#10b981', gradient: 'linear-gradient(135deg, #10b981, #059669)' },
+    manufacturer: { icon: Crown,  color: '#f59e0b', gradient: 'linear-gradient(135deg, #f59e0b, #d97706)' },
+};
+
+// A blank pricing block, used when neither the plan doc nor the seed defaults
+// carry pricing (e.g. a future custom plan id).
+const EMPTY_PRICING: PlanPricing = {
+    displayName: '', tagline: '', monthlyPrice: 0, yearlyPrice: 0,
+    badge: '', badgeVisible: false, features: [], limits: [],
+};
+
+// Resolve the pricing to edit: the plan doc's own pricing, else the seed default
+// for this plan id, else a blank block. Cloned so edits never mutate the source.
+const resolvePricing = (planId: string, existing?: Plan): PlanPricing => {
+    const src = existing?.pricing
+        ?? DEFAULT_PLAN_PRICING[planId as keyof typeof DEFAULT_PLAN_PRICING]
+        ?? EMPTY_PRICING;
+    return {
+        displayName: src.displayName ?? '',
+        tagline: src.tagline ?? '',
+        description: src.description ?? '',
+        monthlyPrice: src.monthlyPrice ?? 0,
+        yearlyPrice: src.yearlyPrice ?? 0,
+        savingsLabel: src.savingsLabel ?? '',
+        badge: src.badge ?? '',
+        badgeVisible: src.badgeVisible ?? !!src.badge,
+        features: [...(src.features ?? [])],
+        limits: [...(src.limits ?? [])],
+    };
+};
+
+// Validate the pricing block. Returns a user-facing error string, or null when OK.
+const validatePricing = (p: PlanPricing): string | null => {
+    if (!p.displayName.trim()) return 'Plan name is required.';
+    if (!Number.isFinite(p.monthlyPrice) || p.monthlyPrice < 0) return 'Monthly price must be a non-negative number.';
+    if (!Number.isFinite(p.yearlyPrice) || p.yearlyPrice < 0) return 'Yearly price must be a non-negative number.';
+    if (p.monthlyPrice <= 0) return 'Monthly price must be greater than 0.';
+    if (p.yearlyPrice <= 0) return 'Yearly price must be greater than 0.';
+    const feats = p.features.map(f => f.trim()).filter(Boolean);
+    if (feats.length === 0) return 'Add at least one feature.';
+    if (p.badgeVisible && !p.badge?.trim()) return 'Badge text is required when the badge is visible.';
+    return null;
+};
+
+// Strip empty entries and undefined-y fields so the stored doc stays clean.
+const cleanPricing = (p: PlanPricing): PlanPricing => ({
+    displayName: p.displayName.trim(),
+    ...(p.tagline?.trim() ? { tagline: p.tagline.trim() } : {}),
+    ...(p.description?.trim() ? { description: p.description.trim() } : {}),
+    monthlyPrice: Math.round(p.monthlyPrice),
+    yearlyPrice: Math.round(p.yearlyPrice),
+    ...(p.savingsLabel?.trim() ? { savingsLabel: p.savingsLabel.trim() } : {}),
+    ...(p.badge?.trim() ? { badge: p.badge.trim() } : {}),
+    badgeVisible: !!p.badgeVisible && !!p.badge?.trim(),
+    features: p.features.map(f => f.trim()).filter(Boolean),
+    limits: p.limits.map(l => l.trim()).filter(Boolean),
+});
 
 // Selectable landing pages per plan. Keyed by the SUBSCRIPTION_MODULES key that
 // must be enabled in the plan for this path to appear in the dropdown.
@@ -152,8 +217,11 @@ export default function SuperAdminSubscriptionsPage() {
     const [editKeys, setEditKeys] = useState<Set<string>>(new Set());
     const [editSections, setEditSections] = useState<Set<string>>(new Set());
     const [editDefaultLanding, setEditDefaultLanding] = useState('');
+    // Customer-facing pricing/marketing content for the selected plan.
+    const [editPricing, setEditPricing] = useState<PlanPricing>(EMPTY_PRICING);
     // Signature of the plan as loaded; Save enables only when the editor differs.
     const [planBaseline, setPlanBaseline] = useState('');
+    const [pricingBaseline, setPricingBaseline] = useState('');
     const [savingPlan, setSavingPlan] = useState(false);
     const [seeding, setSeeding] = useState(false);
 
@@ -264,10 +332,13 @@ export default function SuperAdminSubscriptionsPage() {
             existing?.features ?? seed?.features ?? [],
         );
         const landing = existing?.defaultLandingPath ?? '';
+        const pricing = resolvePricing(selectedPlan, existing);
         setEditKeys(enabledKeys);
         setEditSections(includedSections);
         setEditDefaultLanding(landing);
+        setEditPricing(pricing);
         setPlanBaseline(serializeEditor(enabledKeys, includedSections, landing));
+        setPricingBaseline(JSON.stringify(pricing));
     }, [selectedPlan, plans]);
 
     if (!isSuperAdmin) {
@@ -297,6 +368,10 @@ export default function SuperAdminSubscriptionsPage() {
 
     const savePlan = async () => {
         if (!selectedPlan) return;
+        // Validate customer-facing pricing before writing — blocks invalid/negative
+        // prices, missing name, empty features and inconsistent badge state.
+        const pricingError = validatePricing(editPricing);
+        if (pricingError) { showToast(pricingError, 'error'); return; }
         setSavingPlan(true);
         try {
             const seed = DEFAULT_PLAN_CATALOGUE[selectedPlan as keyof typeof DEFAULT_PLAN_CATALOGUE];
@@ -304,6 +379,7 @@ export default function SuperAdminSubscriptionsPage() {
             const { screens: moduleScreens, features } = buildPlanEntitlement({ enabledKeys: editKeys, includedSections: editSections });
             // Always-allowed screens (Settings) are stored so the set is complete.
             const screens = Array.from(new Set([...moduleScreens, ...ALWAYS_ALLOWED_SCREENS]));
+            const pricing = cleanPricing(editPricing);
             const payload: Plan = {
                 id: selectedPlan,
                 name: existing?.name ?? seed?.name ?? selectedPlan,
@@ -313,6 +389,7 @@ export default function SuperAdminSubscriptionsPage() {
                 screens,
                 features,
                 modules: existing?.modules ?? seed?.modules ?? [],
+                pricing,
                 ...(editDefaultLanding ? { defaultLandingPath: editDefaultLanding } : {}),
                 createdAt: existing?.createdAt ?? serverTimestamp(),
                 updatedAt: serverTimestamp(),
@@ -373,8 +450,11 @@ export default function SuperAdminSubscriptionsPage() {
         }
     };
 
-    // Save enables only when the editor differs from the plan as loaded.
-    const planDirty = serializeEditor(editKeys, editSections, editDefaultLanding) !== planBaseline;
+    // Save enables only when the editor differs from the plan as loaded (either the
+    // module/landing entitlements or the customer-facing pricing content).
+    const planDirty =
+        serializeEditor(editKeys, editSections, editDefaultLanding) !== planBaseline ||
+        JSON.stringify(editPricing) !== pricingBaseline;
 
     // Overview metrics
     const activeCount = tenants.filter(t => t.subscription && ['active', 'trial', 'past_due'].includes(t.subscription.status)).length;
@@ -610,16 +690,25 @@ export default function SuperAdminSubscriptionsPage() {
                             ) : PLAN_ORDER.map(id => {
                                 const p = plans[id];
                                 const seed = DEFAULT_PLAN_CATALOGUE[id as keyof typeof DEFAULT_PLAN_CATALOGUE];
+                                const pr = resolvePricing(id, p);
                                 return (
                                     <div key={id} onClick={() => setSelectedPlan(id)}
                                         style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.9rem 1.25rem', cursor: 'pointer', borderBottom: '1px solid var(--surface-border)' }}>
                                         <div style={{ flex: 1 }}>
-                                            <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>{p?.name || seed?.name}</div>
-                                            <div style={{ fontSize: '0.78rem', color: 'var(--text-tertiary)' }}>{p?.description || seed?.description}</div>
+                                            <div style={{ fontWeight: 600, fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                                {pr.displayName || p?.name || seed?.name}
+                                                {pr.badge && pr.badgeVisible && (
+                                                    <span style={{ ...badgeBase, background: 'hsla(38,92%,50%,0.15)', color: 'hsl(38,80%,45%)' }}>{pr.badge}</span>
+                                                )}
+                                            </div>
+                                            <div style={{ fontSize: '0.78rem', color: 'var(--text-tertiary)' }}>{pr.tagline || p?.description || seed?.description}</div>
                                         </div>
-                                        <span style={{ fontSize: '0.72rem', color: 'var(--text-tertiary)' }}>
-                                            {p ? `${derivePlanEditorState(p.screens, p.features).enabledKeys.size} modules` : 'not seeded'}
-                                        </span>
+                                        <div style={{ textAlign: 'right' }}>
+                                            <div style={{ fontWeight: 700, fontSize: '0.9rem' }}>₹{pr.monthlyPrice.toLocaleString('en-IN')}<span style={{ fontSize: '0.72rem', color: 'var(--text-tertiary)', fontWeight: 400 }}>/mo</span></div>
+                                            <div style={{ fontSize: '0.72rem', color: 'var(--text-tertiary)' }}>
+                                                {p ? `${derivePlanEditorState(p.screens, p.features).enabledKeys.size} modules` : 'not seeded'}
+                                            </div>
+                                        </div>
                                     </div>
                                 );
                             })}
@@ -653,6 +742,23 @@ export default function SuperAdminSubscriptionsPage() {
                             Where a module has sub-sections you can narrow the subscription further (e.g. Worklist on,
                             Payment Reminders off). View/Add/Edit/Delete stay with the Business Admin.
                         </p>
+
+                        {/* Customer-facing pricing & content — shown on /pricing and used to
+                            price the Razorpay order server-side. Single source of truth.
+                            The editor and a live /pricing preview sit side by side. */}
+                        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(300px, 360px)', gap: '1.25rem', alignItems: 'start' }}>
+                            <PricingEditor value={editPricing} onChange={setEditPricing} />
+                            <div style={{ position: 'sticky', top: '1rem' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', marginBottom: '0.6rem', color: 'var(--text-secondary)', fontSize: '0.82rem', fontWeight: 600 }}>
+                                    <Eye size={15} /> Live preview · /pricing
+                                </div>
+                                <PricingPreviewCard value={editPricing} planId={selectedPlan} />
+                            </div>
+                        </div>
+
+                        <h3 style={{ fontSize: '1.02rem', margin: '1.5rem 0 0.75rem', display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                            <Layers size={17} /> Module Access
+                        </h3>
 
                         <div className="glass-panel" style={{ overflow: 'hidden' }}>
                             {SUBSCRIPTION_MODULES.map(mod => {
@@ -893,6 +999,254 @@ function EditSubscriptionModal({
                     </button>
                 </div>
             </div>
+        </div>
+    );
+}
+
+// ─── Pricing & content editor ─────────────────────────────────────────────────
+// Edits the customer-facing PlanPricing block: name, tagline, description,
+// monthly/yearly price, savings label, badge (+ visibility) and the feature /
+// limit lists. This is the SAME data /pricing renders and Razorpay prices from.
+const fieldLabel: React.CSSProperties = {
+    display: 'block', fontSize: '0.78rem', fontWeight: 600, marginBottom: '0.3rem', color: 'var(--text-secondary)',
+};
+
+function PricingEditor({ value, onChange }: { value: PlanPricing; onChange: (p: PlanPricing) => void }) {
+    const set = <K extends keyof PlanPricing>(k: K, v: PlanPricing[K]) => onChange({ ...value, [k]: v });
+    const savingsPct = computeSavingsPct(value.monthlyPrice, value.yearlyPrice);
+    const priceError = validatePricing(value);
+
+    return (
+        <div className="glass-panel" style={{ padding: '1.25rem 1.5rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', marginBottom: '1rem' }}>
+                <Tag size={17} style={{ color: 'var(--primary-light)' }} />
+                <h3 style={{ fontSize: '1.02rem', margin: 0 }}>Pricing &amp; Content</h3>
+                <span style={{ fontSize: '0.74rem', color: 'var(--text-tertiary)', marginLeft: 'auto' }}>
+                    Shown on the customer /pricing page
+                </span>
+            </div>
+
+            {/* Name + tagline */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+                <div>
+                    <label style={fieldLabel}>Plan Name (customer-facing) *</label>
+                    <input className="input-field" style={{ width: '100%' }} value={value.displayName}
+                        placeholder="e.g. Starter"
+                        onChange={e => set('displayName', e.target.value)} />
+                </div>
+                <div>
+                    <label style={fieldLabel}>Tagline</label>
+                    <input className="input-field" style={{ width: '100%' }} value={value.tagline ?? ''}
+                        placeholder="e.g. Perfect for small retailers"
+                        onChange={e => set('tagline', e.target.value)} />
+                </div>
+            </div>
+
+            {/* Description */}
+            <div style={{ marginBottom: '1rem' }}>
+                <label style={fieldLabel}>Description</label>
+                <textarea className="input-field" style={{ width: '100%', minHeight: '52px', resize: 'vertical' }}
+                    value={value.description ?? ''}
+                    placeholder="Optional longer description"
+                    onChange={e => set('description', e.target.value)} />
+            </div>
+
+            {/* Prices */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+                <div>
+                    <label style={fieldLabel}>Monthly Price (₹) *</label>
+                    <input className="input-field" type="number" min={0} step={1} style={{ width: '100%' }}
+                        value={Number.isFinite(value.monthlyPrice) ? value.monthlyPrice : 0}
+                        onChange={e => set('monthlyPrice', Number(e.target.value))} />
+                </div>
+                <div>
+                    <label style={fieldLabel}>Yearly Price (₹) *</label>
+                    <input className="input-field" type="number" min={0} step={1} style={{ width: '100%' }}
+                        value={Number.isFinite(value.yearlyPrice) ? value.yearlyPrice : 0}
+                        onChange={e => set('yearlyPrice', Number(e.target.value))} />
+                </div>
+                <div>
+                    <label style={fieldLabel}>Savings Label</label>
+                    <input className="input-field" style={{ width: '100%' }} value={value.savingsLabel ?? ''}
+                        placeholder={savingsPct > 0 ? `Auto: Save ${savingsPct}%` : 'e.g. Save 17%'}
+                        onChange={e => set('savingsLabel', e.target.value)} />
+                    {savingsPct > 0 && !value.savingsLabel && (
+                        <div style={{ fontSize: '0.72rem', color: 'var(--text-tertiary)', marginTop: '0.25rem' }}>
+                            Auto-computed: Save {savingsPct}% vs monthly
+                        </div>
+                    )}
+                </div>
+            </div>
+
+            {/* Badge */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '1rem', alignItems: 'end', marginBottom: '1.25rem' }}>
+                <div>
+                    <label style={fieldLabel}>Badge Text</label>
+                    <input className="input-field" style={{ width: '100%' }} value={value.badge ?? ''}
+                        placeholder="e.g. Most Popular"
+                        onChange={e => set('badge', e.target.value)} />
+                </div>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem', cursor: 'pointer', paddingBottom: '0.6rem', whiteSpace: 'nowrap' }}>
+                    <input type="checkbox" checked={!!value.badgeVisible}
+                        onChange={e => set('badgeVisible', e.target.checked)}
+                        style={{ width: '1.1rem', height: '1.1rem', accentColor: 'var(--primary-light)' }} />
+                    Show badge
+                </label>
+            </div>
+
+            {/* Features */}
+            <StringListEditor
+                title="Features *"
+                items={value.features}
+                placeholder="e.g. GST Invoice & POS Billing"
+                onChange={items => set('features', items)}
+            />
+
+            {/* Limits */}
+            <div style={{ marginTop: '1.25rem' }}>
+                <StringListEditor
+                    title="Plan Limits"
+                    items={value.limits}
+                    placeholder="e.g. 1 Warehouse"
+                    onChange={items => set('limits', items)}
+                />
+            </div>
+
+            {priceError && (
+                <div style={{ marginTop: '1rem', fontSize: '0.8rem', color: 'var(--danger)', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                    <Info size={14} /> {priceError}
+                </div>
+            )}
+        </div>
+    );
+}
+
+// ─── Live /pricing preview card ───────────────────────────────────────────────
+// A faithful, read-only replica of the customer PricingPage card, driven by the
+// editor's in-progress PlanPricing so the Super Admin sees exactly what a
+// customer will see before saving. Has its own monthly/yearly toggle.
+function PricingPreviewCard({ value, planId }: { value: PlanPricing; planId: string | null }) {
+    const [cycle, setCycle] = useState<'monthly' | 'yearly'>('yearly');
+    const visual = PLAN_PREVIEW_VISUALS[planId ?? ''] ?? PLAN_PREVIEW_VISUALS.retailer;
+    const Icon = visual.icon;
+
+    const monthly = Number.isFinite(value.monthlyPrice) ? value.monthlyPrice : 0;
+    const yearly = Number.isFinite(value.yearlyPrice) ? value.yearlyPrice : 0;
+    const price = cycle === 'yearly' ? Math.round(yearly / 12) : monthly;
+    const savingsPct = computeSavingsPct(monthly, yearly);
+    const savingsText = value.savingsLabel || (savingsPct > 0 ? `Save ${savingsPct}% vs monthly` : '');
+    const showBadge = !!value.badge?.trim() && value.badgeVisible !== false;
+    const isPopular = showBadge && value.badge === 'Most Popular';
+    const features = value.features.map(f => f.trim()).filter(Boolean);
+    const limits = value.limits.map(l => l.trim()).filter(Boolean);
+
+    return (
+        <div style={{
+            background: 'var(--surface-raised)',
+            border: isPopular ? `2px solid ${visual.color}` : '1px solid var(--surface-border)',
+            borderRadius: '20px', overflow: 'hidden', position: 'relative',
+            boxShadow: isPopular ? `0 8px 32px ${visual.color}25` : 'none',
+        }}>
+            {/* Billing toggle */}
+            <div style={{ display: 'flex', justifyContent: 'center', padding: '0.75rem 0.75rem 0' }}>
+                <div style={{ display: 'inline-flex', background: 'var(--surface)', border: '1px solid var(--surface-border)', borderRadius: '10px', padding: '3px', gap: '3px' }}>
+                    {(['monthly', 'yearly'] as const).map(c => (
+                        <button key={c} onClick={() => setCycle(c)} style={{
+                            padding: '0.3rem 0.85rem', borderRadius: '7px', border: 'none', cursor: 'pointer',
+                            fontWeight: c === cycle ? 700 : 500, fontSize: '0.76rem', font: 'inherit',
+                            background: c === cycle ? visual.color : 'transparent',
+                            color: c === cycle ? '#fff' : 'var(--text-secondary)',
+                        }}>{c === 'monthly' ? 'Monthly' : 'Yearly'}</button>
+                    ))}
+                </div>
+            </div>
+
+            {showBadge && (
+                <div style={{ position: 'absolute', top: '1rem', right: '1rem', padding: '0.25rem 0.75rem', background: visual.gradient, color: '#fff', borderRadius: '20px', fontSize: '0.68rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                    {value.badge}
+                </div>
+            )}
+
+            {/* Header */}
+            <div style={{ padding: '1.25rem 1.5rem 1rem', background: `linear-gradient(135deg, ${visual.color}12, ${visual.color}05)`, borderBottom: `1px solid ${visual.color}20`, marginTop: '0.5rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.5rem' }}>
+                    <div style={{ width: 38, height: 38, borderRadius: '11px', background: visual.gradient, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff' }}>
+                        <Icon size={20} />
+                    </div>
+                    <div>
+                        <div style={{ fontWeight: 900, fontSize: '1.1rem' }}>{value.displayName || 'Plan name'}</div>
+                        <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>{value.tagline || ' '}</div>
+                    </div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'flex-end', gap: '0.25rem', marginTop: '0.75rem' }}>
+                    <span style={{ fontSize: '2.1rem', fontWeight: 900, color: visual.color, lineHeight: 1 }}>₹{price.toLocaleString('en-IN')}</span>
+                    <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '0.35rem' }}>/mo</span>
+                </div>
+                {cycle === 'yearly' && (
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
+                        ₹{yearly.toLocaleString('en-IN')}/yr{savingsText ? ` · ${savingsText}` : ''}
+                    </div>
+                )}
+            </div>
+
+            {/* Features + limits */}
+            <div style={{ padding: '1.25rem 1.5rem' }}>
+                <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '0.55rem' }}>
+                    {features.length === 0 && (
+                        <li style={{ fontSize: '0.82rem', color: 'var(--text-tertiary)' }}>No features added yet.</li>
+                    )}
+                    {features.map((f, i) => (
+                        <li key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: '0.55rem', fontSize: '0.83rem' }}>
+                            <Check size={14} style={{ color: visual.color, flexShrink: 0, marginTop: '0.1rem' }} />
+                            <span style={{ color: 'var(--text-secondary)' }}>{f}</span>
+                        </li>
+                    ))}
+                    {limits.map((l, i) => (
+                        <li key={`lim-${i}`} style={{ display: 'flex', alignItems: 'flex-start', gap: '0.55rem', fontSize: '0.83rem' }}>
+                            <Building2 size={14} style={{ color: 'var(--text-tertiary)', flexShrink: 0, marginTop: '0.1rem' }} />
+                            <span style={{ color: 'var(--text-tertiary)' }}>{l}</span>
+                        </li>
+                    ))}
+                </ul>
+            </div>
+        </div>
+    );
+}
+
+// A small add/edit/delete list editor for a string[] (features or limits).
+function StringListEditor({
+    title, items, placeholder, onChange,
+}: {
+    title: string; items: string[]; placeholder: string; onChange: (items: string[]) => void;
+}) {
+    const update = (i: number, v: string) => onChange(items.map((it, idx) => idx === i ? v : it));
+    const remove = (i: number) => onChange(items.filter((_, idx) => idx !== i));
+    const add = () => onChange([...items, '']);
+
+    return (
+        <div>
+            <label style={fieldLabel}>{title}</label>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                {items.length === 0 && (
+                    <div style={{ fontSize: '0.8rem', color: 'var(--text-tertiary)' }}>No items yet.</div>
+                )}
+                {items.map((item, i) => (
+                    <div key={i} style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                        <input className="input-field" style={{ flex: 1 }} value={item}
+                            placeholder={placeholder}
+                            onChange={e => update(i, e.target.value)} />
+                        <button type="button" onClick={() => remove(i)} aria-label="Remove"
+                            className="btn btn-secondary"
+                            style={{ padding: '0.45rem 0.6rem', display: 'inline-flex', alignItems: 'center', color: 'var(--danger)' }}>
+                            <Trash2 size={15} />
+                        </button>
+                    </div>
+                ))}
+            </div>
+            <button type="button" onClick={add} className="btn btn-secondary"
+                style={{ marginTop: '0.6rem', display: 'inline-flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.82rem' }}>
+                <Plus size={15} /> Add
+            </button>
         </div>
     );
 }

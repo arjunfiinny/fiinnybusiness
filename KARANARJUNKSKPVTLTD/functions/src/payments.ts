@@ -42,6 +42,10 @@ function getRazorpay(): Razorpay {
 }
 
 // ─── Plan catalogue ───────────────────────────────────────────────────────────
+// Fallback prices (whole INR rupees), used ONLY when the authoritative
+// `plans/{catalogId}.pricing` document is missing or invalid. The Super Admin
+// editor writes the live prices there; resolvePlanAmounts() reads them so the
+// customer, this order, and verification all use ONE price.
 const PLAN_AMOUNTS: Record<string, { monthly: number; yearly: number }> = {
   starter: { monthly: 999,  yearly: 9990  },
   growth:  { monthly: 1999, yearly: 19990 },
@@ -53,6 +57,38 @@ const PRICING_TO_PLAN_ID: Record<string, string> = {
   growth:  'distributor',
   pro:     'manufacturer',
 };
+
+/** A price is valid only if it is a finite, strictly-positive number. */
+function isValidPrice(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0;
+}
+
+/**
+ * Resolve the authoritative monthly/yearly price (in whole INR rupees) for a
+ * pricing tier. Reads the customer-facing `plans/{catalogId}.pricing` block —
+ * the SAME source the /pricing page renders — and falls back to PLAN_AMOUNTS if
+ * the doc/field is absent or invalid. This guarantees the price charged equals
+ * the price shown, and the client-supplied plan is never trusted for the amount.
+ */
+async function resolvePlanAmounts(
+  pricingTier: string,
+): Promise<{ monthly: number; yearly: number } | null> {
+  const catalogId = PRICING_TO_PLAN_ID[pricingTier] ?? pricingTier;
+  try {
+    const snap = await admin.firestore().doc(`plans/${catalogId}`).get();
+    const pricing = snap.data()?.pricing as
+      | { monthlyPrice?: number; yearlyPrice?: number }
+      | undefined;
+    if (pricing && isValidPrice(pricing.monthlyPrice) && isValidPrice(pricing.yearlyPrice)) {
+      return { monthly: Math.round(pricing.monthlyPrice), yearly: Math.round(pricing.yearlyPrice) };
+    }
+  } catch (err) {
+    functions.logger.warn('[payments] Could not read authoritative plan pricing; using fallback', {
+      pricingTier, catalogId, err,
+    });
+  }
+  return PLAN_AMOUNTS[pricingTier] ?? null;
+}
 
 const PLAN_MODULE_MAP: Record<string, string[]> = {
   starter: ['fast_checkout', 'vpay', 'whatsapp_integration', 'cash_drawer'],
@@ -171,12 +207,14 @@ export const createSaaSOrder = functions
     };
     if (!plan || !cycle || !tenantId) throw httpError(400, 'Missing required parameters: plan, cycle, tenantId');
 
-    const planAmounts = PLAN_AMOUNTS[plan];
-    if (!planAmounts) throw httpError(400, `Unknown plan: ${plan}`);
+    if (!PLAN_AMOUNTS[plan]) throw httpError(400, `Unknown plan: ${plan}`);
     if (cycle !== 'monthly' && cycle !== 'yearly') throw httpError(400, `Unknown billing cycle: ${cycle}`);
 
     await assertTenantOwnership(decoded.uid, tenantId);
 
+    // Authoritative price (same source as /pricing); never trust a client amount.
+    const planAmounts = await resolvePlanAmounts(plan);
+    if (!planAmounts) throw httpError(500, `Pricing unavailable for plan: ${plan}`);
     const amountInPaise = (cycle === 'yearly' ? planAmounts.yearly : planAmounts.monthly) * 100;
     const rzp = getRazorpay();
 
@@ -254,10 +292,12 @@ export const verifySaaSPayment = functions
     if (!plan || !PLAN_AMOUNTS[plan] || (cycle !== 'monthly' && cycle !== 'yearly')) {
       throw httpError(400, 'Order is missing a valid plan or billing cycle');
     }
-    const planAmounts = PLAN_AMOUNTS[plan];
+    const planAmounts = await resolvePlanAmounts(plan);
+    if (!planAmounts) throw httpError(500, `Pricing unavailable for plan: ${plan}`);
 
-    // Defense in depth: the amount actually charged must equal the catalogue price
-    // for the order's plan/cycle — blocks any amount/plan tampering.
+    // Defense in depth: the amount actually charged must equal the authoritative
+    // catalogue price for the order's plan/cycle — blocks any amount/plan tampering.
+    // (Both order creation and this check read the SAME resolvePlanAmounts source.)
     const amountInPaise = (cycle === 'yearly' ? planAmounts.yearly : planAmounts.monthly) * 100;
     if (Number(order.amount) !== amountInPaise) {
       functions.logger.warn('[payments] Order amount mismatch', {
