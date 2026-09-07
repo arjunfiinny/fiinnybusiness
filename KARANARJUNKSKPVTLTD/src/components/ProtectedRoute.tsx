@@ -1,7 +1,7 @@
 import { Navigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import type { UserRole, AppScreen } from '../contexts/AuthContext';
-import { isScreenAllowedByPlan } from '../utils/subscriptionPlans';
+import { isScreenAllowedByPlan, isFeatureAllowedByPlan } from '../utils/subscriptionPlans';
 import { navFeatureGroupForPath, isFeatureGroupAllowed } from '../utils/subscriptionCatalog';
 
 // Mirrors the DEFAULT_LANDING in App.tsx — the built-in fallback when no
@@ -20,6 +20,12 @@ interface ProtectedRouteProps {
     requireAdmin?: boolean;
     requireRole?: UserRole[];
     appScreen?: AppScreen;
+    // Leaf feature-permission key (FeaturePermissions doc). When set, a role that
+    // has this granular action granted is admitted EVEN IF its appScreen permission
+    // is not set — this keeps a route in lock-step with the in-page action that opens
+    // it (e.g. Partners → "Add New" → /onboarding, gated by worklist.partners.create).
+    // The plan gate still applies; roles without the feature stay blocked.
+    requireFeature?: string;
     // Restricts the route to the platform super admin only (superadmin@fiinny.com).
     // Non-super-admin users are redirected to /login regardless of their role.
     requireSuperAdmin?: boolean;
@@ -36,6 +42,8 @@ interface ProtectedRouteProps {
  *      → this is the single source of truth and handles custom roles automatically.
  *   5. requireRole list → used as an additional guard for built-in roles. A custom
  *      role NOT in the list is still admitted when its appScreen permission is true.
+ *   6. requireFeature → a role granted this leaf feature permission is admitted even
+ *      without the appScreen grant, so the route matches the action that opens it.
  *
  * Denied requests are redirected to the user's configured landing page (from
  * roleLandingPages) or the built-in default. Loop prevention: if the landing page
@@ -44,8 +52,8 @@ interface ProtectedRouteProps {
  * DEV bypass removed intentionally — permissions must be testable in all
  * environments including UAT/staging. Use a real Firebase auth session to test.
  */
-export default function ProtectedRoute({ children, requireAdmin = false, requireRole, appScreen, requireSuperAdmin = false }: ProtectedRouteProps) {
-    const { currentUser, userRole, permissions, loading, roleLandingPages, planEntitlements, subscriptionLoading, isSuperAdmin, isImpersonating } = useAuth();
+export default function ProtectedRoute({ children, requireAdmin = false, requireRole, appScreen, requireFeature, requireSuperAdmin = false }: ProtectedRouteProps) {
+    const { currentUser, userRole, permissions, featurePermissions, loading, roleLandingPages, planEntitlements, subscriptionLoading, isSuperAdmin, isImpersonating } = useAuth();
     const location = useLocation();
 
     // Wait for both auth AND the subscription to resolve — denying a gated screen
@@ -115,14 +123,33 @@ export default function ProtectedRoute({ children, requireAdmin = false, require
         return <Navigate to={safeRedirect} replace />;
     }
 
+    // ── Feature-level gate (mirrors useFeaturePermissions) ────────────────────
+    // When a route names a required feature it IS the access gate — the same one
+    // that shows/hides the in-page action that opens this route (e.g. Partners →
+    // "Add New" → /onboarding, gated by worklist.partners.create). A role reaches
+    // the route only when the plan permits the sub-section AND the role has it
+    // granted, so the button and the route can never disagree. 'admin' already
+    // bypassed above. The plan SCREEN gate (planAllowsScreen) still applies below.
+    if (requireFeature) {
+        const planPermitsFeature = isFeatureAllowedByPlan(requireFeature, planEntitlements);
+        const rolePermitsFeature =
+            userRole != null && featurePermissions?.[userRole]?.[requireFeature] === true;
+        if (!planPermitsFeature || !rolePermitsFeature) {
+            return <Navigate to={safeRedirect} replace />;
+        }
+    }
+
     // ── Module-level permission (single source of truth) ──────────────────────
     // Reads the live rolePermissions matrix from Firestore via AuthContext.
     // undefined → not configured for this role → denied (secure by default).
     // Role matrix grant AND the plan must include the screen (plan only subtracts).
+    // A satisfied requireFeature stands in for the screen grant so a feature-gated
+    // route never additionally requires the coarser screen toggle.
     const screenAllowed =
         planAllowsScreen &&
         (!appScreen ||
-            (userRole != null && permissions[userRole]?.[appScreen] === true));
+            (userRole != null && permissions[userRole]?.[appScreen] === true) ||
+            !!requireFeature);
 
     // ── Role list check ───────────────────────────────────────────────────────
     // A custom role will not appear in requireRole (those lists name built-in

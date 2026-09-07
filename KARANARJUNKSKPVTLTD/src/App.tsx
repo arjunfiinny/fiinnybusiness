@@ -700,7 +700,11 @@ function AppRoutes() {
       <Route path="/online-dashboard" element={<ProtectedRoute requireRole={['admin', 'analyst', 'shopkeeper']} appScreen="online_dashboard"><OnlineDashboardPage /></ProtectedRoute>} />
       <Route path="/analytics" element={<ProtectedRoute requireRole={['admin', 'analyst', 'shopkeeper']} appScreen="analytics"><AnalyticsPage /></ProtectedRoute>} />
       <Route path="/admin/manage-store" element={<Navigate to="/admin#manage-store" replace />} />
-      <Route path="/onboarding" element={<ProtectedRoute requireRole={['admin', 'analyst']} appScreen="retailers"><OnboardingPage /></ProtectedRoute>} />
+      {/* Onboarding is the Worklist → Partners "Add New" flow, so it is plan-gated
+          under the worklist screen (present on every plan) and access-gated by the
+          same worklist.partners.create feature that shows the button — not the
+          distributor-only `retailers` screen, which locked Retailer-plan tenants out. */}
+      <Route path="/onboarding" element={<ProtectedRoute requireRole={['admin', 'analyst']} appScreen="worklist" requireFeature="worklist.partners.create"><OnboardingPage /></ProtectedRoute>} />
       <Route path="/sales-targets" element={<ProtectedRoute requireRole={['admin', 'sales']} appScreen="worklist"><SalesTargetsPage /></ProtectedRoute>} />
       <Route path="/worklist" element={<ProtectedRoute requireRole={['admin', 'analyst', 'sales', 'retailer', 'shopkeeper']} appScreen="worklist"><WorklistPage /></ProtectedRoute>} />
       <Route path="/worklist/:id" element={<ProtectedRoute requireRole={['admin', 'analyst', 'sales', 'retailer', 'shopkeeper']} appScreen="worklist"><WorklistDetailsPage /></ProtectedRoute>} />

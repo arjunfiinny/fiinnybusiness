@@ -113,7 +113,7 @@ export const PROTECTED_ROUTES: RoutePermission[] = [
     { path: '/customers/:id',        appScreen: 'customers',        requireRole: ['admin', 'analyst', 'shopkeeper'] },
 
     // Onboarding / retailers
-    { path: '/onboarding',           appScreen: 'retailers',        requireRole: ['admin', 'analyst'] },
+    { path: '/onboarding',           appScreen: 'worklist',         featurePerm: 'worklist.partners.create', requireRole: ['admin', 'analyst'], notes: 'Worklist → Partners "Add New" flow. Plan-gated on the worklist screen (every plan) and access-gated by worklist.partners.create, NOT the distributor-only retailers screen.' },
 
     // Finance
     { path: '/expenses',             appScreen: 'expenses',         requireRole: ['admin', 'analyst'] },
