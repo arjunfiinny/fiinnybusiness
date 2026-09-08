@@ -1,9 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { collection, getDocs } from "firebase/firestore";
 import { getAuth } from "firebase/auth";
-import { Banknote, CheckCircle2, ExternalLink, Loader2, RefreshCw, ShieldAlert } from "lucide-react";
+import { Banknote, CheckCircle2, Copy, ExternalLink, KeyRound, Loader2, RefreshCw, ShieldAlert, Upload } from "lucide-react";
 import { db } from "../../firebase";
 
 /**
@@ -65,6 +65,26 @@ const DOC_LABELS: Record<string, string> = {
 };
 
 const REQUIRED_DOCS = ["pan_card", "cancelled_cheque", "address_proof", "owner_photo", "trade_license"];
+
+/** All doc types the upload-on-behalf-of-seller control can submit — the
+ *  required set plus the optional GST certificate, same list kyc-documents.tsx
+ *  offers the seller directly. */
+const ALL_DOC_TYPES = [...REQUIRED_DOCS, "gst_certificate"];
+
+const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      // result is "data:<mime>;base64,<data>" — strip the prefix.
+      const result = reader.result as string;
+      resolve(result.slice(result.indexOf(",") + 1));
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
 
 export default function AdminPayoutsPage() {
   const [rows, setRows] = useState<PayoutRow[]>([]);
@@ -242,6 +262,12 @@ function ReviewModal({
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [uploadingType, setUploadingType] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [loginLink, setLoginLink] = useState<string | null>(null);
+  const [loginBusy, setLoginBusy] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   const authedFetch = useCallback(
     async (input: string, init?: RequestInit) => {
@@ -258,25 +284,95 @@ function ReviewModal({
     [],
   );
 
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const res = await authedFetch(
-          `/api/admin/payout-kyc?phone=${encodeURIComponent(row.phone)}`,
-        );
-        const json = await res.json();
-        if (!cancelled) setDocs(res.ok ? (json.documents ?? []) : []);
-      } catch {
-        if (!cancelled) setDocs([]);
-      } finally {
-        if (!cancelled) setLoadingDocs(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+  const loadDocs = useCallback(async () => {
+    try {
+      const res = await authedFetch(
+        `/api/admin/payout-kyc?phone=${encodeURIComponent(row.phone)}`,
+      );
+      const json = await res.json();
+      setDocs(res.ok ? (json.documents ?? []) : []);
+    } catch {
+      setDocs([]);
+    } finally {
+      setLoadingDocs(false);
+    }
   }, [row.phone, authedFetch]);
+
+  useEffect(() => {
+    void loadDocs();
+  }, [loadDocs]);
+
+  // Uploads a document Storage would otherwise reject: storage.rules only
+  // grants write access to the seller's own signed-in phone number (see
+  // app/dashboard/_components/kyc-documents.tsx), so when the owner hands the
+  // admin a scan directly — no login of their own set up yet — this goes
+  // through the Admin SDK instead, same as viewing the documents already does.
+  const uploadOnBehalf = async (docType: string, file: File) => {
+    setUploadError(null);
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setUploadError(`${DOC_LABELS[docType] ?? docType} must be under 5 MB.`);
+      return;
+    }
+    const okType = file.type.startsWith("image/") || file.type === "application/pdf";
+    if (!okType) {
+      setUploadError(`${DOC_LABELS[docType] ?? docType} must be an image or a PDF.`);
+      return;
+    }
+
+    setUploadingType(docType);
+    try {
+      const fileBase64 = await fileToBase64(file);
+      const res = await authedFetch("/api/admin/payout-kyc", {
+        method: "POST",
+        body: JSON.stringify({
+          phone: row.phone,
+          action: "upload",
+          docType,
+          fileName: file.name,
+          contentType: file.type,
+          fileBase64,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        setUploadError(json.error ?? "Upload failed.");
+        return;
+      }
+      await loadDocs();
+    } catch {
+      setUploadError("Could not reach the server.");
+    } finally {
+      setUploadingType(null);
+    }
+  };
+
+  // Mints a one-hour custom-token login link for this seller's account, for
+  // when nobody has access to the phone the account is registered to (so a
+  // real OTP can't be received). See /api/admin/impersonate-seller — every
+  // call is written to adminImpersonationLog.
+  const generateLoginLink = async () => {
+    setLoginBusy(true);
+    setLoginError(null);
+    setLoginLink(null);
+    setCopied(false);
+    try {
+      const res = await authedFetch("/api/admin/impersonate-seller", {
+        method: "POST",
+        body: JSON.stringify({ phone: row.phone }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        setLoginError(json.error ?? "Could not create a login link.");
+        return;
+      }
+      const url = `${window.location.origin}/login/impersonate#token=${encodeURIComponent(json.token)}`;
+      setLoginLink(url);
+    } catch {
+      setLoginError("Could not reach the server.");
+    } finally {
+      setLoginBusy(false);
+    }
+  };
 
   const act = async (action: "verify" | "reject") => {
     setBusy(true);
@@ -304,7 +400,9 @@ function ReviewModal({
     }
   };
 
-  const submitted = Object.keys(row.documents ?? {});
+  // Sourced from the live `docs` fetch (refreshed after every admin upload),
+  // not the `row` prop — that only updates once the parent list reloads.
+  const submitted = docs.filter((d) => d.url).map((d) => d.type);
   const missing = REQUIRED_DOCS.filter((d) => !submitted.includes(d));
 
   return (
@@ -377,6 +475,92 @@ function ReviewModal({
           </p>
         )}
 
+        {/* Upload on the seller's behalf — for the case where the owner has
+            handed over a physical/scanned document but has no login of their
+            own yet to upload it themselves. */}
+        <div className="mt-4 rounded-xl border border-outline-variant/30 bg-surface-container-low/40 p-3">
+          <p className="text-xs font-semibold text-on-surface">
+            Upload on the seller&apos;s behalf
+          </p>
+          <p className="mt-0.5 text-xs text-on-surface-variant">
+            Use only when the owner has handed you the document directly and
+            has not signed in to upload it themselves.
+          </p>
+          {uploadError && (
+            <p className="mt-2 rounded-lg bg-red-50 px-2.5 py-1.5 text-xs text-red-700">
+              {uploadError}
+            </p>
+          )}
+          <div className="mt-2 flex flex-wrap gap-2">
+            {ALL_DOC_TYPES.map((docType) => (
+              <UploadChip
+                key={docType}
+                label={DOC_LABELS[docType] ?? docType}
+                hasFile={submitted.includes(docType)}
+                busy={uploadingType === docType}
+                disabled={uploadingType !== null}
+                onPick={(file) => void uploadOnBehalf(docType, file)}
+              />
+            ))}
+          </div>
+        </div>
+
+        {/* Log in as this seller — for accounts with no reachable phone to
+            receive a real OTP. */}
+        <div className="mt-4 rounded-xl border border-outline-variant/30 bg-surface-container-low/40 p-3">
+          <p className="flex items-center gap-1.5 text-xs font-semibold text-on-surface">
+            <KeyRound className="h-3.5 w-3.5" /> Log in as this seller
+          </p>
+          <p className="mt-0.5 text-xs text-on-surface-variant">
+            Use only when nobody can receive an OTP on {row.phone} — this
+            generates a one-hour login link and is recorded in the admin log.
+          </p>
+          {loginError && (
+            <p className="mt-2 rounded-lg bg-red-50 px-2.5 py-1.5 text-xs text-red-700">
+              {loginError}
+            </p>
+          )}
+          {!loginLink ? (
+            <button
+              type="button"
+              disabled={loginBusy}
+              onClick={() => void generateLoginLink()}
+              className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-outline-variant/50 px-3 py-1.5 text-xs font-semibold hover:bg-surface-container disabled:opacity-50"
+            >
+              {loginBusy ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <KeyRound className="h-3.5 w-3.5" />
+              )}
+              Generate login link
+            </button>
+          ) : (
+            <div className="mt-2">
+              <div className="flex items-center gap-2 rounded-lg border border-outline-variant/40 bg-white px-2.5 py-1.5">
+                <code className="min-w-0 flex-1 truncate text-xs text-on-surface-variant">
+                  {loginLink}
+                </code>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void navigator.clipboard.writeText(loginLink);
+                    setCopied(true);
+                  }}
+                  className="shrink-0 inline-flex items-center gap-1 rounded-md border border-outline-variant/50 px-2 py-1 text-xs font-semibold hover:bg-surface-container"
+                >
+                  <Copy className="h-3 w-3" /> {copied ? "Copied" : "Copy"}
+                </button>
+              </div>
+              <p className="mt-1.5 rounded-lg bg-amber-50 px-2.5 py-1.5 text-xs text-amber-900">
+                Open this in an <strong>Incognito / private window</strong>,
+                not your current tab — it signs the browser in as this
+                seller and will replace any admin session already open
+                there. Valid for 1 hour.
+              </p>
+            </div>
+          )}
+        </div>
+
         {/* Linked account */}
         <div className="mt-5">
           <label className="text-sm font-bold text-on-surface">
@@ -436,6 +620,56 @@ function ReviewModal({
         </div>
       </div>
     </div>
+  );
+}
+
+function UploadChip({
+  label,
+  hasFile,
+  busy,
+  disabled,
+  onPick,
+}: {
+  label: string;
+  hasFile: boolean;
+  busy: boolean;
+  disabled: boolean;
+  onPick: (file: File) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  return (
+    <>
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*,application/pdf"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          e.target.value = "";
+          if (file) onPick(file);
+        }}
+      />
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => inputRef.current?.click()}
+        className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold disabled:opacity-50 ${
+          hasFile
+            ? "border-green-200 bg-green-50 text-green-700"
+            : "border-outline-variant/50 text-on-surface hover:bg-surface-container"
+        }`}
+      >
+        {busy ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        ) : hasFile ? (
+          <CheckCircle2 className="h-3.5 w-3.5" />
+        ) : (
+          <Upload className="h-3.5 w-3.5" />
+        )}
+        {label}
+      </button>
+    </>
   );
 }
 
