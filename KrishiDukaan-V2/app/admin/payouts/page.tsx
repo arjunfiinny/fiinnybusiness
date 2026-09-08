@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { collection, getDocs } from "firebase/firestore";
 import { getAuth } from "firebase/auth";
-import { Banknote, CheckCircle2, Copy, ExternalLink, KeyRound, Loader2, RefreshCw, ShieldAlert, Upload } from "lucide-react";
+import { Banknote, CheckCircle2, Copy, ExternalLink, KeyRound, Loader2, RefreshCw, ShieldAlert, Upload, Zap } from "lucide-react";
 import { db } from "../../firebase";
 
 /**
@@ -268,6 +268,9 @@ function ReviewModal({
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [routeBusy, setRouteBusy] = useState(false);
+  const [routeError, setRouteError] = useState<string | null>(null);
+  const [routeResult, setRouteResult] = useState<{ accountId: string; activationStatus: string; warning?: string } | null>(null);
 
   const authedFetch = useCallback(
     async (input: string, init?: RequestInit) => {
@@ -371,6 +374,38 @@ function ReviewModal({
       setLoginError("Could not reach the server.");
     } finally {
       setLoginBusy(false);
+    }
+  };
+
+  // Creates the real Razorpay Route linked account (or, if it already exists,
+  // resubmits the bank details) — see /api/admin/route-onboard-seller. On
+  // success the id is dropped straight into the "Razorpay linked account id"
+  // field below so admin can immediately hit Verify with a real id, instead
+  // of round-tripping through the Razorpay Dashboard by hand.
+  const createRouteAccount = async () => {
+    setRouteBusy(true);
+    setRouteError(null);
+    setRouteResult(null);
+    try {
+      const res = await authedFetch("/api/admin/route-onboard-seller", {
+        method: "POST",
+        body: JSON.stringify({ phone: row.phone }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        setRouteError(json.error ?? "Could not create the Route account.");
+        return;
+      }
+      setRouteResult({
+        accountId: json.accountId,
+        activationStatus: json.activationStatus,
+        warning: json.warning,
+      });
+      if (json.accountId) setLinkedId(json.accountId);
+    } catch {
+      setRouteError("Could not reach the server.");
+    } finally {
+      setRouteBusy(false);
     }
   };
 
@@ -561,15 +596,57 @@ function ReviewModal({
           )}
         </div>
 
+        {/* Automatic account creation — the real alternative to the manual
+            Dashboard step below, using the bank details and profile already
+            on file. */}
+        <div className="mt-4 rounded-xl border border-outline-variant/30 bg-surface-container-low/40 p-3">
+          <p className="flex items-center gap-1.5 text-xs font-semibold text-on-surface">
+            <Zap className="h-3.5 w-3.5" /> Create the Razorpay account automatically
+          </p>
+          <p className="mt-0.5 text-xs text-on-surface-variant">
+            Uses the bank details above and the seller&apos;s profile to create
+            a real Route linked account via the API — no Razorpay Dashboard
+            step, no id to find and paste by hand.
+          </p>
+          {routeError && (
+            <p className="mt-2 rounded-lg bg-red-50 px-2.5 py-1.5 text-xs text-red-700">
+              {routeError}
+            </p>
+          )}
+          {routeResult && (
+            <div className="mt-2 rounded-lg bg-green-50 px-2.5 py-1.5 text-xs text-green-800">
+              <p className="font-mono font-semibold">{routeResult.accountId}</p>
+              <p className="mt-0.5">Status: {routeResult.activationStatus}</p>
+              {routeResult.warning && (
+                <p className="mt-0.5 text-amber-800">{routeResult.warning}</p>
+              )}
+            </div>
+          )}
+          <button
+            type="button"
+            disabled={routeBusy}
+            onClick={() => void createRouteAccount()}
+            className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-outline-variant/50 px-3 py-1.5 text-xs font-semibold hover:bg-surface-container disabled:opacity-50"
+          >
+            {routeBusy ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Zap className="h-3.5 w-3.5" />
+            )}
+            {row.razorpayLinkedAccountId ? "Resubmit bank details" : "Create Route account"}
+          </button>
+        </div>
+
         {/* Linked account */}
         <div className="mt-5">
           <label className="text-sm font-bold text-on-surface">
             Razorpay linked account id
           </label>
           <p className="mt-0.5 text-xs text-on-surface-variant">
-            Create the linked account in the Razorpay Dashboard (Route → Linked
-            Accounts), then paste its id here. Money is transferred to this
-            account — an id belonging to the wrong seller pays the wrong person.
+            Filled in automatically above, or create the linked account in the
+            Razorpay Dashboard (Route → Linked Accounts) and paste its id here
+            yourself. Money is transferred to this account — an id belonging
+            to the wrong seller pays the wrong person.
           </p>
           <input
             value={linkedId}

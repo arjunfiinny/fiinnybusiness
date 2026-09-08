@@ -74,6 +74,11 @@ String? routeForNotification(String? type, Map<String, dynamic> data) {
           ? '/profile/edit?highlight=${Uri.encodeComponent(missing)}'
           : '/profile/edit?highlight=1';
 
+    // Bank details and/or KYC docs still missing — both live on the same
+    // screen, so there's nothing to branch on, just open it directly.
+    case 'payout_incomplete':
+      return '/dashboard/payouts';
+
     // Open the renewal screen with the existing plan already selected, so the
     // user only has to pay.
     case 'subscription_expiry':
