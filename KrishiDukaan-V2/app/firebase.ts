@@ -324,15 +324,10 @@ export async function fetchMarketplaceProducts(): Promise<MarketplaceProduct[]> 
       .filter((item) => item.data().isActive !== false)
       .map((item) => {
       const data = item.data();
-      console.log("[fetchMarketplaceProducts] doc read:", {
-        id: item.id,
-        name: String(data.name || ''),
-        source: String(data.source || ''),
-        ownerId: String(data.ownerId || ''),
-        ownerType: String(data.ownerType || ''),
-        isOnline: data.isOnline,
-        sellMode: data.sellMode,
-      });
+      // NOTE: no per-document logging here. This map runs once per product doc
+      // (4000+ in production), so a console.log on this line fired thousands of
+      // times per page load, kept every logged object alive for DevTools, and
+      // published every retailer's phone number to the visitor's console.
       return {
         id: item.id,
         name: String(data.name || ''),
@@ -668,16 +663,9 @@ export async function fetchMarketplaceProducts(): Promise<MarketplaceProduct[]> 
             },
           ];
 
-      console.log("[fetchMarketplaceProducts]", {
-        name: p.name,
-        id: p.id,
-        source: p.source,
-        ownerId: canonOwnerId,
-        rawIsOnline: p.isOnline,
-        mergedOnline,
-        mergedSellMode,
-        availabilityIsOnline: finalAvailability.map((a) => ({ storeId: a.storeId, storePhone: a.storePhone, isOnline: a.isOnline })),
-      });
+      // NOTE: no per-card logging here either — see the note in the mapping step
+      // above. The availabilityIsOnline map this used to build allocated a fresh
+      // array per card purely to be logged.
 
       return {
         ...p,

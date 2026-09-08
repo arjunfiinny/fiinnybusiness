@@ -516,9 +516,14 @@ export default function App() {
       setErrorMsg(null);
       trackPageView('home');
 
-      let products = await fetchMarketplaceProducts();
-      let stores = await fetchStores();
-      let fetchedHubs = await fetchHubs();
+      // Fired together, not one after another. These three reads are fully
+      // independent — running them serially made every visitor wait for three
+      // sequential round trips (~4-5s to first content) instead of one.
+      const [products, stores, fetchedHubs] = await Promise.all([
+        fetchMarketplaceProducts(),
+        fetchStores(),
+        fetchHubs(),
+      ]);
 
       // An empty read is NOT a reason to write. This used to call
       // syncInitialData(PRODUCTS, STORES, INVENTORY), which had every visitor's
