@@ -527,11 +527,6 @@ export async function fetchMarketplaceProducts(): Promise<MarketplaceProduct[]> 
     for (const copy of retailerCopies) {
       if (!copy.name || !copy.price) continue;
       const key = copy.name.toLowerCase().trim();
-      const canonical = byName.get(key);
-      if (!canonical) continue;
-
-      const copyIds = idsByKey.get(key) ?? [];
-      if (!copyIds.includes(copy.id)) { copyIds.push(copy.id); idsByKey.set(key, copyIds); }
 
       const copyStoreId = (copy as any).ownerId || copy.retailerId || '';
       const copyPhone = copy.retailerPhone;
@@ -539,14 +534,45 @@ export async function fetchMarketplaceProducts(): Promise<MarketplaceProduct[]> 
 
       markOnline(key, copy.isOnline === true);
 
+      const copyIds = idsByKey.get(key) ?? [];
+      if (!copyIds.includes(copy.id)) { copyIds.push(copy.id); idsByKey.set(key, copyIds); }
+
+      const copyDiscountPct = copy.effectiveDiscountPct ?? 0;
+      recordSellerDiscount(key, copyStoreId, copyPhone, copyDiscountPct);
+
+      const canonical = byName.get(key);
+      if (!canonical) {
+        // No canonical manufacturer product exists for this item yet.
+        // Promote this copy to a standalone marketplace product so the retailer's
+        // listing is visible in the marketplace rather than being dropped.
+        const entryAv: NonNullable<MarketplaceProduct['availability']> = [
+          {
+            storeId: copyStoreId,
+            storePhone: copyPhone,
+            storeName: copy.store || undefined,
+            stockLevel: copy.stock || 'In Stock',
+            sellingPrice: copy.price,
+            isOnline: copy.isOnline,
+            discountPct: copyDiscountPct > 0 ? copyDiscountPct : undefined,
+            variants: Array.isArray(copy.variants) ? copy.variants : undefined,
+          },
+        ];
+        byName.set(key, {
+          ...copy,
+          availability: entryAv,
+          variants: copy.variants,
+          maxDiscountPct: copyDiscountPct,
+          effectiveDiscountPct: copyDiscountPct,
+        });
+        continue;
+      }
+
       const av: NonNullable<MarketplaceProduct['availability']> = [...(canonical.availability ?? [])];
       const existing = av.find(
         (a) =>
           (copyStoreId && a.storeId === copyStoreId) ||
           (copyPhone && a.storePhone === copyPhone),
       );
-      const copyDiscountPct = copy.effectiveDiscountPct ?? 0;
-      recordSellerDiscount(key, copyStoreId, copyPhone, copyDiscountPct);
 
       if (existing) {
         // Prefer the sellingPrice already synced by updateInventoryRecord →
