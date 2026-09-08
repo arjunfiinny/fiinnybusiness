@@ -67,6 +67,14 @@ env:
   - variable: RAZORPAY_KEY_SECRET
     secret: RAZORPAY_KEY_SECRET
 
+  # Verifies webhook calls from Razorpay -> /api/webhooks/razorpay. Generated
+  # by Razorpay when the webhook is created in Dashboard -> Settings ->
+  # Webhooks (a DIFFERENT value from RAZORPAY_KEY_SECRET above) — create the
+  # matching secret in Secret Manager before this deploys, or the webhook
+  # route will reject every call.
+  - variable: RAZORPAY_WEBHOOK_SECRET
+    secret: RAZORPAY_WEBHOOK_SECRET
+
   # ─── Cron ──────────────────────────────────────────────────────────────────
   - variable: CRON_SECRET
     # Rotated value lives in Secret Manager, never in this file.

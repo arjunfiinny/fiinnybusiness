@@ -76,6 +76,36 @@ class AuthRepository {
       'productCount': 0,
       'createdAt': FieldValue.serverTimestamp(),
     });
+
+    // 3. For retailers, initialize retailer and profile docs so the store is discoverable
+    if (role == 'retailer') {
+      await Future.wait([
+        _db.collection('retailers').doc(phone).set({
+          'userId': uid,
+          'retailerId': uid,
+          'role': 'retailer',
+          'name': name,
+          'shopName': name,
+          'ownerName': name,
+          'phone': phone,
+          'ownerPhone': phone,
+          'active': true,
+          'status': 'Active',
+          'createdAt': FieldValue.serverTimestamp(),
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true)),
+        _db.collection('profiles').doc(phone).set({
+          'uid': uid,
+          'phone': phone,
+          'role': 'retailer',
+          'name': name,
+          'shopName': name,
+          'ownerName': name,
+          'createdAt': FieldValue.serverTimestamp(),
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true)),
+      ]);
+    }
   }
 
   /// Saves profile-completion fields. Mirrors the web: writes the completion

@@ -652,9 +652,8 @@ final listingsForCatalogProvider = FutureProvider.family<List<ListingModel>, Str
         price: price,
         stockQty: stockQty,
         // Online ordering (Buy Now / Add to Cart) is shown ONLY when the seller
-        // has explicitly turned on online delivery (isOnline == true). A missing
-        // flag means they never enabled it, so default to offline — otherwise
-        // every store would wrongly get buy buttons.
+        // has explicitly turned on online delivery (isOnline == true), AND neither
+        // the product nor the store has disabled online selling.
         //
         // The account-level switch overrides the per-product one: a seller who
         // turns online selling OFF in Settings must stop selling online
@@ -663,7 +662,14 @@ final listingsForCatalogProvider = FutureProvider.family<List<ListingModel>, Str
         // account flag as off while this only blocks an EXPLICIT false — 427
         // of 442 live retailer docs have no such field, and blocking on
         // absence would silently stop online orders for nearly all of them.
-        isOnline: av.isOnline == true && !(store?.onlineSellingDisabled ?? false),
+        //
+        // In addition, if the product itself is configured as 'offline_store_only'
+        // or isOnline == false, online ordering is blocked even if a stale
+        // availability[] entry still has isOnline: true.
+        isOnline: av.isOnline == true &&
+            product.sellMode != 'offline_store_only' &&
+            product.isOnline != false &&
+            !(store?.onlineSellingDisabled ?? false),
         variants: av.variants ?? [],
         store: store,
       );
@@ -680,6 +686,7 @@ final listingsForCatalogProvider = FutureProvider.family<List<ListingModel>, Str
     );
     // Same two-switch rule as the availability path above.
     final isOnline = product.sellMode != 'offline_store_only' &&
+        product.isOnline != false &&
         !(ownerStore?.onlineSellingDisabled ?? false);
     final ownerStockQty = (product.stock?.toLowerCase() == 'out of stock')
         ? 0
