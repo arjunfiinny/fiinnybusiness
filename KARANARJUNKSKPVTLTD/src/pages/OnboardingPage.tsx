@@ -1,10 +1,11 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
-import { Save, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { Save, AlertCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { addDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '../firebase';
 import { useAuth } from '../contexts/AuthContext';
+import { useToast } from '../contexts/ToastContext';
 import { getTenantCollection } from '../utils/tenantPath';
 import { LOCATION_DATA, STATES } from '../utils/locationData';
 
@@ -31,6 +32,7 @@ export default function OnboardingPage() {
     const { t } = useTranslation();
 
     const navigate = useNavigate();
+    const { showToast } = useToast();
     const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
     const pendingHref = useRef<string | null>(null);
 
@@ -100,7 +102,12 @@ export default function OnboardingPage() {
                 outstandingAmount: 0
             });
             setSubmitStatus('success');
+            // Reset the form BEFORE navigating so the unsaved-changes guard stays quiet.
             setFormData({ ...INITIAL_FORM });
+            // Surface the confirmation via the shared top-right toast, then land the
+            // user back on the Worklist where the new partner now appears.
+            showToast(t('onboarding.register_success'), 'success');
+            navigate('/worklist');
         } catch (err) {
             console.error("Error adding document: ", err);
             setSubmitStatus('error');
@@ -253,12 +260,6 @@ export default function OnboardingPage() {
                             <option value="Big">{t('onboarding.big_distributor')}</option>
                         </select>
                     </div>
-
-                    {submitStatus === 'success' && (
-                        <div style={{ padding: '1rem', background: 'hsla(142, 60%, 40%, 0.1)', color: 'var(--success)', borderRadius: '8px', marginBottom: '1.5rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                            <CheckCircle2 size={18} /> {t('onboarding.register_success')}
-                        </div>
-                    )}
 
                     {submitStatus === 'error' && (
                         <div style={{ padding: '1rem', background: 'hsla(0, 84%, 60%, 0.1)', color: 'var(--danger)', borderRadius: '8px', marginBottom: '1.5rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>

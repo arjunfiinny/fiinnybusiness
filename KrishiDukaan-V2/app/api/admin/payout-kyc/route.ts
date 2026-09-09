@@ -4,10 +4,15 @@ import { getAdminAuth, getAdminDb, getAdminStorage } from "../../../lib/firebase
 /**
  * Admin-only access to seller payout KYC.
  *
- * Two operations, both requiring an admin:
- *   GET  ?phone=...            → short-lived signed URLs for that seller's documents
- *   POST { phone, action, ... } → approve / reject, and attach a Razorpay
- *                                 linked-account id
+ * Three operations, all requiring an admin:
+ *   GET  ?phone=...                    → short-lived signed URLs for that seller's documents
+ *   POST { phone, action: verify|reject, ... } → approve / reject, and attach
+ *                                         a Razorpay linked-account id
+ *   POST { phone, action: "upload", docType, fileName, contentType, fileBase64 }
+ *                                       → admin uploads a document ON BEHALF OF
+ *                                         a seller (e.g. the owner handed over
+ *                                         a scan and has no login of their own
+ *                                         yet)
  *
  * Why a server route rather than direct client access:
  *
@@ -20,7 +25,26 @@ import { getAdminAuth, getAdminDb, getAdminStorage } from "../../../lib/firebase
  *
  * It also means a document is exposed as a URL that expires in minutes rather
  * than a permanent public link, which is the right handling for a PAN card.
+ *
+ * The upload action mirrors the same constraints app/dashboard/_components/
+ * kyc-documents.tsx enforces client-side for the seller's own upload (5MB cap,
+ * image or PDF only, fixed filename per doc type so a re-upload replaces
+ * rather than piling up) and writes the identical metadata shape to
+ * payoutAccounts/{phone}.documents, so both paths are interchangeable from the
+ * review screen's point of view.
  */
+
+const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
+
+const DOC_TYPES = [
+  "pan_card",
+  "cancelled_cheque",
+  "gst_certificate",
+  "address_proof",
+  "owner_photo",
+  "trade_license",
+] as const;
+type DocType = (typeof DOC_TYPES)[number];
 
 /** Minutes a generated document URL stays valid. Long enough to open and read,
  *  short enough that a copied link is not a lasting leak. */
@@ -121,19 +145,80 @@ export async function POST(req: NextRequest) {
   if (!auth.ok) return auth.response;
 
   try {
-    const { phone, action, razorpayLinkedAccountId, rejectionReason } = (await req.json()) as {
+    const body = (await req.json()) as {
       phone?: string;
-      action?: "verify" | "reject";
+      action?: "verify" | "reject" | "upload";
       razorpayLinkedAccountId?: string;
       rejectionReason?: string;
+      docType?: DocType;
+      fileName?: string;
+      contentType?: string;
+      fileBase64?: string;
     };
+    const { phone, action, razorpayLinkedAccountId, rejectionReason } = body;
 
     if (!phone) return NextResponse.json({ error: "phone is required" }, { status: 400 });
-    if (action !== "verify" && action !== "reject") {
-      return NextResponse.json({ error: "action must be verify or reject" }, { status: 400 });
+    if (action !== "verify" && action !== "reject" && action !== "upload") {
+      return NextResponse.json({ error: "action must be verify, reject or upload" }, { status: 400 });
     }
 
     const db = getAdminDb();
+
+    if (action === "upload") {
+      const { docType, fileName, contentType, fileBase64 } = body;
+      if (!docType || !DOC_TYPES.includes(docType)) {
+        return NextResponse.json({ error: "docType is invalid" }, { status: 400 });
+      }
+      if (!fileBase64 || !contentType) {
+        return NextResponse.json({ error: "fileBase64 and contentType are required" }, { status: 400 });
+      }
+      const okType = contentType.startsWith("image/") || contentType === "application/pdf";
+      if (!okType) {
+        return NextResponse.json({ error: "File must be an image or a PDF." }, { status: 400 });
+      }
+
+      let buffer: Buffer;
+      try {
+        buffer = Buffer.from(fileBase64, "base64");
+      } catch {
+        return NextResponse.json({ error: "fileBase64 is not valid base64." }, { status: 400 });
+      }
+      if (buffer.length === 0 || buffer.length > MAX_UPLOAD_BYTES) {
+        return NextResponse.json({ error: "File must be under 5 MB." }, { status: 400 });
+      }
+
+      // Same fixed-filename-per-type convention as the seller's own client
+      // upload: re-uploading replaces the file rather than piling up copies.
+      const ext = contentType === "application/pdf" ? "pdf" : "jpg";
+      const storagePath = `kyc/${phone}/${docType}.${ext}`;
+
+      await getAdminStorage().bucket().file(storagePath).save(buffer, {
+        contentType,
+        resumable: false,
+      });
+
+      const meta = {
+        type: docType,
+        fileName: fileName || `${docType}.${ext}`,
+        contentType,
+        size: buffer.length,
+        storagePath,
+        uploadedAt: new Date(),
+        uploadedByAdmin: auth.uid,
+      };
+
+      await db.collection("payoutAccounts").doc(phone).set(
+        {
+          phone,
+          documents: { [docType]: meta },
+          status: "pending_verification",
+          updatedAt: new Date(),
+        },
+        { merge: true },
+      );
+
+      return NextResponse.json({ ok: true });
+    }
     const ref = db.collection("payoutAccounts").doc(phone);
     const snap = await ref.get();
     if (!snap.exists) {

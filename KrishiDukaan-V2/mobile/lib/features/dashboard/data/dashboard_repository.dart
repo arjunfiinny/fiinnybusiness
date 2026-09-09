@@ -1005,6 +1005,37 @@ class DashboardRepository {
     }
   }
 
+  /// Saves just the GSTIN — used by the inline "enter GST to turn on Online
+  /// Delivery" prompt, which needs to persist one field without going through
+  /// the full profile form (and its other required fields). Same mirrors as
+  /// setAccountOnlineDelivery, for the same reason: web reads gstin from
+  /// retailers|manufacturers/{phone}, not users/{phone}. The role doc uses
+  /// update() rather than set(merge:) so this can never CREATE a near-empty
+  /// public profile doc for a seller who has none.
+  Future<void> updateGstin(
+    String sellerPhone, {
+    required bool isManufacturer,
+    required String gstin,
+  }) async {
+    if (sellerPhone.isEmpty) return;
+
+    await _db.collection('users').doc(sellerPhone).set({
+      'gstin': gstin,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    final profileCollection = isManufacturer ? 'manufacturers' : 'retailers';
+    try {
+      await _db.collection(profileCollection).doc(sellerPhone).update({
+        'gstin': gstin,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } catch (_) {
+      // Mirror doesn't exist yet — users/{phone} above is already the source
+      // of truth the enable-gate itself checks.
+    }
+  }
+
   /// Reads the seller's account-level online-delivery flag using web's exact
   /// precedence (profiles -> users -> retailers|manufacturers), so the toggle
   /// shows the same state the web dashboard would.

@@ -23,6 +23,7 @@ export {
 export { sendStoreAnalyticsDigest } from "./notifications/digest";
 export {
   remindIncompleteProfiles,
+  remindIncompletePayoutDetails,
   remindSubscriptionRenewal,
 } from "./notifications/reminders";
 export {
