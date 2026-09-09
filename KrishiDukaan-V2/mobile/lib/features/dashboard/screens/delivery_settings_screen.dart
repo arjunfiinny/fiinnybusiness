@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/app_text_styles.dart';
+import '../../../core/constants/indian_states.dart';
 import '../../../core/providers/user_provider.dart';
 import '../data/dashboard_repository.dart';
 
@@ -52,17 +53,25 @@ class _DeliverySettingsBodyState
   bool _saving = false;
   bool _loaded = false;
 
-  // Coverage isn't editable on mobile, but web's fetchDeliverySettings reads
-  // these fields and defaults a missing coverageType to "pan_india" with no
-  // states. They're carried through a mobile save unchanged so editing slabs
-  // here can never silently reset a coverage the seller configured on web.
+  // Delivery Coverage — which states/UTs (or all of India) this seller
+  // ships to. Not enforced anywhere at checkout on either platform today
+  // (web's CartView only reads weightSlabs for the charge estimate); this is
+  // seller-facing configuration, matching what web's Delivery Coverage
+  // section actually does.
   String _coverageType = 'pan_india';
-  List<String> _states = const [];
+  List<String> _states = [];
+  final _stateSearchCtrl = TextEditingController();
 
   @override
   void initState() {
     super.initState();
     _loadSettings();
+  }
+
+  @override
+  void dispose() {
+    _stateSearchCtrl.dispose();
+    super.dispose();
   }
 
   Future<void> _loadSettings() async {
@@ -108,6 +117,11 @@ class _DeliverySettingsBodyState
           return 'Slab ${i + 1} overlaps slab ${j + 1} — ranges must not overlap.';
         }
       }
+    }
+    // Matches web's coverageInvalid check: "Selected States" with an empty
+    // list would save a config that covers nowhere.
+    if (_coverageType == 'states' && _states.isEmpty) {
+      return 'Select at least one state, or switch to Pan India.';
     }
     return null;
   }
@@ -233,6 +247,64 @@ class _DeliverySettingsBodyState
                     ],
                   ),
                 ),
+                const SizedBox(height: 16),
+                _Section(
+                  title: 'Delivery Coverage',
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Choose where your online orders can be delivered.',
+                        style: TextStyle(color: AppColors.onSurfaceVariant),
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: _CoverageTypeButton(
+                              icon: Icons.public,
+                              label: 'Pan India',
+                              selected: _coverageType == 'pan_india',
+                              onTap: () =>
+                                  setState(() => _coverageType = 'pan_india'),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: _CoverageTypeButton(
+                              icon: Icons.map_outlined,
+                              label: 'Selected States',
+                              selected: _coverageType == 'states',
+                              onTap: () =>
+                                  setState(() => _coverageType = 'states'),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      if (_coverageType == 'pan_india')
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: AppColors.primary.withValues(alpha: 0.06),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: const Text(
+                            'Your products can be ordered for delivery '
+                            'anywhere in India.',
+                            style: TextStyle(color: AppColors.primary),
+                          ),
+                        )
+                      else
+                        _StatePicker(
+                          selected: _states,
+                          onChanged: (s) => setState(() => _states = s),
+                          searchCtrl: _stateSearchCtrl,
+                        ),
+                    ],
+                  ),
+                ),
                 const SizedBox(height: 80),
               ],
             ),
@@ -275,6 +347,198 @@ class _Section extends StatelessWidget {
           const SizedBox(height: 12),
           child,
         ],
+      ),
+    );
+  }
+}
+
+class _CoverageTypeButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _CoverageTypeButton({
+    required this.icon,
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+        decoration: BoxDecoration(
+          color: selected ? AppColors.primary : Colors.white,
+          border: Border.all(
+            color: selected
+                ? AppColors.primary
+                : AppColors.onSurfaceVariant.withValues(alpha: 0.3),
+            width: selected ? 2 : 1,
+          ),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon,
+                size: 18,
+                color: selected ? Colors.white : AppColors.onSurfaceVariant),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                label,
+                style: TextStyle(
+                  fontWeight: FontWeight.w600,
+                  color: selected ? Colors.white : AppColors.onSurfaceVariant,
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Search + multi-select grid of Indian states/UTs, mirroring web's
+/// StatePicker (same search-then-toggle interaction, same "show all" reveal
+/// so a long list doesn't dump 37 chips at once).
+class _StatePicker extends StatefulWidget {
+  final List<String> selected;
+  final ValueChanged<List<String>> onChanged;
+  final TextEditingController searchCtrl;
+
+  const _StatePicker({
+    required this.selected,
+    required this.onChanged,
+    required this.searchCtrl,
+  });
+
+  @override
+  State<_StatePicker> createState() => _StatePickerState();
+}
+
+class _StatePickerState extends State<_StatePicker> {
+  bool _showAll = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final query = widget.searchCtrl.text.trim().toLowerCase();
+    final filtered = query.isEmpty
+        ? kIndianStates
+        : kIndianStates.where((s) => s.toLowerCase().contains(query)).toList();
+    final visible = _showAll ? filtered : filtered.take(16).toList();
+
+    void toggle(String state) {
+      final next = List<String>.from(widget.selected);
+      if (next.contains(state)) {
+        next.remove(state);
+      } else {
+        next.add(state);
+      }
+      widget.onChanged(next);
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: widget.searchCtrl,
+                onChanged: (_) => setState(() {}),
+                decoration: InputDecoration(
+                  isDense: true,
+                  hintText: 'Search states...',
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 10),
+                ),
+              ),
+            ),
+            if (widget.selected.isNotEmpty) ...[
+              const SizedBox(width: 8),
+              TextButton(
+                onPressed: () => widget.onChanged(const []),
+                child: const Text('Clear all',
+                    style: TextStyle(color: AppColors.error)),
+              ),
+            ],
+          ],
+        ),
+        const SizedBox(height: 6),
+        Text(
+          '${widget.selected.length} of ${kIndianStates.length} selected',
+          style: const TextStyle(
+              color: AppColors.onSurfaceVariant, fontSize: 12),
+        ),
+        const SizedBox(height: 10),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final state in visible)
+              _StateChip(
+                label: state,
+                selected: widget.selected.contains(state),
+                onTap: () => toggle(state),
+              ),
+          ],
+        ),
+        if (!_showAll && filtered.length > visible.length)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: TextButton(
+              onPressed: () => setState(() => _showAll = true),
+              child: Text('Show all ${filtered.length}'),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _StateChip extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _StateChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(20),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: selected
+              ? AppColors.primary
+              : AppColors.onSurfaceVariant.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            color: selected ? Colors.white : AppColors.onSurfaceVariant,
+          ),
+        ),
       ),
     );
   }

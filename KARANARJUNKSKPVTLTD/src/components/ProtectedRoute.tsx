@@ -26,6 +26,21 @@ interface ProtectedRouteProps {
     // it (e.g. Partners → "Add New" → /onboarding, gated by worklist.partners.create).
     // The plan gate still applies; roles without the feature stay blocked.
     requireFeature?: string;
+    // Leaf feature-permission key that admits a role AS AN ALTERNATIVE to the
+    // appScreen grant (an OR, not a mandatory gate like requireFeature). Use for a
+    // shared page reachable from two surfaces gated by different keys — e.g. the
+    // Customer Profile, opened either from the standalone Customers screen OR from
+    // POS Billing → Customers (posBilling.customers.view). A role with EITHER the
+    // appScreen grant or this feature is admitted; a role with neither is blocked.
+    // The plan gate (both the screen and this feature) still applies.
+    altFeature?: string;
+    // The AppScreen of the SECOND surface an altFeature page is reached from, used
+    // for the PLAN gate only. A page shared by two surfaces (e.g. Customer Profile,
+    // reached from the standalone `customers` screen OR from POS Billing → Customers
+    // under the `pos` screen) is plan-permitted when EITHER screen is in the plan —
+    // so a plan that surfaces the page only through the second surface still allows
+    // it. Pairs with altFeature (which OR-widens the ROLE gate).
+    altScreen?: AppScreen;
     // Restricts the route to the platform super admin only (superadmin@fiinny.com).
     // Non-super-admin users are redirected to /login regardless of their role.
     requireSuperAdmin?: boolean;
@@ -44,6 +59,11 @@ interface ProtectedRouteProps {
  *      role NOT in the list is still admitted when its appScreen permission is true.
  *   6. requireFeature → a role granted this leaf feature permission is admitted even
  *      without the appScreen grant, so the route matches the action that opens it.
+ *   7. altFeature (+ altScreen) → OR-widens BOTH gates for a page shared by two
+ *      surfaces: altScreen lets the plan gate pass on either screen, and altFeature
+ *      lets the role gate pass on either grant (e.g. Customer Profile, reached from
+ *      the Customers screen OR POS Billing → Customers). A role with neither is still
+ *      blocked; plan bounds still apply.
  *
  * Denied requests are redirected to the user's configured landing page (from
  * roleLandingPages) or the built-in default. Loop prevention: if the landing page
@@ -52,7 +72,7 @@ interface ProtectedRouteProps {
  * DEV bypass removed intentionally — permissions must be testable in all
  * environments including UAT/staging. Use a real Firebase auth session to test.
  */
-export default function ProtectedRoute({ children, requireAdmin = false, requireRole, appScreen, requireFeature, requireSuperAdmin = false }: ProtectedRouteProps) {
+export default function ProtectedRoute({ children, requireAdmin = false, requireRole, appScreen, requireFeature, altFeature, altScreen, requireSuperAdmin = false }: ProtectedRouteProps) {
     const { currentUser, userRole, permissions, featurePermissions, loading, roleLandingPages, planEntitlements, subscriptionLoading, isSuperAdmin, isImpersonating } = useAuth();
     const location = useLocation();
 
@@ -96,7 +116,10 @@ export default function ProtectedRoute({ children, requireAdmin = false, require
     //               Performance). Blocks direct-URL / refresh for those too.
     const routeGroup = navFeatureGroupForPath(location.pathname);
     const planAllowsScreen =
-        isScreenAllowedByPlan(appScreen, planEntitlements) &&
+        (isScreenAllowedByPlan(appScreen, planEntitlements) ||
+            // Second surface (altScreen) — a shared page is plan-permitted when the
+            // plan includes EITHER screen (e.g. Customer Profile via POS Billing).
+            (altScreen != null && isScreenAllowedByPlan(altScreen, planEntitlements))) &&
         (!routeGroup || isFeatureGroupAllowed(routeGroup, planEntitlements));
 
     // 'admin' role is unrestricted at the ROLE layer — but still bound by the plan
@@ -139,17 +162,29 @@ export default function ProtectedRoute({ children, requireAdmin = false, require
         }
     }
 
+    // Alternative feature admittance (OR): a role that has this granular feature
+    // (and the plan permits it) is admitted even without the appScreen role grant.
+    // This keeps a shared detail page open to every surface that leads to it — e.g.
+    // Customer Profile, reached from the Customers screen OR POS Billing → Customers.
+    const altFeatureAllowed =
+        altFeature != null &&
+        userRole != null &&
+        featurePermissions?.[userRole]?.[altFeature] === true &&
+        isFeatureAllowedByPlan(altFeature, planEntitlements);
+
     // ── Module-level permission (single source of truth) ──────────────────────
     // Reads the live rolePermissions matrix from Firestore via AuthContext.
     // undefined → not configured for this role → denied (secure by default).
     // Role matrix grant AND the plan must include the screen (plan only subtracts).
     // A satisfied requireFeature stands in for the screen grant so a feature-gated
-    // route never additionally requires the coarser screen toggle.
+    // route never additionally requires the coarser screen toggle; altFeature adds
+    // an OR path for pages reachable from a second, differently-gated surface.
     const screenAllowed =
         planAllowsScreen &&
         (!appScreen ||
             (userRole != null && permissions[userRole]?.[appScreen] === true) ||
-            !!requireFeature);
+            !!requireFeature ||
+            altFeatureAllowed);
 
     // ── Role list check ───────────────────────────────────────────────────────
     // A custom role will not appear in requireRole (those lists name built-in

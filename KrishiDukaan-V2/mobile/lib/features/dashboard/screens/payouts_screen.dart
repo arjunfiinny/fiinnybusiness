@@ -748,13 +748,24 @@ class _DocSpec {
   /// camera is an awkward ask.
   final bool selfie;
 
+  /// Shown immediately vs. tucked behind "More documents" — six upload rows
+  /// at once tends to stall a seller out; leading with the two that
+  /// establish who they are keeps the first screen short. The rest are
+  /// still required, just not part of the opening ask.
+  final bool front;
+
   const _DocSpec(this.type, this.label, this.hint,
-      {this.required = true, this.selfie = false});
+      {this.required = true, this.selfie = false, this.front = false});
 }
 
 const _kDocSpecs = [
-  _DocSpec('pan_card', 'PAN card',
-      'Photo of the PAN card matching the account holder name'),
+  _DocSpec(
+      'pan_card', 'PAN card', 'Photo of the PAN card matching the account holder name',
+      front: true),
+  _DocSpec('trade_license', 'Trade / product license',
+      'Shop establishment, FSSAI, mandi, or other license permitting you to '
+      'sell agri produce or inputs',
+      front: true),
   _DocSpec('cancelled_cheque', 'Cancelled cheque or passbook',
       'Must clearly show account number, IFSC and holder name'),
   _DocSpec('address_proof', 'Address proof',
@@ -762,9 +773,6 @@ const _kDocSpecs = [
   _DocSpec('owner_photo', 'Owner photo',
       "A clear photo of the account holder's face, for identity verification",
       selfie: true),
-  _DocSpec('trade_license', 'Trade / product license',
-      'Shop establishment, FSSAI, mandi, or other license permitting you to '
-      'sell agri produce or inputs'),
   _DocSpec('gst_certificate', 'GST certificate',
       'Only if your business is GST registered', required: false),
 ];
@@ -886,14 +894,85 @@ class _KycSectionState extends ConsumerState<_KycSection> {
               text: _error!,
             ),
           ),
-        ..._kDocSpecs.map((spec) => _DocTile(
+        ..._kDocSpecs.where((s) => s.front).map((spec) => _DocTile(
               spec: spec,
               uploaded: _docs[spec.type],
               busy: _busyType == spec.type,
               locked: _locked,
               onUpload: () => _upload(spec),
             )),
+        _MoreDocuments(
+          // Expanded by default once verified — nothing left to fill in, and
+          // a seller checking their own file wants to see all of it at once.
+          initiallyOpen: _locked,
+          children: _kDocSpecs
+              .where((s) => !s.front)
+              .map((spec) => _DocTile(
+                    spec: spec,
+                    uploaded: _docs[spec.type],
+                    busy: _busyType == spec.type,
+                    locked: _locked,
+                    onUpload: () => _upload(spec),
+                  ))
+              .toList(),
+        ),
       ],
+    );
+  }
+}
+
+/// Collapsed by default so the opening ask is two uploads, not six.
+class _MoreDocuments extends StatefulWidget {
+  final bool initiallyOpen;
+  final List<Widget> children;
+  const _MoreDocuments({required this.initiallyOpen, required this.children});
+
+  @override
+  State<_MoreDocuments> createState() => _MoreDocumentsState();
+}
+
+class _MoreDocumentsState extends State<_MoreDocuments> {
+  late bool _open = widget.initiallyOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(top: 4),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.divider),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: () => setState(() => _open = !_open),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text('More documents',
+                        style: AppTextStyles.bodyMedium
+                            .copyWith(fontWeight: FontWeight.w600)),
+                  ),
+                  Icon(
+                    _open ? Icons.expand_less : Icons.expand_more,
+                    color: AppColors.onSurfaceVariant,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (_open)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+              child: Column(children: widget.children),
+            ),
+        ],
+      ),
     );
   }
 }

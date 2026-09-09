@@ -940,7 +940,38 @@ service cloud.firestore {
       allow read, update, delete: if isAdmin();
       allow create: if isAuthed() && request.resource.data.reporterId == myPhone();
     }
-    
+
+    // ─── blockedUsers ────────────────────────────────────────────────────────
+    // One-directional block pairs, doc id `{blockerId}_{blockedId}`. Filtering
+    // is entirely client-side (a viewer's blocklist shapes only what THEY
+    // see, same pattern as moderationStatus on reels) — this collection only
+    // needs to be readable by its own owner and admin, and never editable
+    // (a block is created or removed, never modified).
+    match /blockedUsers/{pairId} {
+      allow read: if isAdmin() || (isAuthed() && resource.data.blockerId == myPhone());
+      allow create: if isAuthed()
+        && request.resource.data.blockerId == myPhone()
+        && request.resource.data.blockedId != myPhone()
+        && pairId == request.resource.data.blockerId + '_' + request.resource.data.blockedId;
+      allow update: if false;
+      allow delete: if isAdmin() || (isAuthed() && resource.data.blockerId == myPhone());
+    }
+
+    // ─── contentReports ──────────────────────────────────────────────────────
+    // The admin-facing moderation queue (Admin -> Moderation). Separate from
+    // reel_reports (which only feeds the auto-hide-after-3-reports Cloud
+    // Function and was never visible to a human) — every report AND every
+    // block writes here too, so an admin has one place to review and act
+    // within Apple's 24-hour requirement (Guideline 1.2). A reporter can only
+    // ever create a 'pending' report on themselves; only admin resolves it.
+    match /contentReports/{reportId} {
+      allow read: if isAdmin();
+      allow create: if isAuthed()
+        && request.resource.data.reporterId == myPhone()
+        && request.resource.data.status == 'pending';
+      allow update, delete: if isAdmin();
+    }
+
     
     // ─── daySessions ─────────────────────────────────────────────────────────
     // One document per sales executive per working day.

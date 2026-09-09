@@ -109,8 +109,8 @@ export const PROTECTED_ROUTES: RoutePermission[] = [
     { path: '/manage-transport',     appScreen: 'inventory',        requireRole: ['admin', 'analyst'] },
 
     // Customers
-    { path: '/customers',            appScreen: 'customers',        requireRole: ['admin', 'analyst', 'shopkeeper'] },
-    { path: '/customers/:id',        appScreen: 'customers',        requireRole: ['admin', 'analyst', 'shopkeeper'] },
+    { path: '/customers',            appScreen: 'customers',        featurePerm: 'posBilling.customers.view', requireRole: ['admin', 'analyst', 'shopkeeper'], notes: 'altScreen=pos + altFeature=posBilling.customers.view: plan-permitted via the customers OR pos screen; role-admitted via the customers screen OR POS Billing → Customers.' },
+    { path: '/customers/:id',        appScreen: 'customers',        featurePerm: 'posBilling.customers.view', requireRole: ['admin', 'analyst', 'shopkeeper'], notes: 'Customer Profile — same altScreen=pos / altFeature=posBilling.customers.view OR, so the POS Customers surface can open it (plan + role).' },
 
     // Onboarding / retailers
     { path: '/onboarding',           appScreen: 'worklist',         featurePerm: 'worklist.partners.create', requireRole: ['admin', 'analyst'], notes: 'Worklist → Partners "Add New" flow. Plan-gated on the worklist screen (every plan) and access-gated by worklist.partners.create, NOT the distributor-only retailers screen.' },

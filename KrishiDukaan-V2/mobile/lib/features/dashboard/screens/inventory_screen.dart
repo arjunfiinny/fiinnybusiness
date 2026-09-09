@@ -336,6 +336,42 @@ class _InventoryBodyState extends ConsumerState<_InventoryBody> {
   }
 
   void _showAddListingSheet(BuildContext context, WidgetRef ref) {
+    final seatStatsAsync = ref.read(seatStatsProvider(widget.sellerPhone));
+    final stats = seatStatsAsync.asData?.value;
+    if (stats != null && (stats.totalPurchased <= 0 || stats.available <= 0)) {
+      showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Seat Limit Reached'),
+          content: Text(
+            stats.totalPurchased <= 0
+                ? 'You do not have an active subscription. Please purchase seats to add products to your store.'
+                : 'You have used all ${stats.totalPurchased} available seats. Please purchase additional seats to add more products.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                context.push('/subscription');
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.primary,
+              ),
+              child: const Text(
+                'Buy More Seats',
+                style: TextStyle(color: Colors.white),
+              ),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -1593,6 +1629,7 @@ class _AddListingSheetState extends ConsumerState<_AddListingSheet> {
         }
       }
 
+      final isCopy = _selectedCatalog != null;
       final catalogId =
           _selectedCatalog?.id ??
           FirebaseFirestore.instance.collection('catalog').doc().id;
@@ -1601,6 +1638,8 @@ class _AddListingSheetState extends ConsumerState<_AddListingSheet> {
         sellerPhone: widget.sellerPhone,
         sellerName: widget.sellerName,
         catalogId: catalogId,
+        isCopy: isCopy,
+        originalProductId: isCopy ? catalogId : null,
         price: basePrice,
         stockQuantity: totalStock,
         sellerAddress: _addressCtrl.text.trim().isNotEmpty
@@ -1645,9 +1684,21 @@ class _AddListingSheetState extends ConsumerState<_AddListingSheet> {
       if (mounted) Navigator.pop(context);
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Error saving: $e')));
+        final msg = e.toString().replaceAll('Exception: ', '');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(msg),
+            backgroundColor: Colors.red.shade700,
+            duration: const Duration(seconds: 4),
+            action: msg.toLowerCase().contains('seat')
+                ? SnackBarAction(
+                    label: 'Buy Seats',
+                    textColor: Colors.white,
+                    onPressed: () => context.push('/subscription'),
+                  )
+                : null,
+          ),
+        );
       }
     } finally {
       if (mounted) setState(() => _saving = false);
@@ -2221,6 +2272,14 @@ class _EditListingSheetState extends State<_EditListingSheet> {
           .where((v) => v.label.isNotEmpty)
           .toList();
 
+      // stockQuantity is the AGGREGATE across pack sizes, so when variants exist
+      // it is their sum rather than the flat field. Using the flat number hid the
+      // whole product whenever it read 0, even with stock left in other sizes,
+      // because availability is derived from it. Matches addListing (totalStock)
+      // and the web seller dashboard.
+      final effectiveStock = variants.isNotEmpty
+          ? variants.fold<int>(0, (acc, v) => acc + (v.stock ?? 0))
+          : stock;
 
       // A blank or non-positive entry means "use the default", stored as null.
       final parsedThreshold = int.tryParse(_lowStockCtrl.text.trim());
@@ -2230,8 +2289,8 @@ class _EditListingSheetState extends State<_EditListingSheet> {
       final effectiveDiscountPct = _discountActive ? _discountPct : 0.0;
       final updates = <String, dynamic>{
         'price': price,
-        'stock': stock > 0 ? 'In Stock' : 'Out of Stock',
-        'stockQuantity': stock,
+        'stock': effectiveStock > 0 ? 'In Stock' : 'Out of Stock',
+        'stockQuantity': effectiveStock,
         'isActive': _isActive,
         // Null clears any per-product override, putting the product back on
         // the server default rather than pinning it at some stale number.
@@ -2270,14 +2329,15 @@ class _EditListingSheetState extends State<_EditListingSheet> {
         await repo.syncMarketMirror(
           widget.listing.id,
           sellingPrice: price,
-          stockLevel: stock > 0 ? 'In Stock' : 'Out of Stock',
+          stockLevel: effectiveStock > 0 ? 'In Stock' : 'Out of Stock',
           discountPct: effectiveDiscountPct,
           isProductActive: _isActive,
+          isOnline: _sellMode != 'offline_store_only',
         );
         await repo.syncInventoryDoc(
           widget.listing.id,
           sellingPrice: price,
-          stockQuantity: stock,
+          stockQuantity: effectiveStock,
           isProductActive: _isActive,
           discountEnabled: _discountActive,
           discountPct: _discountPct,
@@ -2299,6 +2359,24 @@ class _EditListingSheetState extends State<_EditListingSheet> {
       }
 
       if (mounted) Navigator.pop(context);
+    } catch (e) {
+      if (mounted) {
+        final msg = e.toString().replaceAll('Exception: ', '');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(msg),
+            backgroundColor: Colors.red.shade700,
+            duration: const Duration(seconds: 4),
+            action: msg.toLowerCase().contains('seat')
+                ? SnackBarAction(
+                    label: 'Buy Seats',
+                    textColor: Colors.white,
+                    onPressed: () => context.push('/subscription'),
+                  )
+                : null,
+          ),
+        );
+      }
     } finally {
       if (mounted) setState(() => _saving = false);
     }

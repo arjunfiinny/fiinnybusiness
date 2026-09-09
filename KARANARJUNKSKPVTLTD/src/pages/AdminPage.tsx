@@ -5,7 +5,7 @@ import { getAuth, createUserWithEmailAndPassword } from 'firebase/auth';
 import { firebaseConfig, db } from '../firebase';
 import { getTenantCollection } from '../utils/tenantPath';
 import { logAudit } from '../utils/auditLog';
-import { Shield, ShieldAlert, UserCog, UserPlus, Loader2, Mail, Lock, User as UserIcon, Edit2, Trash2, X, Save, Store, Factory, Trash } from 'lucide-react';
+import { Shield, ShieldAlert, UserCog, UserPlus, Loader2, Mail, Lock, User as UserIcon, Edit2, Trash2, X, Save, Store, Factory, Trash, KeyRound } from 'lucide-react';
 import RecentlyDeletedPage from './RecentlyDeletedPage';
 import { useAuth } from '../contexts/AuthContext';
 import type { UserRole } from '../contexts/AuthContext';
@@ -56,6 +56,12 @@ export default function AdminPage() {
     // Edit User States
     const [editUserForm, setEditUserForm] = useState<{ id: string, name: string, email: string } | null>(null);
     const [updateLoading, setUpdateLoading] = useState(false);
+
+    // Reset Password States (within Edit User modal)
+    const [resetPassword, setResetPassword] = useState('');
+    const [resetPasswordConfirm, setResetPasswordConfirm] = useState('');
+    const [resetPasswordLoading, setResetPasswordLoading] = useState(false);
+    const [resetPasswordError, setResetPasswordError] = useState('');
 
 
     // Tenant-scoped user list query — always filter by the caller's tenantId.
@@ -266,13 +272,70 @@ export default function AdminPage() {
                 email: editUserForm.email
             });
             setUsers(users.map(u => u.id === editUserForm.id ? { ...u, name: editUserForm.name, email: editUserForm.email } : u));
-            setEditUserForm(null);
+            closeEditUser();
             alert(t('admin.update_success'));
         } catch (error) {
             console.error("Error updating user:", error);
             alert(t('admin.update_error'));
         } finally {
             setUpdateLoading(false);
+        }
+    };
+
+    // Close the edit modal and clear the reset-password sub-form.
+    const closeEditUser = () => {
+        setEditUserForm(null);
+        setResetPassword('');
+        setResetPasswordConfirm('');
+        setResetPasswordError('');
+    };
+
+    const handleResetPassword = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!editUserForm) return;
+
+        setResetPasswordError('');
+        if (resetPassword.length < 6) {
+            setResetPasswordError(t('admin.password_min_length'));
+            return;
+        }
+        if (resetPassword !== resetPasswordConfirm) {
+            setResetPasswordError(t('admin.password_mismatch'));
+            return;
+        }
+
+        setResetPasswordLoading(true);
+        try {
+            if (!currentUser) throw new Error('Not signed in');
+            // Invoked via the Firebase Hosting rewrite (/api/users/reset-password),
+            // not a public callable, so it works despite the org policy that blocks
+            // `allUsers` invokers. The server verifies the caller is a business admin
+            // of the target's tenant and applies the password via the Admin SDK —
+            // the password never touches Firestore and is not logged.
+            const idToken = await currentUser.getIdToken();
+            const url = import.meta.env.DEV && import.meta.env.VITE_USE_EMULATOR === 'true'
+                ? `http://localhost:5001/${import.meta.env.VITE_FIREBASE_PROJECT_ID}/asia-south1/resetTenantUserPassword`
+                : '/api/users/reset-password';
+            const res = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${idToken}` },
+                body: JSON.stringify({ targetUid: editUserForm.id, newPassword: resetPassword }),
+            });
+            const json = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(json.error ?? `Request failed (${res.status})`);
+
+            if (tenantId && currentUser) {
+                logAudit({ db, tenantId, userId: currentUser.uid, userName: userName || currentUser.email || 'Admin', userRole: userRole || 'admin', module: 'Manage Users', action: 'Update', entityName: editUserForm.name || editUserForm.email || editUserForm.id, entityId: editUserForm.id, remarks: 'Password reset' });
+            }
+
+            setResetPassword('');
+            setResetPasswordConfirm('');
+            showToast(t('admin.reset_password_success'), 'success');
+        } catch (error: any) {
+            console.error('Error resetting password:', error);
+            setResetPasswordError(error?.message || t('admin.reset_password_error'));
+        } finally {
+            setResetPasswordLoading(false);
         }
     };
 
@@ -515,7 +578,7 @@ export default function AdminPage() {
             {editUserForm && (
                 <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, backdropFilter: 'blur(4px)' }}>
                     <div className="glass-panel" style={{ width: '100%', maxWidth: '500px', padding: '2rem', position: 'relative' }}>
-                        <button onClick={() => setEditUserForm(null)} style={{ position: 'absolute', top: '1rem', right: '1rem', background: 'transparent', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer' }}><X size={24} /></button>
+                        <button onClick={closeEditUser} style={{ position: 'absolute', top: '1rem', right: '1rem', background: 'transparent', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer' }}><X size={24} /></button>
                         <h2 style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                             <Edit2 size={24} color="var(--primary-light)" /> {t('admin.edit_title')}
                         </h2>
@@ -540,6 +603,40 @@ export default function AdminPage() {
                                 {updateLoading ? <Loader2 size={18} className="animate-spin" /> : <><Save size={18} /> {t('admin.update_button')}</>}
                             </button>
                         </form>
+
+                        {/* Reset Password — tenant-scoped, verified server-side */}
+                        <div style={{ marginTop: '1.5rem', paddingTop: '1.5rem', borderTop: '1px solid var(--surface-border)' }}>
+                            <h3 style={{ fontSize: '1rem', margin: '0 0 0.35rem 0', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                <KeyRound size={18} color="var(--primary-light)" /> {t('admin.reset_password')}
+                            </h3>
+                            <p style={{ margin: '0 0 1rem 0', color: 'var(--text-tertiary)', fontSize: '0.8rem' }}>{t('admin.reset_password_hint')}</p>
+
+                            {resetPasswordError && (
+                                <div style={{ padding: '0.6rem 0.75rem', background: 'hsla(0, 84%, 60%, 0.1)', color: 'var(--danger)', borderRadius: '8px', marginBottom: '1rem', fontSize: '0.85rem' }}>
+                                    {resetPasswordError}
+                                </div>
+                            )}
+
+                            <form onSubmit={handleResetPassword} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                                <div className="input-group" style={{ marginBottom: 0 }}>
+                                    <label>{t('admin.new_password')}</label>
+                                    <div style={{ position: 'relative' }}>
+                                        <Lock size={18} style={{ position: 'absolute', left: '1rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-tertiary)' }} />
+                                        <input required type="password" minLength={6} autoComplete="new-password" className="input-field" style={{ paddingLeft: '2.75rem' }} placeholder="••••••••" value={resetPassword} onChange={e => setResetPassword(e.target.value)} />
+                                    </div>
+                                </div>
+                                <div className="input-group" style={{ marginBottom: 0 }}>
+                                    <label>{t('admin.confirm_password')}</label>
+                                    <div style={{ position: 'relative' }}>
+                                        <Lock size={18} style={{ position: 'absolute', left: '1rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-tertiary)' }} />
+                                        <input required type="password" minLength={6} autoComplete="new-password" className="input-field" style={{ paddingLeft: '2.75rem' }} placeholder="••••••••" value={resetPasswordConfirm} onChange={e => setResetPasswordConfirm(e.target.value)} />
+                                    </div>
+                                </div>
+                                <button type="submit" className="btn btn-secondary" disabled={resetPasswordLoading} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}>
+                                    {resetPasswordLoading ? <Loader2 size={18} className="animate-spin" /> : <><KeyRound size={18} /> {t('admin.reset_password_button')}</>}
+                                </button>
+                            </form>
+                        </div>
                     </div>
                 </div>
             )}

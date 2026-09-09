@@ -882,6 +882,10 @@ export type InventoryUpdateInput = {
   stockQuantity: number;
   sellingPrice: number;
   reorderThreshold: number;
+  /** Per-pack-size stock. Supplied when the product is sold in several sizes;
+   *  written to the seller's product copy and mirrored into the canonical
+   *  availability[] entry so the marketplace shows the right size as stocked. */
+  variants?: { unit: string; price: number; stock?: number }[];
 };
 
 export async function updateInventoryRecord(
@@ -932,6 +936,9 @@ export async function updateInventoryRecord(
         console.log("[updateInventoryRecord] price sync → products/" + copyId, { price: patch.sellingPrice });
         updateDoc(doc(db, "products", copyId), {
           price: patch.sellingPrice,
+          // Per-size stock lives on the copy's variants array; the flat
+          // stockQuantity on the inventory doc is only the aggregate.
+          ...(patch.variants !== undefined ? { variants: patch.variants } : {}),
           updatedAt: serverTimestamp(),
         }).catch(() => {});
       }
@@ -951,6 +958,7 @@ export async function updateInventoryRecord(
           },
           patch.sellingPrice,
           patch.stockQuantity > 0 ? "In Stock" : "Out of Stock",
+          patch.variants,
         );
       }
     } catch (e) {
@@ -1310,6 +1318,7 @@ async function syncAvailabilityPriceStock(
   match: { ownerId: string; phone: string },
   sellingPrice: number,
   stockLevel: string,
+  variants?: { unit: string; price: number; stock?: number }[],
 ): Promise<void> {
   const rootRef = doc(db, "products", rootProductId);
   const snap = await getDoc(rootRef);
@@ -1329,7 +1338,15 @@ async function syncAvailabilityPriceStock(
       (match.phone && (storePhone === match.phone || storeId === match.phone));
     if (!matches) return entry;
     changed = true;
-    return { ...entry, sellingPrice, stockLevel };
+    // The marketplace's seller tiles read this array, so per-size stock has to
+    // land here too — otherwise a size the seller just restocked still shows
+    // as unavailable on the product page.
+    return {
+      ...entry,
+      sellingPrice,
+      stockLevel,
+      ...(variants !== undefined ? { variants } : {}),
+    };
   });
 
   if (changed) await updateDoc(rootRef, { availability: updated });

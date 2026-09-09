@@ -61,7 +61,16 @@ export interface SellerAccount {
   data: FirebaseFirestore.DocumentData;
 }
 
-/** Look up a seller by phone across retailers/ then manufacturers/. */
+/** Look up a seller by phone across retailers/ then manufacturers/.
+ *
+ * Falls back to users/{phone} when neither per-role doc exists — a seller
+ * onboarded through the newer signup flow can have `role: 'retailer'` on
+ * their user doc with no matching retailers/{phone} record at all (their
+ * extended profile — address, shop name, GST — was simply never filled in).
+ * Route features would otherwise 404 for a perfectly real, logged-in seller.
+ * The fallback's `collection` is still the correct per-role collection: the
+ * first Route write through saveSellerRouteState() creates that doc via
+ * `merge: true`, closing the gap for every lookup after. */
 export async function resolveSellerAccount(phone: string): Promise<SellerAccount | null> {
   const key = String(phone ?? "").trim();
   if (!key) return null;
@@ -80,6 +89,23 @@ export async function resolveSellerAccount(phone: string): Promise<SellerAccount
       routeStatus: (d.routeStatus ? String(d.routeStatus) : null) || null,
       data: d,
     };
+  }
+
+  const userSnap = await db.collection("users").doc(key).get();
+  if (userSnap.exists) {
+    const d = userSnap.data()!;
+    const role = String(d.role ?? "");
+    if (role === "retailer" || role === "manufacturer") {
+      return {
+        phone: key,
+        collection: role === "manufacturer" ? "manufacturers" : "retailers",
+        shopName: String(d.shopName ?? d.businessName ?? d.name ?? "").trim(),
+        email: (d.email ? String(d.email).trim() : null) || null,
+        razorpayAccountId: (d.razorpayAccountId ? String(d.razorpayAccountId) : null) || null,
+        routeStatus: (d.routeStatus ? String(d.routeStatus) : null) || null,
+        data: d,
+      };
+    }
   }
   return null;
 }

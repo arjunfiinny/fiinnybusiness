@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:developer' as dev;
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -221,6 +222,8 @@ class DashboardRepository {
     required String catalogId,
     required double price,
     required int stockQuantity,
+    bool isCopy = false,
+    String? originalProductId,
     String? sellerAddress,
     double? lat,
     double? lng,
@@ -242,9 +245,94 @@ class DashboardRepository {
     String? videoUrl,
   }) async {
     final uid = FirebaseAuth.instance.currentUser?.uid;
+    final now = DateTime.now();
+
+    // ── 1. Subscription & Seat Limit Enforcement ────────────────────────────
+    final stats = await fetchSeatStats(sellerPhone);
+    if (stats.totalPurchased <= 0) {
+      throw Exception(
+        'No active subscription found. Please purchase a subscription to add products to your store.',
+      );
+    }
+
+    // Cross-check active products in Firestore to prevent desync
+    final activeProductSnaps = await Future.wait([
+      if (sellerPhone.isNotEmpty)
+        _db
+            .collection('products')
+            .where('retailerPhone', isEqualTo: sellerPhone)
+            .where('isActive', isEqualTo: true)
+            .get(),
+      if (uid != null && uid.isNotEmpty)
+        _db
+            .collection('products')
+            .where('ownerId', isEqualTo: uid)
+            .where('isActive', isEqualTo: true)
+            .get(),
+    ]);
+    final seenProductIds = <String>{};
+    for (final snap in activeProductSnaps) {
+      for (final d in snap.docs) {
+        seenProductIds.add(d.id);
+      }
+    }
+    final activeCount = seenProductIds.length;
+    final usedSeats = stats.activeUsed > activeCount ? stats.activeUsed : activeCount;
+
+    if (usedSeats >= stats.totalPurchased) {
+      throw Exception(
+        'Seat limit reached ($usedSeats/${stats.totalPurchased} seats used). You cannot add more products. Please purchase more seats to expand your store.',
+      );
+    }
+
+    // Determine latest subscription expiry date for the seat listing
+    Timestamp? subExpiry;
+    final subQueries = <Future<QuerySnapshot>>[
+      if (sellerPhone.isNotEmpty)
+        _db
+            .collection('subscriptions')
+            .where('ownerPhone', isEqualTo: sellerPhone)
+            .where('subscriptionStatus', isEqualTo: 'active')
+            .get(),
+      if (uid != null && uid.isNotEmpty)
+        _db
+            .collection('subscriptions')
+            .where('ownerId', isEqualTo: uid)
+            .where('subscriptionStatus', isEqualTo: 'active')
+            .get(),
+    ];
+    for (final snap in await Future.wait(subQueries)) {
+      for (final doc in snap.docs) {
+        final d = doc.data() as Map<String, dynamic>? ?? {};
+        final exp = d['expiryDate'] as Timestamp?;
+        if (exp != null && exp.toDate().isAfter(now)) {
+          if (subExpiry == null || exp.toDate().isAfter(subExpiry.toDate())) {
+            subExpiry = exp;
+          }
+        }
+      }
+    }
+    final expiresAt = subExpiry ?? Timestamp.fromDate(now.add(const Duration(days: 365)));
+
+    // ── 2. Create Product, Inventory, and Seat Listing ──────────────────────
     final productRef = _db.collection('products').doc();
     final inventoryRef = _db.collection('inventory').doc();
+    final seatListingRef = _db.collection('retailerSeatListings').doc();
     final batch = _db.batch();
+
+    final isOnline = sellMode != 'offline_store_only';
+    final storeAvEntry = {
+      'storeId': uid ?? sellerPhone,
+      'storePhone': sellerPhone,
+      'storeName': sellerName,
+      'stockLevel': stockQuantity > 0 ? 'In Stock' : 'Out of Stock',
+      'sellingPrice': price,
+      'isOnline': isOnline,
+      if (variants.isNotEmpty)
+        'variants': variants.map((v) => v.toMap()).toList(),
+    };
+
+    final origId = originalProductId ?? (isCopy ? catalogId : null);
 
     batch.set(productRef, {
       // Legacy field names used by security rules for update/delete ownership checks
@@ -252,7 +340,12 @@ class DashboardRepository {
       'retailerId': uid,
       'ownerId': uid,
       'ownerType': 'retailer',
-      'source': 'retailer_inventory_copy',
+      'source': isCopy ? 'retailer_inventory_copy' : 'retailer_inventory',
+      if (isCopy && origId != null && origId.isNotEmpty) ...{
+        'originalProductId': origId,
+        'manufacturerProductId': origId,
+      },
+      'availability': [storeAvEntry],
       // Store name fields matching legacy schema
       'store': sellerName,
       'sellerType': 'retailer',
@@ -290,11 +383,7 @@ class DashboardRepository {
 
     // Web's dashboard inventory table joins products <-> inventory by
     // productId and silently drops any product with no matching inventory
-    // doc (no error shown). This path used to only write the product doc,
-    // so anything added via mobile was invisible on the web dashboard even
-    // though it showed up fine in the marketplace and on mobile itself,
-    // which both read the product doc directly. Mirrors what web's own
-    // createProductAndInventory already does correctly.
+    // doc (no error shown). Mirrors what web's own createProductAndInventory does.
     batch.set(inventoryRef, {
       'id': inventoryRef.id,
       'ownerId': uid,
@@ -310,7 +399,92 @@ class DashboardRepository {
       'updatedAt': FieldValue.serverTimestamp(),
     });
 
+    // Retailer seat listing consumed
+    batch.set(seatListingRef, {
+      'id': seatListingRef.id,
+      'ownerId': uid ?? sellerPhone,
+      'ownerPhone': sellerPhone.isNotEmpty ? sellerPhone : null,
+      'ownerType': 'retailer',
+      'manufacturerId': null,
+      'manufacturerPhone': null,
+      'retailerDocId': sellerPhone.isNotEmpty ? sellerPhone : null,
+      'retailerId': uid ?? sellerPhone,
+      'retailerPhone': sellerPhone.isNotEmpty ? sellerPhone : null,
+      'productId': productRef.id,
+      'manufacturerProductId': origId,
+      'listingType': isCopy ? 'assigned' : 'own',
+      'status': 'active',
+      'assignedAt': FieldValue.serverTimestamp(),
+      'expiresAt': expiresAt,
+      'releasedAt': null,
+    });
+
+    // Increment user product count
+    if (sellerPhone.isNotEmpty) {
+      batch.set(
+        _db.collection('users').doc(sellerPhone),
+        {
+          'productCount': FieldValue.increment(1),
+          'updatedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
+    }
+
+    if (isCopy && origId != null && origId.isNotEmpty) {
+      final originalRef = _db.collection('products').doc(origId);
+      batch.update(originalRef, {
+        'availability': FieldValue.arrayUnion([storeAvEntry]),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    }
+
     await batch.commit();
+
+    // Ensure a retailers/profiles doc exists so this store appears in the store locator.
+    // If the retailer never saved their full profile, fetchStores() won't find them.
+    if (sellerPhone.isNotEmpty) {
+      try {
+        final retailerRef = _db.collection('retailers').doc(sellerPhone);
+        final profileRef = _db.collection('profiles').doc(sellerPhone);
+        final rSnap = await retailerRef.get();
+        if (!rSnap.exists) {
+          final storeData = <String, dynamic>{
+            'userId': uid,
+            'retailerId': uid,
+            'role': 'retailer',
+            'name': sellerName,
+            'shopName': sellerName,
+            'ownerName': sellerName,
+            'phone': sellerPhone,
+            'ownerPhone': sellerPhone,
+            'active': true,
+            'status': 'Active',
+            'onlineDelivery': isOnline,
+            if (sellerAddress != null && sellerAddress.isNotEmpty)
+              'address': sellerAddress,
+            if (lat != null && lng != null) ...{
+              'lat': lat,
+              'lng': lng,
+              'geo': GeoPoint(lat, lng),
+              'location': {'lat': lat, 'lng': lng},
+            },
+            'createdAt': FieldValue.serverTimestamp(),
+            'updatedAt': FieldValue.serverTimestamp(),
+          };
+          await Future.wait([
+            retailerRef.set(storeData, SetOptions(merge: true)),
+            profileRef.set({
+              ...storeData,
+              if (sellerAddress != null && sellerAddress.isNotEmpty)
+                'address': {'line1': sellerAddress},
+            }, SetOptions(merge: true)),
+          ]);
+        }
+      } catch (e) {
+        dev.log('Failed to ensure retailer/profile doc: $e');
+      }
+    }
   }
 
   Future<void> updateListing(
@@ -318,6 +492,161 @@ class DashboardRepository {
     Map<String, dynamic> data, {
     String collectionPath = 'products',
   }) async {
+    if (collectionPath == 'products' && data.containsKey('isActive')) {
+      final newActive = data['isActive'] == true;
+      try {
+        final docRef = _db.collection('products').doc(listingId);
+        final prevSnap = await docRef.get();
+        if (prevSnap.exists) {
+          final pData = prevSnap.data() as Map<String, dynamic>;
+          final prevActive = pData['isActive'] != false;
+          final sellerPhone =
+              (pData['retailerPhone'] ?? pData['ownerPhone'] ?? '') as String;
+          final uid = (pData['ownerId'] ??
+              pData['retailerId'] ??
+              FirebaseAuth.instance.currentUser?.uid ??
+              '') as String;
+
+          if (!prevActive && newActive) {
+            // Reactivating: verify seat availability
+            final stats = await fetchSeatStats(sellerPhone);
+            if (stats.totalPurchased <= 0) {
+              throw Exception(
+                'No active subscription found. Purchase a subscription to reactivate this product.',
+              );
+            }
+            if (stats.available <= 0) {
+              throw Exception(
+                'Seat limit reached (${stats.activeUsed}/${stats.totalPurchased} used). Please purchase more seats to reactivate this product.',
+              );
+            }
+
+            final now = DateTime.now();
+            Timestamp? subExpiry;
+            final subSnap = await _db
+                .collection('subscriptions')
+                .where('subscriptionStatus', isEqualTo: 'active')
+                .where('ownerPhone', isEqualTo: sellerPhone)
+                .get();
+            for (final subDoc in subSnap.docs) {
+              final exp = (subDoc.data()['expiryDate'] as Timestamp?)?.toDate();
+              if (exp != null && exp.isAfter(now)) {
+                if (subExpiry == null || exp.isAfter(subExpiry.toDate())) {
+                  subExpiry = Timestamp.fromDate(exp);
+                }
+              }
+            }
+            final expiresAt = subExpiry ??
+                Timestamp.fromDate(now.add(const Duration(days: 365)));
+
+            final seatSnaps = await _db
+                .collection('retailerSeatListings')
+                .where('productId', isEqualTo: listingId)
+                .get();
+
+            if (seatSnaps.docs.isNotEmpty) {
+              final seatBatch = _db.batch();
+              for (final sDoc in seatSnaps.docs) {
+                seatBatch.update(sDoc.reference, {
+                  'status': 'active',
+                  'expiresAt': expiresAt,
+                  'releasedAt': null,
+                });
+              }
+              await seatBatch.commit();
+            } else {
+              await _db.collection('retailerSeatListings').add({
+                'ownerId': uid.isNotEmpty ? uid : sellerPhone,
+                'ownerPhone': sellerPhone.isNotEmpty ? sellerPhone : null,
+                'ownerType': 'retailer',
+                'manufacturerId': null,
+                'manufacturerPhone': null,
+                'retailerDocId': sellerPhone.isNotEmpty ? sellerPhone : null,
+                'retailerId': uid.isNotEmpty ? uid : sellerPhone,
+                'retailerPhone': sellerPhone.isNotEmpty ? sellerPhone : null,
+                'productId': listingId,
+                'manufacturerProductId':
+                    pData['originalProductId'] ?? pData['catalogId'],
+                'listingType': pData['source'] == 'retailer_inventory_copy'
+                    ? 'assigned'
+                    : 'own',
+                'status': 'active',
+                'assignedAt': FieldValue.serverTimestamp(),
+                'expiresAt': expiresAt,
+                'releasedAt': null,
+              });
+            }
+
+            if (sellerPhone.isNotEmpty) {
+              await _db.collection('users').doc(sellerPhone).set({
+                'productCount': FieldValue.increment(1),
+                'updatedAt': FieldValue.serverTimestamp(),
+              }, SetOptions(merge: true));
+            }
+          } else if (prevActive && !newActive) {
+            // Deactivating: release seat listing
+            final seatSnaps = await _db
+                .collection('retailerSeatListings')
+                .where('productId', isEqualTo: listingId)
+                .where('status', isEqualTo: 'active')
+                .get();
+            if (seatSnaps.docs.isNotEmpty) {
+              final seatBatch = _db.batch();
+              for (final sDoc in seatSnaps.docs) {
+                seatBatch.update(sDoc.reference, {
+                  'status': 'released',
+                  'releasedAt': FieldValue.serverTimestamp(),
+                });
+              }
+              await seatBatch.commit();
+            }
+            if (sellerPhone.isNotEmpty) {
+              await _db.collection('users').doc(sellerPhone).set({
+                'productCount': FieldValue.increment(-1),
+                'updatedAt': FieldValue.serverTimestamp(),
+              }, SetOptions(merge: true));
+            }
+          }
+        }
+      } catch (e) {
+        if (e is Exception && e.toString().contains('Seat limit reached')) {
+          rethrow;
+        }
+        dev.log('Failed to update seat status during updateListing: $e');
+      }
+    }
+
+    if (collectionPath == 'products') {
+      try {
+        final docRef = _db.collection(collectionPath).doc(listingId);
+        final docSnap = await docRef.get();
+        if (docSnap.exists) {
+          final p = docSnap.data();
+          final rawAv = p?['availability'];
+          if (rawAv is List && rawAv.isNotEmpty) {
+            final updatedAv = rawAv.map((e) {
+              final entry = Map<String, dynamic>.from(e as Map);
+              if (data.containsKey('isOnline')) {
+                entry['isOnline'] = data['isOnline'] == true;
+              }
+              if (data.containsKey('price')) {
+                entry['sellingPrice'] = data['price'];
+              }
+              if (data.containsKey('stockQuantity')) {
+                final qty = data['stockQuantity'];
+                entry['stockLevel'] =
+                    (qty is num && qty > 0) ? 'In Stock' : 'Out of Stock';
+              }
+              return entry;
+            }).toList();
+            data['availability'] = updatedAv;
+          }
+        }
+      } catch (e) {
+        dev.log('Failed to sync availability in updateListing: $e');
+      }
+    }
+
     await _db.collection(collectionPath).doc(listingId).update({
       ...data,
       'updatedAt': FieldValue.serverTimestamp(),
@@ -333,6 +662,38 @@ class DashboardRepository {
     if (collectionPath == 'products') {
       await syncMarketMirror(listingId, isProductActive: false);
       await syncInventoryDoc(listingId, isProductActive: false);
+
+      try {
+        final seatSnaps = await _db
+            .collection('retailerSeatListings')
+            .where('productId', isEqualTo: listingId)
+            .where('status', isEqualTo: 'active')
+            .get();
+        if (seatSnaps.docs.isNotEmpty) {
+          final seatBatch = _db.batch();
+          for (final doc in seatSnaps.docs) {
+            seatBatch.update(doc.reference, {
+              'status': 'released',
+              'releasedAt': FieldValue.serverTimestamp(),
+            });
+          }
+          await seatBatch.commit();
+        }
+
+        final productDoc = await _db.collection('products').doc(listingId).get();
+        final pData = productDoc.data();
+        final phone =
+            (pData?['retailerPhone'] ?? pData?['ownerPhone']) as String?;
+        final wasActive = pData?['isActive'] != false;
+        if (wasActive && phone != null && phone.isNotEmpty) {
+          await _db.collection('users').doc(phone).set({
+            'productCount': FieldValue.increment(-1),
+            'updatedAt': FieldValue.serverTimestamp(),
+          }, SetOptions(merge: true));
+        }
+      } catch (e) {
+        dev.log('Failed to release seat on delete: $e');
+      }
     }
     await _db.collection(collectionPath).doc(listingId).delete();
   }
@@ -442,6 +803,7 @@ class DashboardRepository {
     DateTime? discountStartDate,
     DateTime? discountEndDate,
     bool? isProductActive,
+    bool? isOnline,
   }) async {
     try {
       final sellerSnap = await _db
@@ -485,6 +847,7 @@ class DashboardRepository {
           } else if (stockLevel != null) {
             entry['stockLevel'] = stockLevel;
           }
+          if (isOnline != null) entry['isOnline'] = isOnline;
           if (discountPct != null) entry['discountPct'] = discountPct;
           if (discountEnabled != null) entry['discountEnabled'] = discountEnabled;
           if (discountStartDate != null) {
@@ -639,6 +1002,37 @@ class DashboardRepository {
         // Mirror doesn't exist yet, or isn't writable — the gate reads
         // users/{phone}, which was already written above.
       }
+    }
+  }
+
+  /// Saves just the GSTIN — used by the inline "enter GST to turn on Online
+  /// Delivery" prompt, which needs to persist one field without going through
+  /// the full profile form (and its other required fields). Same mirrors as
+  /// setAccountOnlineDelivery, for the same reason: web reads gstin from
+  /// retailers|manufacturers/{phone}, not users/{phone}. The role doc uses
+  /// update() rather than set(merge:) so this can never CREATE a near-empty
+  /// public profile doc for a seller who has none.
+  Future<void> updateGstin(
+    String sellerPhone, {
+    required bool isManufacturer,
+    required String gstin,
+  }) async {
+    if (sellerPhone.isEmpty) return;
+
+    await _db.collection('users').doc(sellerPhone).set({
+      'gstin': gstin,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    final profileCollection = isManufacturer ? 'manufacturers' : 'retailers';
+    try {
+      await _db.collection(profileCollection).doc(sellerPhone).update({
+        'gstin': gstin,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } catch (_) {
+      // Mirror doesn't exist yet — users/{phone} above is already the source
+      // of truth the enable-gate itself checks.
     }
   }
 

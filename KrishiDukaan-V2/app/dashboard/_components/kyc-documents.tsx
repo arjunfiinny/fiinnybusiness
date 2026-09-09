@@ -1,9 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
 import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
-import { CheckCircle2, FileText, Loader2, Upload, X } from "lucide-react";
+import { CheckCircle2, ChevronDown, FileText, Loader2, Upload, X } from "lucide-react";
 import { db, storage } from "../../firebase";
 
 /**
@@ -38,6 +38,11 @@ type DocSpec = {
   label: string;
   hint: string;
   required: boolean;
+  /** Shown immediately vs. tucked behind "More documents". A seller who
+   *  sees all six upload rows at once tends to stall out — leading with the
+   *  two that establish who they are keeps the first screen short; the rest
+   *  are still required, just not part of the opening ask. */
+  front: boolean;
 };
 
 /** Required set matches what Razorpay asks for on an individual/proprietor
@@ -49,36 +54,42 @@ const DOC_SPECS: DocSpec[] = [
     label: "PAN card",
     hint: "Photo or PDF of the PAN card matching the account holder name",
     required: true,
-  },
-  {
-    type: "cancelled_cheque",
-    label: "Cancelled cheque or passbook",
-    hint: "Must clearly show account number, IFSC and holder name",
-    required: true,
-  },
-  {
-    type: "address_proof",
-    label: "Address proof",
-    hint: "Aadhaar, electricity bill or shop licence",
-    required: true,
-  },
-  {
-    type: "gst_certificate",
-    label: "GST certificate",
-    hint: "Only if your business is GST registered",
-    required: false,
-  },
-  {
-    type: "owner_photo",
-    label: "Owner photo",
-    hint: "A clear photo of the account holder's face, for identity verification",
-    required: true,
+    front: true,
   },
   {
     type: "trade_license",
     label: "Trade / product license",
     hint: "Shop establishment, FSSAI, mandi, or other license permitting you to sell agri produce or inputs",
     required: true,
+    front: true,
+  },
+  {
+    type: "cancelled_cheque",
+    label: "Cancelled cheque or passbook",
+    hint: "Must clearly show account number, IFSC and holder name",
+    required: true,
+    front: false,
+  },
+  {
+    type: "address_proof",
+    label: "Address proof",
+    hint: "Aadhaar, electricity bill or shop licence",
+    required: true,
+    front: false,
+  },
+  {
+    type: "owner_photo",
+    label: "Owner photo",
+    hint: "A clear photo of the account holder's face, for identity verification",
+    required: true,
+    front: false,
+  },
+  {
+    type: "gst_certificate",
+    label: "GST certificate",
+    hint: "Only if your business is GST registered",
+    required: false,
+    front: false,
   },
 ];
 
@@ -225,7 +236,7 @@ export function KycDocuments({
       )}
 
       <div className="flex flex-col gap-3">
-        {DOC_SPECS.map((spec) => (
+        {DOC_SPECS.filter((s) => s.front).map((spec) => (
           <DocRow
             key={spec.type}
             spec={spec}
@@ -236,8 +247,54 @@ export function KycDocuments({
             onPick={(file) => void upload(spec, file)}
           />
         ))}
+
+        <MoreDocuments defaultOpen={readOnly}>
+          {DOC_SPECS.filter((s) => !s.front).map((spec) => (
+            <DocRow
+              key={spec.type}
+              spec={spec}
+              existing={docs[spec.type]}
+              busy={busyType === spec.type}
+              disabled={readOnly || busyType !== null}
+              readOnly={readOnly}
+              onPick={(file) => void upload(spec, file)}
+            />
+          ))}
+        </MoreDocuments>
       </div>
     </section>
+  );
+}
+
+/** Collapsed by default so the opening ask is two uploads, not six — expanded
+ *  automatically in the read-only (verified) view, where there's nothing left
+ *  to fill in and a seller checking their own file wants to see all of it. */
+function MoreDocuments({
+  defaultOpen,
+  children,
+}: {
+  defaultOpen: boolean;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="rounded-xl border border-outline-variant/30 bg-surface-container-low/30">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left text-sm font-semibold text-on-surface"
+      >
+        More documents
+        <ChevronDown
+          className={`h-4 w-4 shrink-0 text-on-surface-variant transition-transform ${open ? "rotate-180" : ""}`}
+        />
+      </button>
+      {open && (
+        <div className="flex flex-col gap-3 border-t border-outline-variant/20 p-3 pt-3">
+          {children}
+        </div>
+      )}
+    </div>
   );
 }
 
