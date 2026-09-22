@@ -59,7 +59,12 @@ class OrderRepository {
 
   /// First non-empty ownership field on a product doc, phone-first, or ''.
   static String _ownerOf(Map<String, dynamic> d) {
-    for (final field in ['retailerPhone', 'ownerPhone', 'retailerId', 'ownerId']) {
+    // manufacturerPhone/createdByPhone: a manufacturer's own canonical listing
+    // may carry only these (see manufacturer_repository.addCatalogProduct).
+    for (final field in [
+      'retailerPhone', 'ownerPhone', 'manufacturerPhone', 'createdByPhone',
+      'retailerId', 'ownerId',
+    ]) {
       final v = (d[field] as String?)?.trim();
       if (v != null && v.isNotEmpty) return v;
     }
@@ -137,6 +142,10 @@ class OrderRepository {
         'subtotal': subtotal,
         'totalGst': sellerGst,
         'deliveryCharge': deliveryCharge,
+        // `grandTotal` is the canonical final-total field (web writes it too);
+        // `total` is kept as a mirror for backward compatibility with older
+        // readers and the OrderModel fallback. Both hold the same value.
+        'grandTotal': grandTotal,
         'total': grandTotal,
         // Rules require status == 'placed' on order create
         'status': 'placed',
