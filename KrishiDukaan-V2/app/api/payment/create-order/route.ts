@@ -8,10 +8,10 @@ import {
   applyDiscount,
   billableSeats,
   computeAmount,
+  evaluatePromo,
   isPlanAllowed,
   normalizeSeatCount,
   parseDurations,
-  parsePromo,
   planFor,
   planKey,
   type DurationPrice,
@@ -89,33 +89,47 @@ async function resolveCallerRole(request: Request): Promise<string | null> {
 }
 
 /**
- * Resolve a promo code to a discount percentage.
+ * Resolve a promo code to a discount percentage, checking all applicability
+ * conditions (active, date range, applicable plans, seat limits).
  *
- * Reads the promoCodes/ collection — the SAME source SubscriptionView shows the
- * seller. Previously this route read a PROMO_CODES env var while the UI read
- * Firestore, so a code that existed in only one place meant the seller was shown
- * a discount and charged full price (or the reverse).
+ * Returns { discountPercent } on success or { discountPercent: 0, error } when
+ * a code was provided but is not valid. The caller returns 422 in that case so
+ * the client can show the exact reason rather than silently charging full price.
  *
- * The env var is still honoured as a fallback so any promo currently configured
- * that way keeps working; Firestore wins when both define the same code.
+ * The env-var fallback is kept for any promo currently configured that way;
+ * Firestore wins when both define the same code.
  */
-async function resolveDiscount(rawCode: unknown): Promise<number> {
+async function resolveDiscount(
+  rawCode: unknown,
+  seatCount: number,
+  months: number,
+): Promise<{ discountPercent: number; error?: string }> {
   const code = String(rawCode ?? '').trim().toUpperCase();
-  if (!code) return 0;
+  if (!code) return { discountPercent: 0 };
 
   try {
     const snap = await getAdminDb()
       .collection('promoCodes')
       .where('code', '==', code)
-      .where('active', '==', true)
       .limit(1)
       .get();
+
     if (!snap.empty) {
-      const promo = parsePromo(snap.docs[0]!.data());
-      if (promo) return promo.discountPercent;
+      // Same rule set (and same messages) the checkout UI validated against, so
+      // a discount the seller was shown cannot be refused here — or vice versa.
+      // evaluatePromo already returns { discountPercent, error? } — the exact
+      // shape this function contracts — so the result passes straight through.
+      const { discountPercent, error } = evaluatePromo(snap.docs[0]!.data(), {
+        months,
+        seatCount,
+      });
+      return { discountPercent, ...(error ? { error } : {}) };
     }
   } catch (e) {
     console.error('[create-order] promo read failed:', e);
+    // On a read failure, let the order proceed without a discount rather than
+    // blocking the payment — better to under-discount than to lose a sale.
+    return { discountPercent: 0 };
   }
 
   // Legacy fallback: PROMO_CODES={"LAUNCH20":20}
@@ -124,13 +138,13 @@ async function resolveDiscount(rawCode: unknown): Promise<number> {
     if (raw) {
       const map = JSON.parse(raw) as Record<string, number>;
       const pct = Number(map[code]);
-      if (Number.isFinite(pct) && pct > 0 && pct <= 100) return pct;
+      if (Number.isFinite(pct) && pct > 0 && pct <= 100) return { discountPercent: pct };
     }
   } catch {
     /* malformed env var — ignore */
   }
 
-  return 0;
+  return { discountPercent: 0, error: 'Invalid or expired promo code.' };
 }
 
 export async function POST(request: Request) {
@@ -182,7 +196,11 @@ export async function POST(request: Request) {
     // cannot be turned into unlimited listings by sending a large seatCount.
     const grantedSeats = billableSeats(plan, seats);
 
-    const discountPercent = await resolveDiscount(promoCode);
+    const promoResult = await resolveDiscount(promoCode, seats, months);
+    if (promoResult.error) {
+      return NextResponse.json({ error: promoResult.error }, { status: 422 });
+    }
+    const discountPercent = promoResult.discountPercent;
     const subtotal = computeAmount(plan, grantedSeats);
     const baseAmount = discountPercent
       ? applyDiscount(subtotal, discountPercent)
