@@ -77,17 +77,26 @@ export async function fetchPaymentTransfers(paymentId: string): Promise<RouteTra
  */
 export function matchSellerTransfer(
   transfers: RouteTransferRow[],
-  sellerKey: string,
+  sellerIdentities: string | string[],
   preferredId?: string | null,
 ): RouteTransferRow | null {
   if (preferredId) {
     return transfers.find((t) => t.id === preferredId) ?? null;
   }
-  const key = phoneKey(sellerKey);
-  if (key) {
-    const tagged = transfers.find((t) => phoneKey(t.notes?.sellerKey) === key);
-    if (tagged) return tagged;
-  }
+  // Checkout tags a transfer with item.sellerPhone, falling back to
+  // item.sellerId — which web orders key to a Firebase uid. So a note can be
+  // either form, and an order carries both; compare against every identity,
+  // exactly and as a 10-digit phone.
+  const ids = (Array.isArray(sellerIdentities) ? sellerIdentities : [sellerIdentities])
+    .map((v) => String(v ?? "").trim())
+    .filter(Boolean);
+  const keys = new Set(ids.map(phoneKey).filter((k) => k.length === 10));
+  const tagged = transfers.find((t) => {
+    const note = String(t.notes?.sellerKey ?? "").trim();
+    if (!note) return false;
+    return ids.includes(note) || keys.has(phoneKey(note));
+  });
+  if (tagged) return tagged;
   if (transfers.length === 1 && !transfers[0]!.notes?.sellerKey) return transfers[0]!;
   return null;
 }
@@ -118,7 +127,7 @@ export async function reverseOrderSellerTransfer(
     const transfers = await fetchPaymentTransfers(paymentId);
     transfer = matchSellerTransfer(
       transfers,
-      String(order.sellerPhone ?? order.sellerId ?? ""),
+      [String(order.sellerPhone ?? ""), String(order.sellerId ?? "")],
       order.routeTransfer?.id ? String(order.routeTransfer.id) : null,
     );
   } catch (e) {

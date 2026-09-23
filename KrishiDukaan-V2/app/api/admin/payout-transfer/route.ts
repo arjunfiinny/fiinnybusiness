@@ -216,7 +216,7 @@ export async function POST(req: NextRequest) {
           const transfers = await fetchPaymentTransfers(paymentId);
           const t = matchSellerTransfer(
             transfers,
-            seller,
+            [seller, String(data?.sellerPhone ?? ""), String(data?.sellerId ?? "")],
             data?.routeTransfer?.id ? String(data.routeTransfer.id) : null,
           );
           if (t && outstandingPaise(t) > 0) routeManaged.push(row.orderId);

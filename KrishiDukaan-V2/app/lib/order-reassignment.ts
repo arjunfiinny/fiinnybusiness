@@ -21,8 +21,12 @@ import { grossFor, type OrderLike } from "../dashboard/_lib/seller-earnings";
  * STATE
  *   order.status        'reassigning' for the whole window
  *   order.reassignment  { status: 'open' | 'accepted' | 'refunding' | 'closed', ... }
- *   orderOffers/{orderId}_{phone}  one per candidate — what the candidate may
- *                        see before accepting (no address, no phone).
+ *   sellerOffers/{phoneKey}/offers/{orderId}  one per candidate — what the
+ *                        candidate may see before accepting (no address, no
+ *                        phone). Keyed by seller in the PATH so firestore.rules
+ *                        can prove a list query only returns the caller's own
+ *                        offers; a field-based rule can't, and would let any
+ *                        signed-in user list every seller's offers.
  *
  * MONEY
  *   - The rejecting seller's held Route transfer is reversed when the order
@@ -67,8 +71,17 @@ function firstPhone(...vals: unknown[]): string {
   return "";
 }
 
-export function offerIdFor(orderId: string, sellerPhone: string): string {
-  return `${orderId}_${phoneKey(sellerPhone)}`;
+export function offerRef(orderId: string, sellerPhone: string): FirebaseFirestore.DocumentReference {
+  return getAdminDb()
+    .collection("sellerOffers")
+    .doc(phoneKey(sellerPhone))
+    .collection("offers")
+    .doc(orderId);
+}
+
+function candidatesOf(order: FirebaseFirestore.DocumentData): string[] {
+  const c = order.reassignment?.candidatePhones;
+  return Array.isArray(c) ? (c as string[]) : [];
 }
 
 function orderItems(order: FirebaseFirestore.DocumentData): Array<Record<string, unknown>> {
@@ -271,7 +284,7 @@ export async function startReassignment(params: {
       updatedAt: nowIso,
     });
     for (const phone of candidates) {
-      tx.set(db.collection("orderOffers").doc(offerIdFor(orderId, phone)), {
+      tx.set(offerRef(orderId, phone), {
         orderId,
         sellerPhone: phone,
         sellerPhones: phoneVariants(phone),
@@ -315,7 +328,7 @@ export type AcceptOutcome =
 export async function acceptReassignment(orderId: string, sellerPhone: string): Promise<AcceptOutcome> {
   const db = getAdminDb();
   const ref = db.collection("orders").doc(orderId);
-  const offerRef = db.collection("orderOffers").doc(offerIdFor(orderId, sellerPhone));
+  const myOffer = offerRef(orderId, sellerPhone);
   const seller = await resolveSellerAccount(sellerPhone);
   const nowIso = new Date().toISOString();
 
@@ -323,7 +336,7 @@ export async function acceptReassignment(orderId: string, sellerPhone: string): 
   let claimed: FirebaseFirestore.DocumentData | null = null;
 
   await db.runTransaction(async (tx) => {
-    const [snap, offerSnap] = await Promise.all([tx.get(ref), tx.get(offerRef)]);
+    const [snap, offerSnap] = await Promise.all([tx.get(ref), tx.get(myOffer)]);
     if (!snap.exists) {
       failure = { status: 404, error: "Order not found." };
       return;
@@ -359,7 +372,7 @@ export async function acceptReassignment(orderId: string, sellerPhone: string): 
       "reassignment.acceptedAt": nowIso,
       updatedAt: nowIso,
     });
-    tx.update(offerRef, { status: "accepted", updatedAt: nowIso });
+    tx.update(myOffer, { status: "accepted", updatedAt: nowIso });
     claimed = o;
   });
 
@@ -370,7 +383,7 @@ export async function acceptReassignment(orderId: string, sellerPhone: string): 
   // Everything below runs only for the single winner, after the claim is
   // committed. Each step is independent and non-fatal to the claim.
 
-  await closeOtherOffers(orderId, "taken");
+  await closeOtherOffers(orderId, candidatesOf(original), "taken");
   await decrementSellerStock(original, sellerPhone);
 
   const paymentId = String(original.payment?.razorpayPaymentId ?? "").trim();
@@ -402,22 +415,20 @@ export async function declineReassignment(
   sellerPhone: string,
 ): Promise<{ ok: true; refunded: boolean } | { ok: false; status: number; error: string }> {
   const db = getAdminDb();
-  const offerRef = db.collection("orderOffers").doc(offerIdFor(orderId, sellerPhone));
-  const offer = await offerRef.get();
+  const mine = offerRef(orderId, sellerPhone);
+  const offer = await mine.get();
   if (!offer.exists || offer.data()?.status !== "open") {
     return { ok: false, status: 409, error: "This request is no longer open." };
   }
-  await offerRef.update({ status: "declined", updatedAt: new Date().toISOString() });
+  await mine.update({ status: "declined", updatedAt: new Date().toISOString() });
 
   // Nobody left to ask: refund now rather than making the customer wait out
   // the rest of 24h for an answer that can no longer come.
-  const open = await db
-    .collection("orderOffers")
-    .where("orderId", "==", orderId)
-    .where("status", "==", "open")
-    .limit(1)
-    .get();
-  if (!open.empty) return { ok: true, refunded: false };
+  const order = (await db.collection("orders").doc(orderId).get()).data() ?? {};
+  const others = await Promise.all(candidatesOf(order).map((p) => offerRef(orderId, p).get()));
+  if (others.some((d) => d.exists && d.data()?.status === "open")) {
+    return { ok: true, refunded: false };
+  }
 
   const res = await finalizeReassignmentRefund(orderId, {
     finalStatus: "rejected",
@@ -429,14 +440,17 @@ export async function declineReassignment(
 
 // ─── Exits ───────────────────────────────────────────────────────────────
 
-async function closeOtherOffers(orderId: string, to: "taken" | "expired"): Promise<void> {
+async function closeOtherOffers(
+  orderId: string,
+  candidates: string[],
+  to: "taken" | "expired",
+): Promise<void> {
   const db = getAdminDb();
-  const open = await db.collection("orderOffers").where("orderId", "==", orderId).get();
+  const snaps = await Promise.all(candidates.map((p) => offerRef(orderId, p).get()));
   const batch = db.batch();
   const now = new Date().toISOString();
-  for (const d of open.docs) {
-    const s = d.data()?.status;
-    if (s === "open") batch.update(d.ref, { status: to, updatedAt: now });
+  for (const d of snaps) {
+    if (d.exists && d.data()?.status === "open") batch.update(d.ref, { status: to, updatedAt: now });
   }
   await batch.commit();
 }
@@ -540,7 +554,7 @@ export async function finalizeReassignmentRefund(
     ...(opts.finalStatus === "cancelled" ? { cancellationReason: opts.reason } : {}),
     updatedAt: new Date().toISOString(),
   });
-  await closeOtherOffers(orderId, "expired");
+  await closeOtherOffers(orderId, candidatesOf(o), "expired");
   return { ok: true, refunded: paid };
 }
 

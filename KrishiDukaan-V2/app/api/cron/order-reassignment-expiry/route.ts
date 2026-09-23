@@ -17,8 +17,18 @@ import { finalizeReassignmentRefund } from "../../../lib/order-reassignment";
  * composite index has to be deployed for this to run.
  */
 export async function POST(request: Request) {
+  // Primary: the secret the scheduling Cloud Function reads from the same
+  // server-only doc (see functions/src/notifications/reassignment.ts) — one
+  // source, so the two sides can never hold different values. CRON_SECRET is
+  // still accepted for manual runs.
   const secret = request.headers.get("x-cron-secret");
-  if (!secret || secret !== process.env.CRON_SECRET) {
+  const shared = (await getAdminDb().collection("_serverConfig").doc("cron").get())
+    .data()?.reassignmentExpirySecret;
+  const valid =
+    !!secret &&
+    ((typeof shared === "string" && shared.length >= 32 && secret === shared) ||
+      (!!process.env.CRON_SECRET && secret === process.env.CRON_SECRET));
+  if (!valid) {
     return NextResponse.json({ ok: false, error: "Unauthorized." }, { status: 401 });
   }
 
