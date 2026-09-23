@@ -26,6 +26,11 @@ String? routeForNotification(String? type, Map<String, dynamic> data) {
   switch (type) {
     case 'order':
       return '/dashboard/orders';
+    // Another seller rejected an order this seller could fulfil. Lands on the
+    // Requests tab, same as the web's /dashboard/orders?tab=requests that the
+    // WhatsApp alert links to.
+    case 'order_offer':
+      return '/dashboard/orders?tab=requests';
     case 'order_update':
       final id = str('orderId');
       return id != null ? '/orders/$id' : '/orders';
