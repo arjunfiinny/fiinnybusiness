@@ -16,6 +16,7 @@ export type WaTemplate =
   | "subscription_expiry"
   | "order_notification"
   | "order_confirmation_customer"
+  | "order_accept_pending"
   | "retailer_onboarding"
   | "product_assignment_onboarded"
   | "product_assignment_pending_signup"
@@ -27,6 +28,7 @@ export type WaTemplate =
   | "kyc_pending"
   | "kyc_success"
   | "app_update"
+  | "reel_promo_hindi"
   | "generic";
 
 /** Dynamic values substituted into the template at render time (for audit/debug). */

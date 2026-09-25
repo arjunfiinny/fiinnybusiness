@@ -1115,8 +1115,18 @@ export async function updateSubscriptionStatus(
    * that was not.
    */
   termsAcceptance?: TermsAcceptance,
+  /**
+   * The promo code this subscription was purchased with, as returned by
+   * /api/payment/verify (which reads it from the Razorpay order notes, stamped
+   * server-side at create-order time). Persisted on the subscription doc so
+   * "which users bought with promo X" is answerable by querying subscriptions.
+   * Omitted / empty when no promo was used. Never sourced from the checkout
+   * input field — only the gateway-verified value flows through here.
+   */
+  promoCode?: string | null,
 ): Promise<{ profileUpdated: true; paymentLogged: boolean; paymentLogError?: string }> {
   const timestamp = serverTimestamp();
+  const normalizedPromo = String(promoCode ?? '').trim().toUpperCase();
 
   // Resolve uid → phone. Try uidIndex first; then scan users/{uid} directly (works for
   // admin-created / email-based accounts that have no uidIndex entry).
@@ -1199,6 +1209,9 @@ export async function updateSubscriptionStatus(
         razorpayOrderId: paymentDetails?.orderId ?? null,
         razorpayPaymentId: paymentDetails?.paymentId ?? null,
         subscriptionStatus: 'active',
+        // Promo attribution — written only when a gateway-verified code was
+        // used. Absent field = no promo, so usage queries filter on presence.
+        ...(normalizedPromo ? { promoCode: normalizedPromo } : {}),
         startDate: Timestamp.fromDate(now),
         expiryDate: Timestamp.fromDate(expiry),
         createdAt: timestamp,
@@ -2043,6 +2056,18 @@ export type { Hub };
 // admin credentials, never something a visitor's session should be able to do.
 
 
+/** Detects the device category from the browser UA string. Returns 'web' (desktop),
+ *  'mobile' (phone), or 'tablet'. Used to bucket DAU by platform. */
+function detectPlatform(): 'web' | 'mobile' | 'tablet' {
+  if (typeof navigator === 'undefined') return 'web';
+  const ua = navigator.userAgent;
+  if (/iPad/i.test(ua)) return 'tablet';
+  // Android tablets omit the "Mobile" token; Android phones include it.
+  if (/Android/i.test(ua) && !/Mobile/i.test(ua)) return 'tablet';
+  if (/Mobi|Android|iPhone|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua)) return 'mobile';
+  return 'web';
+}
+
 function getLocalDayKey(date: Date = new Date()): string {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -2111,7 +2136,7 @@ export async function trackUserActivity(opts: {
       {
         role: opts.role ?? null,
         registeredDayKey,
-        platform: 'web',
+        platform: detectPlatform(),
         at: serverTimestamp(),
       },
       { merge: true },

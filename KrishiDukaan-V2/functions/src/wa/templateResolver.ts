@@ -1,5 +1,20 @@
 import type { WaTemplate, WaPayload, WaTemplateComponent, WaTextParam } from "./types";
 
+/**
+ * Returns the BCP-47 language code for a given template as registered in Meta
+ * Business Manager. Must match exactly — mismatches produce error 132001.
+ * Defaults to "mr" (Marathi) for all existing templates; override per-template
+ * only when a template is approved under a different language.
+ */
+export function resolveTemplateLanguage(template: WaTemplate): string {
+  switch (template) {
+    case "reel_promo_hindi":
+      return "hi";
+    default:
+      return "mr";
+  }
+}
+
 function t(text: string): WaTextParam {
   return { type: "text", text };
 }
@@ -75,6 +90,24 @@ export function resolveTemplateComponents(
       return [
         body(p("customerName")),
         { type: "button", sub_type: "url", index: 0, parameters: [t(p("orderId"))] },
+      ];
+
+    case "order_accept_pending":
+      // Sent to the SELLER (retailer) when an online delivery order has been
+      // waiting for accept/reject for ≥24h. Marathi (mr — the resolver default).
+      // Body:
+      //   {{1}} = retailerName — retailer's business name, falling back to their
+      //           real (owner) name; never the customer's name.
+      //   {{2}} = productName   (first ordered item, "+N more" when several)
+      //   {{3}} = pendingDays   (whole days the order has been pending)
+      // CTA is a static URL button (https://krishidukan.com/dashboard/orders) —
+      // static, so no button component is sent from here.
+      return [
+        body(
+          p("retailerName") || "व्यापारी",
+          p("productName"),
+          p("pendingDays"),
+        ),
       ];
 
     case "product_assignment_onboarded":
@@ -160,6 +193,26 @@ export function resolveTemplateComponents(
       // CTA is a static URL button (Play Store listing) — no button component is sent.
       const displayName = p("businessName") || p("shopName") || p("ownerName") || "User";
       return [body(displayName)];
+    }
+
+    case "reel_promo_hindi": {
+      // Manual admin Marketing campaign (Hindi) — never triggered automatically.
+      // Header: static IMAGE — Meta requires the header component even for static images.
+      // Body: ZERO variables — do NOT send a body component or Meta returns error 132000.
+      // Button: static URL (https://krishidukan.com/reels/karan-veer-power-plus-xObUVDXHFtyluo3xCqQt)
+      //   — static, so no button component is sent.
+      // Image media ID injected via WA_REEL_PROMO_HEADER_ID secret (Secret Manager).
+      // Must be declared in wa-dispatch.ts secrets[] — if undefined here the function
+      // was not deployed with the secret, not a resolver bug.
+      const headerImageId = process.env.WA_REEL_PROMO_HEADER_ID;
+      if (!headerImageId) {
+        throw new Error(
+          "WA_REEL_PROMO_HEADER_ID is not set — add it to the function secrets[] in wa-dispatch.ts and redeploy"
+        );
+      }
+      return [
+        { type: "header", parameters: [{ type: "image", image: { id: headerImageId } }] },
+      ];
     }
 
     case "generic":
