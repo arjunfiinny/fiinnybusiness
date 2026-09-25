@@ -545,6 +545,9 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
         razorpayPaymentId: response.paymentId,
         seatCount: verifiedSeatCount,
         amountPaid: (verifyData['amountPaid'] as num?)?.toInt(),
+        // Gateway-verified promo code from the order notes (via verify/), not
+        // the checkout field — persisted for promo usage attribution.
+        promoCode: (verifyData['promoCode'] as String?),
       );
     } catch (e) {
       if (mounted) {
@@ -566,7 +569,9 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
     required String razorpayPaymentId,
     required int seatCount,
     int? amountPaid,
+    String? promoCode,
   }) async {
+    final normalizedPromo = (promoCode ?? '').trim().toUpperCase();
     final user = ref.read(currentUserProvider).value!;
     final firebaseUser = FirebaseAuth.instance.currentUser!;
 
@@ -624,6 +629,9 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
       'razorpayOrderId': razorpayOrderId,
       'razorpayPaymentId': razorpayPaymentId,
       'subscriptionStatus': 'active',
+      // Promo attribution — written only when a gateway-verified code was used.
+      // Absent field = no promo, matching the web write in app/firebase.ts.
+      if (normalizedPromo.isNotEmpty) 'promoCode': normalizedPromo,
       'startDate': Timestamp.fromDate(now),
       'expiryDate': Timestamp.fromDate(expiry),
       'createdAt': FieldValue.serverTimestamp(),
@@ -697,6 +705,9 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
           razorpayPaymentId: reconciliation.paymentId!,
           seatCount: seatCount,
           amountPaid: amountCharged,
+          // Promo code from the order's server-set notes, same source as
+          // seatCount — keeps attribution correct on the reconciliation path.
+          promoCode: (reconciliation.notes?['promoCode'] as String?),
         );
         return; // _activateSubscription already navigated away on success.
       } catch (e) {

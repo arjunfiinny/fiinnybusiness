@@ -30,6 +30,10 @@ export {
   remindSubscriptionRenewal,
 } from "./notifications/reminders";
 export {
+  remindPendingOrderAcceptance,
+  testOrderAcceptPendingReminder,
+} from "./notifications/order-accept-reminder";
+export {
   provisionErpTenantOnSubscription,
   provisionErpTenantByAdmin,
   createErpHandoffCode,
