@@ -532,7 +532,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/dashboard/enquiry',
         parentNavigatorKey: _rootKey,
-        builder: (_, _) => const _RootBackFallback(child: EnquiryScreen()),
+        // ?id= — from the enquiry notification: that buyer is shown first.
+        builder: (_, state) => _RootBackFallback(
+          child: EnquiryScreen(focusId: state.uri.queryParameters['id']),
+        ),
       ),
       GoRoute(
         path: '/dashboard/reels',

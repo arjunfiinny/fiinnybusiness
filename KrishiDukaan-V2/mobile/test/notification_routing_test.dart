@@ -26,7 +26,7 @@ void main() {
       // template for the same event links there, so the two platforms have to
       // agree on the path.
       expect(routeForNotification('enquiry', {'enquiryId': 'e1'}),
-          '/dashboard/enquiry');
+          '/dashboard/enquiry?id=e1');
       expect(routeForNotification('enquiry', {}), '/dashboard/enquiry');
     });
 
