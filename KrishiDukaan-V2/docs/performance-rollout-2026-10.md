@@ -13,9 +13,9 @@ Firestore showed 68M reads against 898k writes in the period checked: reads are
 |---|---|---|---|
 | 1 | Website server moved to `asia-south1` (`firebase.json`) | SSR ran in Iowa; every Firestore call crossed to Mumbai and back | Same region as the database |
 | 2 | View/click/call counters moved to `productStats/{id}` and `storeStats/{phone}` | Every product card a farmer saw wrote to the product doc and ran `syncSellerProductToCanonical` + `notifyLowStock` (~1,540 runs of each per day). Signed-out visitors got a denied write per product | Counter docs with lookup-free rules; no product functions fire; signed-out visitors skipped |
-| 3 | Sitemap reads `marketplaceCards` and regenerates every 6 h | All ~4,200 product docs per regeneration (top query by load) | ~400 card docs |
+| 3 | Sitemap reads `marketplaceCards` and regenerates every 6 h | All 4,222 product docs per regeneration (top query by load) | One read per card |
 | 4 | `marketplaceCards` built by Cloud Functions | Market API read up to 480 raw docs per page (13 s warm, 33 s cold); search kept the whole catalogue in memory; product, cart and map pages and the app downloaded every product and every review | One pre-merged card per product name; a page reads ~20 cards; search reads matching token docs |
-| 5 | App reads cards, cached 5 min | Every search pause, category change and deep-linked product read the whole catalogue and every review | ~400 cards once per 5 min; typing costs no reads; opening a product is 1 read |
+| 5 | App reads cards, cached 5 min | Every search pause, category change and deep-linked product read the whole catalogue and every review | All cards once per 5 min; typing costs no reads; opening a product is 1 read |
 | 6 | `storeDirectory` built by Cloud Functions | Cart, store map, SEO store pages and the app's store list read all of `retailers`, `profiles`, `manufacturers`, `stores` and `storeReviews` (the `COLLECTION /retailers` query) | 1–2 docs |
 | 7 | Comment tagging, add-retailer form, admin reel picker | Downloaded every user (with personal details) and every retailer | Shops from the store directory; people by a name search of at most 10 docs |
 | 8 | Firebase Performance Monitoring (web + app) | No real-user timings | Page loads, app start, and traces `load_marketplace_cards`, `load_store_directory` |
@@ -47,6 +47,17 @@ Hosting** server `ssrkrishidukane8315`. In the Firebase console, see whether the
 
 ```
 npm run deploy:prod     # rules, indexes, storage and functions (steps 1 and 2)
+```
+
+`firebase.json` (and `firebase.uat.json`) point Storage at `storage.rules`, but
+that file is not in the repo, so the script stops at the Storage step and never
+deploys the functions. Either copy the live rules from Firebase console →
+Storage → Rules into `storage.rules` and commit them, or skip Storage (this work
+doesn't change it):
+
+```
+firebase deploy --only firestore --project prod     # rules + indexes
+firebase deploy --only functions --project prod
 ```
 
 Then open Firebase console → Firestore → Indexes and wait until the three new
@@ -128,7 +139,7 @@ Needs your usual `.env.uat` file and access to `karan-arjun-uat`.
 
 ```
 npm run copy:prod-to-uat     # optional: real catalogue and stores in UAT
-npm run deploy:uat           # rules, indexes, storage and functions to UAT
+npm run deploy:uat           # rules, indexes, storage and functions to UAT (see the storage.rules note in step 1)
 cd functions
 npx tsx scripts/backfill-marketplace-cards.ts --project karan-arjun-uat --write
 npx tsx scripts/build-store-directory.ts --project karan-arjun-uat --write
