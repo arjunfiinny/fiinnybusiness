@@ -25,8 +25,9 @@ import { TERMS_VERSION } from "./lib/legal-constants";
 const SITE_URL =
   process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/$/, "") || "https://krishidukan.com";
 
-// Regenerate the sitemap at most once per hour (ISR).
-export const revalidate = 3600;
+// Regenerate the sitemap at most every 6 hours (ISR). Each regeneration reads
+// every product card and store, and crawlers rarely re-read a sitemap sooner.
+export const revalidate = 21600;
 
 /**
  * WHAT <lastmod> MEANS HERE
