@@ -39,10 +39,12 @@ class TenantSubscription {
 
 /// Live read of tenantSubscriptions/{tenantId} + plans/{planId} — the same two
 /// documents the web ERP's AuthContext and PricingPage resolve entitlements
-/// from, so status here always agrees with the web.
+/// from, so status here always agrees with the web. The master tenant is not
+/// special-cased: resolveEntitlements() in subscriptionPlans.ts requires it to
+/// hold a plan like every other tenant.
 final subscriptionProvider = StreamProvider<TenantSubscription?>((ref) {
   final user = ref.watch(appUserProvider).valueOrNull;
-  if (user == null || user.tenantId.isEmpty || user.tenantId == 'master') {
+  if (user == null || user.tenantId.isEmpty) {
     return Stream.value(null);
   }
   final db = FirebaseFirestore.instance;
