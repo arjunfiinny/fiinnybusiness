@@ -28,6 +28,14 @@ export {
   recomputeDueMarketplaceCards,
   reconcileMarketplaceCards,
 } from "./marketplace/cards";
+export {
+  markStoreDirectoryDirtyOnRetailer,
+  markStoreDirectoryDirtyOnManufacturer,
+  markStoreDirectoryDirtyOnProfile,
+  markStoreDirectoryDirtyOnStore,
+  markStoreDirectoryDirtyOnStoreReview,
+  rebuildStoreDirectoryIfDirty,
+} from "./stores/directory";
 export { raiseAbandonedCheckoutEnquiries } from "./notifications/enquiries";
 export { notifySellerOfOrderOffer, expireOrderReassignments } from "./notifications/reassignment";
 export { generateInvoiceForNewOrder, sweepMissingInvoices } from "./orders/invoices";

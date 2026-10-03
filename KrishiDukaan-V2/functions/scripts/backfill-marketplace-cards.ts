@@ -37,3 +37,6 @@ main().catch((err) => {
   console.error(err);
   process.exit(1);
 });
+
+// A module, not a global script: keeps its names out of other scripts.
+export {};

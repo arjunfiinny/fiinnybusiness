@@ -146,6 +146,7 @@ import { MarketplaceProduct } from '../types/product';
 import type { CartItem, OrderDoc, OrderItem, OrderStatus, SellerType, StatusHistoryEntry } from '../types/order';
 import { generateAndStoreInvoice } from './utils/invoice-storage';
 import { CARDS_COLLECTION, cardToProduct } from './lib/marketplace-cards';
+import { STORE_DIRECTORY, sourcesFromDirectory } from './lib/store-directory';
 
 export async function saveRetailerApplication(payload: RetailerApplication) {
   const products = payload.products
@@ -340,31 +341,18 @@ export type Store = {
 
 export async function fetchStores(): Promise<Store[]> {
   try {
-    const [storesSnapshot, retailersSnapshot, manufacturersSnapshot, storeReviewsSnap, profilesSnap] = await Promise.all([
-      getDocs(collection(db, 'stores')),
-      getDocs(collection(db, 'retailers')),
-      getDocs(collection(db, 'manufacturers')),
-      getDocs(collection(db, 'storeReviews')).catch(() => null),
-      // profiles/{phone} is the unified new-schema profile and the mobile app's
-      // primary store source. The web read every OTHER collection but this one,
-      // so profile-only sellers never appeared in the locator.
-      getDocs(collection(db, 'profiles')).catch(() => null),
-    ]);
-
-    // Aggregate store ratings straight from review docs (source of truth), keyed by storePhone.
-    const storeRatingAgg = new Map<string, { sum: number; count: number }>();
-    if (storeReviewsSnap) {
-      for (const d of storeReviewsSnap.docs) {
-        const rd = d.data();
-        const phone = String(rd.storePhone || '');
-        const rating = Number(rd.rating || 0);
-        if (!phone || !(rating > 0)) continue;
-        const cur = storeRatingAgg.get(phone) ?? { sum: 0, count: 0 };
-        cur.sum += rating;
-        cur.count += 1;
-        storeRatingAgg.set(phone, cur);
-      }
-    }
+    // The stores, retailers, manufacturers and profiles records (profiles/{phone}
+    // is the unified new-schema profile and the mobile app's primary store
+    // source) plus per-phone review totals, from the 1–2 storeDirectory docs
+    // Cloud Functions keep current, instead of reading all five collections.
+    const directory = await getDocs(collection(db, STORE_DIRECTORY));
+    const {
+      stores: storesSnapshot,
+      retailers: retailersSnapshot,
+      manufacturers: manufacturersSnapshot,
+      profiles: profilesSnap,
+      ratings: storeRatingAgg,
+    } = sourcesFromDirectory(directory.docs.map((d) => d.data()));
 
     // Brand-page slugs, keyed by manufacturer phone. Collected before the
     // cross-collection dedup below so the slug survives even when a profiles/

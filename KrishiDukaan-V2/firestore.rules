@@ -648,6 +648,18 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Compact copy of the public retailers/manufacturers/profiles/stores
+    // records and store review totals, built by Cloud Functions
+    // (functions/src/stores/directory.ts).
+    match /storeDirectory/{chunkId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    match /storeDirectoryState/{docId} {
+      allow read, write: if false;
+    }
+
     match /storeStats/{storePhone} {
       allow read: if isAuthed();
       allow create: if isAuthed() && request.resource.data.keys().hasOnly(['storeViews', 'storeViewsByDay']);
