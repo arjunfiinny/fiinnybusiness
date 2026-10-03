@@ -1,0 +1,164 @@
+# Performance and cost rollout — October 2026
+
+Branch: `claude/busy-keller-iica2f` (vinayfiinny/fiinnybusiness). Nothing here is
+deployed yet. Follow the order below: the website and app read new collections
+that must exist first.
+
+## What changed and why
+
+Firestore showed 68M reads against 898k writes in the period checked: reads are
+~99% of the work, and most came from screens downloading whole collections.
+
+| # | Change | Before | After |
+|---|---|---|---|
+| 1 | Website server moved to `asia-south1` (`firebase.json`) | SSR ran in Iowa; every Firestore call crossed to Mumbai and back | Same region as the database |
+| 2 | View/click/call counters moved to `productStats/{id}` and `storeStats/{phone}` | Every product card a farmer saw wrote to the product doc and ran `syncSellerProductToCanonical` + `notifyLowStock` (~1,540 runs of each per day). Signed-out visitors got a denied write per product | Counter docs with lookup-free rules; no product functions fire; signed-out visitors skipped |
+| 3 | Sitemap reads `marketplaceCards` and regenerates every 6 h | All ~4,200 product docs per regeneration (top query by load) | ~400 card docs |
+| 4 | `marketplaceCards` built by Cloud Functions | Market API read up to 480 raw docs per page (13 s warm, 33 s cold); search kept the whole catalogue in memory; product, cart and map pages and the app downloaded every product and every review | One pre-merged card per product name; a page reads ~20 cards; search reads matching token docs |
+| 5 | App reads cards, cached 5 min | Every search pause, category change and deep-linked product read the whole catalogue and every review | ~400 cards once per 5 min; typing costs no reads; opening a product is 1 read |
+| 6 | `storeDirectory` built by Cloud Functions | Cart, store map, SEO store pages and the app's store list read all of `retailers`, `profiles`, `manufacturers`, `stores` and `storeReviews` (the `COLLECTION /retailers` query) | 1–2 docs |
+| 7 | Comment tagging, add-retailer form, admin reel picker | Downloaded every user (with personal details) and every retailer | Shops from the store directory; people by a name search of at most 10 docs |
+| 8 | Firebase Performance Monitoring (web + app) | No real-user timings | Page loads, app start, and traces `load_marketplace_cards`, `load_store_directory` |
+
+Cards are built with the exact merge code the website used, so a card matches
+what the old storefront showed (checked over 1,082 generated products). The store
+directory stores source records, not a merged result, so the web, SEO and app
+merges run unchanged on it.
+
+## Deploy order
+
+Do this on **UAT first** (`karan-arjun-uat`, `npm run copy:prod-to-uat` gives it
+real data), check it, then repeat on production. All commands run from
+`KrishiDukaan-V2/`.
+
+### 1. Security rules and indexes
+
+```
+firebase deploy --only firestore --project prod
+```
+
+Then open Firebase console → Firestore → Indexes and wait until the three new
+`marketplaceCards` / `marketplaceSearch` indexes show **Enabled** (minutes).
+
+Note: `firestore.indexes.json` already had an entry under `fieldOverrides` that
+is really a composite index (`dealerNotes`: `dealerId`, `createdAt`). It was there
+before this work; if the deploy complains about it, move it into `indexes`.
+
+### 2. Cloud Functions
+
+```
+firebase deploy --only functions --project prod
+```
+
+New functions (all `asia-south1`):
+`syncMarketplaceCardOnProductWrite`, `syncMarketplaceCardOnReviewWrite`,
+`recomputeDueMarketplaceCards` (every 15 min), `reconcileMarketplaceCards`
+(nightly 02:30 IST), `markStoreDirectoryDirtyOn{Retailer,Manufacturer,Profile,Store,StoreReview}`,
+`rebuildStoreDirectoryIfDirty` (every 5 min). `sendStoreAnalyticsDigest` also changed.
+
+### 3. Build the cards and the store directory once
+
+```
+gcloud auth application-default login
+cd functions
+npx tsx scripts/backfill-marketplace-cards.ts --project krishidukan-e8315           # preview
+npx tsx scripts/backfill-marketplace-cards.ts --project krishidukan-e8315 --write
+npx tsx scripts/build-store-directory.ts --project krishidukan-e8315                # preview
+npx tsx scripts/build-store-directory.ts --project krishidukan-e8315 --write
+```
+
+Before step 1, write down the product count on Admin → Overview (computed the
+old way). Now check in the console: `marketplaceCards` has about that many docs
+(one per product name), and `storeDirectory` has `chunk-000` (and maybe
+`chunk-001`). `failures` in the first report must be 0.
+
+### 4. Website
+
+```
+firebase deploy --only hosting --project prod
+```
+
+This creates the SSR function in `asia-south1`; the old `us-central1` one stays
+until deleted in step 7, which is what makes a rollback instant.
+
+Check on the live site: home top picks; Market browse, scroll and a category;
+search for `urea`, `uria`, `यूरिया`, `neem oil`, a shop name; a product page;
+add to cart and the store picker; the store map; a `/stores/...` page; a seller's
+dashboard analytics; Admin Overview; typing `@` in a reel comment; the
+manufacturer add-retailer form; `/sitemap.xml`.
+
+### 5. App release
+
+Build and test the app on a real phone (Marketplace, search, a product, the
+Stores tab, a seller's Profile overview and Analytics, tagging in comments), then
+publish. Older app versions keep working: they still read the raw collections and
+write counters onto products, which the rules still allow.
+
+### 6. Watch for a week
+
+- Firestore → Usage: daily reads should fall sharply.
+- Functions: `syncSellerProductToCanonical` and `notifyLowStock` should drop from
+  ~1,540/day toward real product edits (old app versions still add some until
+  users update). Check the new functions for errors.
+- Performance: web page load and the two app traces.
+
+### 7. Clean up after a few quiet days
+
+```
+firebase functions:delete ssrkrishidukane8315 --region us-central1 --project prod
+firebase functions:delete ssrkrishidukanadmin --region us-central1 --project prod
+```
+
+## Rollback
+
+- Website: Firebase console → Hosting → previous release → Rollback. The old
+  website reads the raw collections, which this work never changes, so it works
+  as before.
+- Functions: the new ones only add `marketplaceCards`, `marketplaceSearch`,
+  `cardMembers`, `storeDirectory`, `storeDirectoryState`, `productStats` and
+  `storeStats`. They can be deleted without affecting the old website or app.
+
+## Not done in this round (follow-ups)
+
+- **`users` read rule** (`firestore.rules`, `myRole() in ['retailer','manufacturer']`)
+  still lets any seller read any user's document. This work removed the screens
+  that downloaded every user, but the sales dealers page (`fetchDealers`), people
+  search in tags, and admin lists still rely on it. Tighten it after moving people
+  search to a server endpoint and testing the sales flow.
+- **Auth custom claims** for `myPhone()` / `myRole()` / `isAdmin()`: each costs
+  `get()` reads per request. Putting phone and role in token claims removes them,
+  but it rewrites 100+ rule checks and a role change only reaches the token on
+  refresh (up to an hour), so it needs its own careful change.
+- **Manufacturer's own discount** is not reflected in a card's lowest final price
+  when retailer copies exist, because the merge builds that price from seller
+  entries and the manufacturer's entry carries no discount. This was already how
+  the live storefront behaved; cards keep it. Worth fixing in `functions/src/marketplace/merge.ts`.
+- **Page views** (`trackPageView`) write one shared `siteVisits/{day}` doc per
+  home load. Cheap, but a hot document; Google Analytics already counts these.
+- **After most users update the app**, remove the analytics-counter exemption
+  from the `products` update rule so no counter write can reach product docs.
+- Android: add the Firebase Performance Gradle plugin if automatic network
+  traces are wanted.
+- `firebase.uat.json` still sets the UAT website server to `us-central1`; set it
+  to the UAT database's region.
+
+## Tests run
+
+All in a cloud dev environment against the Firestore emulator (no access to
+production):
+
+- Card output equals the old storefront merge for 1,082 cards (3 randomized runs).
+- Card triggers: build, ratings, rename, delete, review changes, counter-only
+  writes ignored, 40 concurrent copies, discount window job, backfill dry run and
+  re-run, nightly reconcile repairing damage (22 checks).
+- Market API on `next dev`: paging, categories, search incl. Hindi, misspellings,
+  substrings, shop names, suggestions (20 checks).
+- Store directory: build, field selection, ratings, change detection, chunking
+  (17 checks); every field the web, SEO and app store merges read is present.
+- Counter rules (12 checks).
+- App: `flutter analyze` (no new issues), `flutter test` (135 passing, 7 new).
+- Web and functions typecheck: no new errors. `next build` compiles every page
+  and route; its later page-data step needs the production Razorpay keys, which
+  the test environment doesn't have, so run the full build where they are set.
+- Not tested here: the storefront and app UI against real data (no access to
+  production). That is what the UAT pass in "Deploy order" is for.
