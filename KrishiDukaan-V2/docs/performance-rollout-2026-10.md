@@ -45,23 +45,30 @@ Hosting** server `ssrkrishidukane8315`. In the Firebase console, see whether the
 
 ### 1. Security rules and indexes
 
-```
-npm run deploy:prod     # rules, indexes, storage and functions (steps 1 and 2)
-```
-
-`firebase.json` (and `firebase.uat.json`) point Storage at `storage.rules`, but
-that file is not in the repo, so the script stops at the Storage step and never
-deploys the functions. Either copy the live rules from Firebase console →
-Storage → Rules into `storage.rules` and commit them, or skip Storage (this work
-doesn't change it):
+Users see no change from steps 1–3: the rules only add access to the new
+collections (every existing rule is unchanged), and nothing reads the new
+collections until the new website and app ship in steps 4–5.
 
 ```
 firebase deploy --only firestore --project prod     # rules + indexes
-firebase deploy --only functions --project prod
 ```
 
-Then open Firebase console → Firestore → Indexes and wait until the three new
-`marketplaceCards` / `marketplaceSearch` indexes show **Enabled** (minutes).
+(`npm run deploy:prod` does the same plus Storage and functions, but
+`firebase.json` points Storage at `storage.rules`, which is not in the repo, so
+the script stops at Storage before deploying functions. Commit the live rules
+from Firebase console → Storage → Rules as `storage.rules` to use the script.)
+
+- If the CLI asks whether to **delete** indexes that are not in the file,
+  answer **No**: production may have indexes created from console links.
+- Rules replace the whole ruleset. If anyone edited rules directly in the
+  console after 30 Sep, compare with `firestore.rules` first.
+
+Then open Firebase console → Firestore → Indexes and wait until **every** index
+shows **Enabled** (minutes): the three new `marketplaceCards` /
+`marketplaceSearch` ones, and the `waNotifications` index (`status`,
+`createdAt` ↓, `retryCount`) from Sai's 30 Sep change, which the WhatsApp retry
+job in step 2 needs. Deploying functions before it is ready makes that job fail
+every 5 minutes until it is (notifications are delayed, not lost).
 
 Note: `firestore.indexes.json` already had an entry under `fieldOverrides` that
 is really a composite index (`dealerNotes`: `dealerId`, `createdAt`). It was there
@@ -69,11 +76,23 @@ before this work; if the deploy complains about it, move it into `indexes`.
 
 ### 2. Cloud Functions
 
-Deployed by `npm run deploy:prod` above. New functions (all `asia-south1`):
+```
+firebase deploy --only functions --project prod
+```
+
+If the CLI lists functions "not in your local source" and asks to delete them,
+answer **No**. The branch contains all of the team's `main` (checked against
+Arjun's, Sai's and Kunal's repos), so existing functions deploy unchanged
+apart from `sendStoreAnalyticsDigest`, which also counts the new stats records.
+
+New functions (all `asia-south1`):
 `syncMarketplaceCardOnProductWrite`, `syncMarketplaceCardOnReviewWrite`,
 `recomputeDueMarketplaceCards` (every 15 min), `reconcileMarketplaceCards`
 (nightly 02:30 IST), `markStoreDirectoryDirtyOn{Retailer,Manufacturer,Profile,Store,StoreReview}`,
-`rebuildStoreDirectoryIfDirty` (every 5 min). `sendStoreAnalyticsDigest` also changed.
+`rebuildStoreDirectoryIfDirty` (every 5 min). They only write the new
+collections. Until the new website and app ship, the current ones still save
+view counts on products; the card function exits on those writes without
+reading anything.
 
 ### 3. Build the cards and the store directory once
 
