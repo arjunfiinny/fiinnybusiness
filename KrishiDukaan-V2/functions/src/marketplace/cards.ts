@@ -160,8 +160,12 @@ export function buildCardData(
     Array.from(new Set(values.map((v) => String(v ?? "").trim()).filter(Boolean)));
 
   const categoryKey = String(product.category ?? "").trim().toLowerCase();
+  // The app reads the base pack size for its delivery weight estimate; the
+  // web mapping above doesn't carry it.
+  const canonicalUnit = active.find((d) => d.id === product.id)?.data.unit;
   const card: Record<string, unknown> = {
     ...product,
+    unit: typeof canonicalUnit === "string" && canonicalUnit ? canonicalUnit : undefined,
     nameKey,
     categoryKey,
     sellerCount: new Set(availability.map((a) => a.storePhone || a.storeId).filter(Boolean)).size,
