@@ -25,7 +25,7 @@ import {
 } from "../../firebase";
 import { useAdminAuth } from "../_context/admin-auth-context";
 import { isValidGstinFormat } from "../../dashboard/_lib/profile-persistence";
-import { compressImage } from "../../utils/compressImage";
+import { compressImage, imageUploadMetadata } from "../../utils/compressImage";
 import { subscriptionPlanLabel } from "../../lib/pricing";
 
 declare global { interface Window { google?: any } }
@@ -64,9 +64,8 @@ function extractAddressFields(place: any): Partial<ProfileForm> {
 
 async function uploadImage(file: File, prefix: string): Promise<string> {
   const toUpload = await compressImage(file);
-  const path = `${prefix}/${Date.now()}-${file.name.replace(/\s+/g, "_")}`;
-  const contentType = toUpload.type || file.type || "image/jpeg";
-  const snap = await uploadBytes(storageRef(storage, path), toUpload, { contentType });
+  const path = `${prefix}/${Date.now()}-${toUpload.name.replace(/\s+/g, "_")}`;
+  const snap = await uploadBytes(storageRef(storage, path), toUpload, imageUploadMetadata(toUpload));
   return getDownloadURL(snap.ref);
 }
 

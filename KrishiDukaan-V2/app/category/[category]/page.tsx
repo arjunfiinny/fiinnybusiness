@@ -170,6 +170,8 @@ export default async function CategoryPage({ params }: PageProps) {
                       {p.image ? (
                         // eslint-disable-next-line @next/next/no-img-element
                         <img
+                          loading="lazy"
+                          decoding="async"
                           src={p.image}
                           alt={p.name}
                           className="w-full aspect-square object-cover rounded-xl bg-surface-container-low"
