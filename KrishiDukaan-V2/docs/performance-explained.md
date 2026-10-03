@@ -431,9 +431,15 @@ of them use only Firebase and Google Cloud.
 
 ## Part 9: Still open
 
-- **Privacy:** the `users` rule still lets any retailer or manufacturer read any
-  user's document. The sales dealers page and admin lists rely on it, so it
-  needs its own tested change.
+- **Fixed since (privacy and safety rules, not yet deployed):** enquiries and
+  notifications are readable only by their own seller/recipient; sellers can
+  read only other seller accounts, not farmers'; only a seller's own entry in
+  a product's seller list can be changed by them, and discount badges are
+  owner-only (kept correct by a Cloud Function); invites can only be looked up
+  one at a time by code; site visits, likes and follows accept only valid,
+  own writes. Details: "Privacy and safety rules" in the deploy guide.
+- **Invite lookups** could still be stepped through one request at a time;
+  a server endpoint for invite codes would close that fully.
 - **Auth custom claims** for the rules (see Part 8).
 - **Manufacturer's own discount** doesn't show in a card's lowest price when
   retailers also sell the product. The live site already behaves this way;

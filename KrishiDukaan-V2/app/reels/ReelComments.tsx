@@ -58,8 +58,9 @@ export default function ReelComments({ reelId, onClose }: { reelId: string; onCl
   };
 
   // People are matched by a bounded name search (at most 10 docs), never by
-  // downloading every user. Only sellers may query users (firestore.rules),
-  // so after the first refusal this stops asking for the rest of the session.
+  // downloading every user. Only sellers may query users, and only other
+  // seller accounts (firestore.rules keeps farmers' records private), so the
+  // query filters on role; after the first refusal it stops for the session.
   const [userMatches, setUserMatches] = useState<TagCandidate[]>([]);
   const usersSearchDenied = useRef(false);
   useEffect(() => {
@@ -73,7 +74,7 @@ export default function ReelComments({ reelId, onClose }: { reelId: string; onCl
       const prefixes = Array.from(new Set([q, q.charAt(0).toUpperCase() + q.slice(1)]));
       try {
         const snaps = await Promise.all(prefixes.map((p) =>
-          getDocs(query(collection(db, "users"), where("name", ">=", p), where("name", "<=", `${p}`), limit(5)))));
+          getDocs(query(collection(db, "users"), where("role", "in", ["retailer", "manufacturer"]), where("name", ">=", p), where("name", "<=", `${p}`), limit(5)))));
         if (cancelled) return;
         setUserMatches(snaps.flatMap((s) => s.docs.map((d) => ({ id: d.id, name: String(d.data().name || "User"), role: "user" as const }))));
       } catch (err) {

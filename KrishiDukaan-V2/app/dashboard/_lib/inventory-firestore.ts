@@ -466,7 +466,7 @@ export async function fetchRetailerInventoryRows(
         source: p.source ?? "retailer_inventory",
         ownerId: p.ownerId,
         // manufacturer_assigned copies use manufacturerProductId instead of originalProductId —
-        // fall back to it so syncAvailabilityDiscount + recomputeMaxDiscount find the root.
+        // fall back to it so syncAvailabilityDiscount finds the root.
         originalProductId: (raw.originalProductId || raw.manufacturerProductId)
           ? String(raw.originalProductId || raw.manufacturerProductId)
           : null,
@@ -1242,8 +1242,8 @@ export async function activateProduct(
 
 /**
  * Saves discount settings for a seller's inventory record and mirrors the
- * computed effectiveDiscountPct to the product doc. Also triggers a
- * recompute of maxDiscountPct on the original product (fire-and-forget).
+ * computed effectiveDiscountPct to the product doc. The root product's
+ * maxDiscountPct follows server-side (syncMaxDiscountOnProductWrite).
  */
 export async function updateDiscountRecord(
   inventoryId: string,
@@ -1321,13 +1321,12 @@ export async function updateDiscountRecord(
   await batch.commit();
 
   // Sync discountPct into the availability[] entry on the root product (fire-and-forget).
+  // maxDiscountPct on the root is recomputed server-side by the
+  // syncMaxDiscountOnProductWrite Cloud Function when effectiveDiscountPct
+  // changes; firestore.rules no longer lets non-owners write it.
   if (originalProductId) {
     syncAvailabilityDiscount(originalProductId, productId, effectivePct).catch(() => {});
   }
-
-  // Recompute maxDiscountPct on the root/original product (fire-and-forget).
-  const rootId = originalProductId ?? productId;
-  recomputeMaxDiscount(rootId).catch(() => {});
 }
 
 /**
@@ -1411,44 +1410,6 @@ async function syncAvailabilityPriceStock(
   if (changed) await updateDoc(rootRef, { availability: updated });
 }
 
-/**
- * Finds all active seller copies of a product (via originalProductId) and
- * updates maxDiscountPct on the root doc with the highest active discount.
- */
-async function recomputeMaxDiscount(rootProductId: string): Promise<void> {
-  // Query both link fields: admin_assigned copies use originalProductId,
-  // manufacturer_assigned copies use manufacturerProductId.
-  const [rootSnap, byOriginalSnap, byMfgSnap] = await Promise.all([
-    getDoc(doc(db, "products", rootProductId)),
-    getDocs(
-      query(
-        collection(db, "products"),
-        where("originalProductId", "==", rootProductId),
-        where("isActive", "==", true),
-      ),
-    ),
-    getDocs(
-      query(
-        collection(db, "products"),
-        where("manufacturerProductId", "==", rootProductId),
-        where("isActive", "==", true),
-      ),
-    ),
-  ]);
-
-  const pcts: number[] = [];
-  if (rootSnap.exists()) {
-    const d = rootSnap.data() as Record<string, unknown>;
-    if (d.isActive !== false) pcts.push(toNum(d.effectiveDiscountPct, 0));
-  }
-  const allCopies = [...byOriginalSnap.docs, ...byMfgSnap.docs];
-  allCopies.forEach((d) =>
-    pcts.push(toNum((d.data() as Record<string, unknown>).effectiveDiscountPct, 0)),
-  );
-
-  const maxPct = Math.max(0, ...pcts);
-  await updateDoc(doc(db, "products", rootProductId), { maxDiscountPct: maxPct });
-}
 
 /**
  * Hard-deletes a product and its inventory record (if given).

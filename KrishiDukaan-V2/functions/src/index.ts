@@ -28,6 +28,7 @@ export {
   recomputeDueMarketplaceCards,
   reconcileMarketplaceCards,
 } from "./marketplace/cards";
+export { syncMaxDiscountOnProductWrite } from "./marketplace/max-discount";
 export {
   markStoreDirectoryDirtyOnRetailer,
   markStoreDirectoryDirtyOnManufacturer,

@@ -45,9 +45,11 @@ Hosting** server `ssrkrishidukane8315`. In the Firebase console, see whether the
 
 ### 1. Security rules and indexes
 
-Users see no change from steps 1–3: the rules only add access to the new
-collections (every existing rule is unchanged), and nothing reads the new
-collections until the new website and app ship in steps 4–5.
+Steps 1–3 don't change what farmers see: the new rules add access to the
+new collections, and nothing reads those until the new website and app ship
+in steps 4–5. The same rules also close privacy and safety gaps (see
+"Privacy and safety rules" below); every query the current website and app
+run is still allowed, with one exception noted there.
 
 ```
 firebase deploy --only firestore --project prod     # rules + indexes
@@ -65,7 +67,8 @@ from Firebase console → Storage → Rules as `storage.rules` to use the script
 
 Then open Firebase console → Firestore → Indexes and wait until **every** index
 shows **Enabled** (minutes): the three new `marketplaceCards` /
-`marketplaceSearch` ones, and the `waNotifications` index (`status`,
+`marketplaceSearch` ones, `users` (`role`, `name`) for @-tagging, and the
+`waNotifications` index (`status`,
 `createdAt` ↓, `retryCount`) from Sai's 30 Sep change, which the WhatsApp retry
 job in step 2 needs. Deploying functions before it is ready makes that job fail
 every 5 minutes until it is (notifications are delayed, not lost).
@@ -89,10 +92,31 @@ New functions (all `asia-south1`):
 `syncMarketplaceCardOnProductWrite`, `syncMarketplaceCardOnReviewWrite`,
 `recomputeDueMarketplaceCards` (every 15 min), `reconcileMarketplaceCards`
 (nightly 02:30 IST), `markStoreDirectoryDirtyOn{Retailer,Manufacturer,Profile,Store,StoreReview}`,
-`rebuildStoreDirectoryIfDirty` (every 5 min). They only write the new
-collections. Until the new website and app ship, the current ones still save
-view counts on products; the card function exits on those writes without
-reading anything.
+`rebuildStoreDirectoryIfDirty` (every 5 min), and
+`syncMaxDiscountOnProductWrite`, which keeps a manufacturer product's "Up to
+N% OFF" (`maxDiscountPct`) equal to the best active seller discount — the
+rules no longer let other people write that field, and the app never updated
+it. The others only write the new collections. Until the new website and app
+ship, the current ones still save view counts on products; these functions
+exit on those writes without reading anything.
+
+### Privacy and safety rules (in step 1)
+
+| Collection | Before | After |
+|---|---|---|
+| `enquiries`, `notifications` | Any signed-in user could list all (buyers' names and phones) | Only queries for the caller's own phone; admin; team "users" for enquiries |
+| `products` | Any signed-in user could rewrite any product's `availability` (other sellers' prices, stock) and set `maxDiscountPct` / `effectiveDiscountPct` | Non-owners may add, edit or remove only their own entry; discount fields owner-only |
+| `users` | Any seller could read or list every user | Sellers read other seller accounts only (role filter); farmers' records private |
+| `manufacturerRetailers` | Anyone, signed in or not, could list every invite and link | Invite-code lookups one at a time (signup still works signed out); own invites/network; admin/team |
+| `siteVisits` | Anyone could write anything | Only +1 on the day's counters |
+| `reel_likes`, `follows` | Any signed-in user could delete or forge anyone's | Own likes and follows only |
+
+Visible changes: @-tagging finds seller accounts only (farmers' records are
+no longer searchable by sellers); the current website's people search shows
+nothing until the new website is deployed (shops still show). The brand
+pages' public dealer list (`manufacturers/{phone}/retailers`) stays public by
+design. Tests: `firestore.rules` checked against 79 emulator cases covering
+every query and write shape the website, app and invite flows use.
 
 ### 3. Build the cards and the store directory once
 
@@ -200,11 +224,10 @@ a phone with the UAT flavor from `ENVIRONMENTS.md`
 
 ## Not done in this round (follow-ups)
 
-- **`users` read rule** (`firestore.rules`, `myRole() in ['retailer','manufacturer']`)
-  still lets any seller read any user's document. This work removed the screens
-  that downloaded every user, but the sales dealers page (`fetchDealers`), people
-  search in tags, and admin lists still rely on it. Tighten it after moving people
-  search to a server endpoint and testing the sales flow.
+- **Invite-code lookups** are limited to one invite per query, but someone
+  determined could still step through invites one request at a time. Moving the
+  signup lookup to a server endpoint (and old app versions off the client
+  query) would close it completely.
 - **Auth custom claims** for `myPhone()` / `myRole()` / `isAdmin()`: each costs
   `get()` reads per request. Putting phone and role in token claims removes them,
   but it rewrites 100+ rule checks and a role change only reaches the token on
@@ -214,7 +237,8 @@ a phone with the UAT flavor from `ENVIRONMENTS.md`
   entries and the manufacturer's entry carries no discount. This was already how
   the live storefront behaved; cards keep it. Worth fixing in `functions/src/marketplace/merge.ts`.
 - **Page views** (`trackPageView`) write one shared `siteVisits/{day}` doc per
-  home load. Cheap, but a hot document; Google Analytics already counts these.
+  home load (now only +1 increments are accepted). Cheap, but a hot document
+  under heavy traffic; Google Analytics already counts these.
 - **After most users update the app**, remove the analytics-counter exemption
   from the `products` update rule so no counter write can reach product docs.
 - Android: add the Firebase Performance Gradle plugin if automatic network

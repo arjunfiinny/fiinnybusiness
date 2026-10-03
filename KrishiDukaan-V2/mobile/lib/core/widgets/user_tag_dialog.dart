@@ -36,14 +36,17 @@ Future<List<TaggedUser>> _loadSellers() {
 /// refusal people-search stops for the rest of the session.
 bool _usersSearchDenied = false;
 
-/// People whose name starts with [query] (as typed, or capitalised): a
-/// bounded search of at most 10 docs instead of downloading every user.
+/// Seller accounts whose name starts with [query] (as typed, or capitalised):
+/// a bounded search of at most 10 docs instead of downloading every user.
+/// Sellers may only read other sellers' records (firestore.rules keeps
+/// farmers' records private), so the query filters on role.
 Future<List<TaggedUser>> _searchUsers(String query) async {
   if (query.length < 2 || _usersSearchDenied) return const [];
   final prefixes = {query, query[0].toUpperCase() + query.substring(1)};
   try {
     final snaps = await Future.wait(prefixes.map((p) => FirebaseFirestore.instance
         .collection('users')
+        .where('role', whereIn: ['retailer', 'manufacturer'])
         .where('name', isGreaterThanOrEqualTo: p)
         .where('name', isLessThanOrEqualTo: '$p')
         .limit(5)
