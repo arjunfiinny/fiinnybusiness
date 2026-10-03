@@ -3,6 +3,8 @@
 Written October 2026, for the whole team. The fixes are on branch
 `claude/busy-keller-iica2f`. They are built and tested, but **not deployed yet**.
 Deploy steps are in [performance-rollout-2026-10.md](performance-rollout-2026-10.md).
+A shorter version with charts, for anyone on the team, is in
+[performance-report-2026-10.pdf](performance-report-2026-10.pdf).
 
 This document has three jobs:
 
