@@ -11,9 +11,10 @@ import type { Change, DocumentSnapshot } from "firebase-functions/v2/firestore";
  * storeReviews collections.
  *
  * It holds the source records (only the fields the web fetchStores(), the SEO
- * getAllStores() and the app's StoreRepository read) rather than a merged
- * result, so each of those keeps its own merge rules unchanged. Store ratings
- * are pre-summed per phone, the only way any reader used reviews.
+ * getAllStores(), the app's StoreRepository, the add-retailer form and the
+ * comment tag suggestions read) rather than a merged result, so each of those
+ * keeps its own merge rules unchanged. Store ratings are pre-summed per phone,
+ * the only way any reader used reviews.
  *
  * Rebuilt by a 5-minute job, only after a trigger has seen a relevant change.
  */
@@ -27,7 +28,7 @@ const MAX_CHUNK_BYTES = 700_000;
 const MAPS_FIELDS = ["googleMapsUrl", "googleBusinessUrl", "mapsLink"];
 const COMMON_FIELDS = [
   "phone", "ownerName", "uid", "logo", "address", "city", "state", "pincode",
-  "onlineDelivery", "geo", "location", "lat", "lng", "updatedAt", ...MAPS_FIELDS,
+  "onlineDelivery", "geo", "location", "lat", "lng", "updatedAt", "email", ...MAPS_FIELDS,
 ];
 
 /** Fields each reader's merge uses, per source collection. null = whole doc. */

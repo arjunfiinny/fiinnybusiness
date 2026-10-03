@@ -146,7 +146,7 @@ import { MarketplaceProduct } from '../types/product';
 import type { CartItem, OrderDoc, OrderItem, OrderStatus, SellerType, StatusHistoryEntry } from '../types/order';
 import { generateAndStoreInvoice } from './utils/invoice-storage';
 import { CARDS_COLLECTION, cardToProduct } from './lib/marketplace-cards';
-import { STORE_DIRECTORY, sourcesFromDirectory } from './lib/store-directory';
+import { STORE_DIRECTORY, sourcesFromDirectory, type StoreSources } from './lib/store-directory';
 
 export async function saveRetailerApplication(payload: RetailerApplication) {
   const products = payload.products
@@ -339,20 +339,27 @@ export type Store = {
   onlineDelivery?: boolean;
 };
 
+/**
+ * The stores, retailers, manufacturers and profiles records plus per-phone
+ * review totals, from the 1–2 storeDirectory docs Cloud Functions keep current,
+ * instead of reading all five collections.
+ */
+export async function fetchStoreSources(): Promise<StoreSources> {
+  const directory = await getDocs(collection(db, STORE_DIRECTORY));
+  return sourcesFromDirectory(directory.docs.map((d) => d.data()));
+}
+
 export async function fetchStores(): Promise<Store[]> {
   try {
-    // The stores, retailers, manufacturers and profiles records (profiles/{phone}
-    // is the unified new-schema profile and the mobile app's primary store
-    // source) plus per-phone review totals, from the 1–2 storeDirectory docs
-    // Cloud Functions keep current, instead of reading all five collections.
-    const directory = await getDocs(collection(db, STORE_DIRECTORY));
+    // profiles/{phone} is the unified new-schema profile and the mobile app's
+    // primary store source.
     const {
       stores: storesSnapshot,
       retailers: retailersSnapshot,
       manufacturers: manufacturersSnapshot,
       profiles: profilesSnap,
       ratings: storeRatingAgg,
-    } = sourcesFromDirectory(directory.docs.map((d) => d.data()));
+    } = await fetchStoreSources();
 
     // Brand-page slugs, keyed by manufacturer phone. Collected before the
     // cross-collection dedup below so the slug survives even when a profiles/
@@ -2300,10 +2307,6 @@ export async function fetchRetailerProfiles(): Promise<StoreAutocompleteOption[]
     .filter(r => r.shopName && r.address);
 }
 
-export async function fetchAllRetailers(): Promise<any[]> {
-  const snapshot = await getDocs(collection(db, 'retailers'));
-  return snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-}
 
 export async function fetchAllPayments(): Promise<any[]> {
   const snapshot = await getDocs(collection(db, 'payments'));
