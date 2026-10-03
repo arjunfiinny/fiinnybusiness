@@ -29,8 +29,6 @@ import {
 } from "firebase/firestore";
 import { db } from "../../firebase";
 import { orderGrandTotal } from "../../../types/order";
-import { getProducts } from "./admin-data";
-import { countMarketplaceProducts } from "./marketplace-count";
 
 export type DateRange = { from: Date; to: Date };
 
@@ -160,17 +158,13 @@ export async function getNewUsersSeries(range: DateRange): Promise<NewUsersSerie
 // ─── Platform totals ───────────────────────────────────────────────────────────
 
 /**
- * Unique product count matching what buyers see in the marketplace.
- *
- * Uses countMarketplaceProducts() — the single source of truth that mirrors
- * fetchMarketplaceProducts exactly: canonical products (name + image + price,
- * not a per-seller copy) deduplicated by name, plus retailer-only "promoted
- * copies" whose name has no canonical match. This is why the number agrees
- * with the market rather than being lower (canonical-only) or higher (raw docs).
+ * Unique product count matching what buyers see in the marketplace: the number
+ * of marketplace cards, one per product name (functions/src/marketplace/cards.ts).
+ * A count aggregation costs about one read instead of reading every product.
  */
 export async function getUniqueProductCount(): Promise<number> {
-  const products = await getProducts();
-  return countMarketplaceProducts(products as Parameters<typeof countMarketplaceProducts>[0]).total;
+  const snap = await getCountFromServer(collection(db, "marketplaceCards"));
+  return snap.data().count;
 }
 
 export type PlatformCounts = {

@@ -13,7 +13,7 @@ const MAX_TOKENS = 1000;
 const MAX_DESCRIPTION_WORDS = 100;
 
 // \p{M} keeps Devanagari vowel signs attached to their letters.
-const WORD_SPLIT = /[^\p{L}\p{M}\p{N}]+/u;
+const WORD_SPLIT = new RegExp("[^\\p{L}\\p{M}\\p{N}]+", "u");
 
 export function searchWords(text: string): string[] {
   return text.normalize("NFKC").toLowerCase().split(WORD_SPLIT).filter(Boolean);

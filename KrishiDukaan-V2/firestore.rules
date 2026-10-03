@@ -637,6 +637,12 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // Search tokens for each card, same id, same author.
+    match /marketplaceSearch/{cardId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
     // Product -> card index, used only by Cloud Functions.
     match /cardMembers/{productId} {
       allow read, write: if false;

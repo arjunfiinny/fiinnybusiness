@@ -1375,7 +1375,7 @@
       ]
     },
     {
-      "collectionGroup": "marketplaceCards",
+      "collectionGroup": "marketplaceSearch",
       "queryScope": "COLLECTION",
       "fields": [
         {
@@ -1393,7 +1393,7 @@
       ]
     },
     {
-      "collectionGroup": "marketplaceCards",
+      "collectionGroup": "marketplaceSearch",
       "queryScope": "COLLECTION",
       "fields": [
         {
@@ -1524,6 +1524,11 @@
     {
       "collectionGroup": "marketplaceCards",
       "fieldPath": "contentHash",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "marketplaceCards",
+      "fieldPath": "listable",
       "indexes": []
     }
   ]

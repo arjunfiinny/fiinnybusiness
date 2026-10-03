@@ -13,6 +13,9 @@ import { buildSearchKeywords } from "./search-keywords";
  * that name, plus search tokens and ranking fields. The storefront and app
  * read ~20 cards per page instead of every raw product doc.
  *
+ * marketplaceSearch/{same id} holds the card's search tokens, kept apart so
+ * readers that load many cards don't download several KB of tokens per card.
+ *
  * cardMembers/{productId} = { nameKey } indexes which products belong to which
  * card, because Firestore cannot query case-insensitively by name.
  *
@@ -24,6 +27,7 @@ import { buildSearchKeywords } from "./search-keywords";
 
 const REGION = "asia-south1";
 export const CARDS = "marketplaceCards";
+export const SEARCH = "marketplaceSearch";
 export const MEMBERS = "cardMembers";
 const PRODUCTS = "products";
 const REVIEWS = "productReviews";
@@ -33,6 +37,8 @@ const MAX_CARD_BYTES = 900_000;
 const GET_ALL_CHUNK = 300;
 const IN_CHUNK = 30;
 const MAX_EVENT_AGE_MS = 60 * 60 * 1000;
+
+const COPY_SOURCES = new Set(["retailer_inventory_copy", "manufacturer_assigned", "admin_assigned"]);
 
 // Writes that only touch these fields cannot change a card.
 const IGNORED_PRODUCT_FIELDS = new Set([
@@ -116,17 +122,20 @@ function changedFields(before: admin.firestore.DocumentData, after: admin.firest
   return Array.from(keys).filter((k) => !deepEqual(before[k], after[k]));
 }
 
+export type BuiltCard = { card: Record<string, unknown>; search: Record<string, unknown> };
+
 /**
- * Pure: the card for one name group, or null when nothing in the group is
- * listable. Docs are merged in document-id order, the order the storefront's
- * former full-collection read produced, so the result matches it exactly.
+ * Pure: the card (and its search doc) for one name group, or null when nothing
+ * in the group is listable. Docs are merged in document-id order, the order
+ * the storefront's former full-collection read produced, so the result matches
+ * it exactly.
  */
 export function buildCardData(
   nameKey: string,
   docs: RawDoc[],
   reviews: ReviewRow[],
   now: number,
-): Record<string, unknown> | null {
+): BuiltCard | null {
   const sorted = [...docs].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const active = sorted.filter((d) => d.data.isActive !== false);
   const merged = mergeMarketplaceProducts(
@@ -150,20 +159,26 @@ export function buildCardData(
   const unique = (values: unknown[]) =>
     Array.from(new Set(values.map((v) => String(v ?? "").trim()).filter(Boolean)));
 
+  const categoryKey = String(product.category ?? "").trim().toLowerCase();
   const card: Record<string, unknown> = {
     ...product,
     nameKey,
-    categoryKey: String(product.category ?? "").trim().toLowerCase(),
-    searchKeywords: buildSearchKeywords({
-      names: unique([product.name, product.fullName, ...active.map((d) => d.data.fullName)]),
-      category: String(product.category ?? ""),
-      storeNames: unique([...active.map((d) => d.data.store), ...availability.map((a) => a.storeName)]),
-      description: String(product.description ?? ""),
-    }),
+    categoryKey,
     sellerCount: new Set(availability.map((a) => a.storePhone || a.storeId).filter(Boolean)).size,
     liveDiscountPct,
     createdAtMs: Math.max(0, ...active.map((d) => millisOf(d.data.createdAt))),
     memberIds: sorted.map((d) => d.id),
+    // Docs with their own /products page, mirroring isListable() in the web's
+    // app/lib/seo/products-server.ts, so the sitemap can read cards instead
+    // of every product.
+    listable: active
+      .filter((d) => !COPY_SOURCES.has(String(d.data.source ?? "")) && d.data.name && d.data.image &&
+        Number.isFinite(Number(d.data.price)))
+      .map((d) => ({
+        id: d.id,
+        name: String(d.data.name),
+        updatedAtMs: millisOf(d.data.updatedAt ?? d.data.createdAt),
+      })),
     schemaVersion: CARD_SCHEMA_VERSION,
   };
   if (nextRecomputeMs !== null) {
@@ -175,11 +190,22 @@ export function buildCardData(
     logger.error("[cards] card too large, trimming seller list", { nameKey, sellers: clean.availability.length });
     clean.availability = (clean.availability as unknown[]).slice(0, 800);
   }
-  return clean;
+
+  const search = {
+    nameKey,
+    categoryKey,
+    searchKeywords: buildSearchKeywords({
+      names: unique([product.name, product.fullName, ...active.map((d) => d.data.fullName)]),
+      category: String(product.category ?? ""),
+      storeNames: unique([...active.map((d) => d.data.store), ...availability.map((a) => a.storeName)]),
+      description: String(product.description ?? ""),
+    }),
+  };
+  return { card: clean, search };
 }
 
-function contentHash(card: Record<string, unknown>): string {
-  return createHash("sha1").update(JSON.stringify(card)).digest("hex");
+function contentHash(built: BuiltCard): string {
+  return createHash("sha1").update(JSON.stringify(built)).digest("hex");
 }
 
 async function readReviews(
@@ -199,22 +225,30 @@ async function readReviews(
 
 type WriteOutcome = "written" | "deleted" | "unchanged" | "stale";
 
-/** Writes the card unless a card built from a newer snapshot is already there. */
+/**
+ * Writes the card and its search doc unless a card built from a newer
+ * snapshot is already there.
+ */
 async function commitCard(
   nameKey: string,
-  card: Record<string, unknown> | null,
+  built: BuiltCard | null,
   version: Timestamp,
   dryRun = false,
 ): Promise<WriteOutcome> {
-  const ref = db().collection(CARDS).doc(cardIdFor(nameKey));
-  const hash = card ? contentHash(card) : null;
+  const id = cardIdFor(nameKey);
+  const ref = db().collection(CARDS).doc(id);
+  const searchRef = db().collection(SEARCH).doc(id);
+  const hash = built ? contentHash(built) : null;
   return db().runTransaction(async (tx) => {
     const cur = await tx.get(ref);
     const curVersion = cur.get("sourceReadTime") as Timestamp | undefined;
     if (curVersion && !isNewer(version, curVersion)) return "stale";
-    if (!card) {
+    if (!built) {
       if (!cur.exists) return "unchanged";
-      if (!dryRun) tx.delete(ref);
+      if (!dryRun) {
+        tx.delete(ref);
+        tx.delete(searchRef);
+      }
       return "deleted";
     }
     if (cur.exists && cur.get("contentHash") === hash) {
@@ -224,11 +258,12 @@ async function commitCard(
     }
     if (!dryRun) {
       tx.set(ref, {
-        ...card,
+        ...built.card,
         contentHash: hash,
         sourceReadTime: version,
         builtAt: admin.firestore.FieldValue.serverTimestamp(),
       });
+      tx.set(searchRef, built.search);
     }
     return "written";
   });
@@ -309,7 +344,7 @@ export const syncMarketplaceCardOnProductWrite = onDocumentWritten(
         const result = newKey ? await memberRef.set({ nameKey: newKey }) : await memberRef.delete();
         if (isNewer(result.writeTime, changedAt)) changedAt = result.writeTime;
       }
-      for (const key of new Set([oldKey, newKey])) {
+      for (const key of Array.from(new Set([oldKey, newKey]))) {
         if (key) await rebuildUnlessCovered(key, changedAt);
       }
     } catch (err) {
@@ -333,7 +368,7 @@ export const syncMarketplaceCardOnReviewWrite = onDocumentWritten(
     }
     const changedAt = changeTimeOf(after, event.time);
     try {
-      for (const catalogId of catalogIds) {
+      for (const catalogId of Array.from(catalogIds)) {
         const member = await db().collection(MEMBERS).doc(catalogId).get();
         const key = String(member.get("nameKey") ?? "");
         if (key) await rebuildUnlessCovered(key, changedAt);
@@ -370,6 +405,7 @@ export interface ReconcileReport {
   cardsDeleted: number;
   cardsUnchanged: number;
   cardsStale: number;
+  searchDocsDeleted: number;
   failures: number;
 }
 
@@ -427,7 +463,7 @@ export async function reconcileAllCards(opts: { dryRun?: boolean } = {}): Promis
 
   const report: ReconcileReport = {
     products: keyById.size, membershipsFixed: 0,
-    cardsWritten: 0, cardsDeleted: 0, cardsUnchanged: 0, cardsStale: 0, failures: 0,
+    cardsWritten: 0, cardsDeleted: 0, cardsUnchanged: 0, cardsStale: 0, searchDocsDeleted: 0, failures: 0,
   };
 
   // Memberships: add missing/wrong ones, remove ones for deleted or nameless products.
@@ -440,7 +476,7 @@ export async function reconcileAllCards(opts: { dryRun?: boolean } = {}): Promis
       if (want !== d.get("nameKey")) memberFixes.push({ id: d.id, key: want });
     }
   });
-  for (const [id, key] of keyById) if (!seenMembers.has(id)) memberFixes.push({ id, key });
+  for (const [id, key] of Array.from(keyById)) if (!seenMembers.has(id)) memberFixes.push({ id, key });
   report.membershipsFixed = memberFixes.length;
   if (!dryRun) {
     for (let i = 0; i < memberFixes.length; i += 400) {
@@ -459,6 +495,11 @@ export async function reconcileAllCards(opts: { dryRun?: boolean } = {}): Promis
   await readAll(CARDS, (docs) => {
     for (const d of docs) existingCardKeys.set(d.id, String(d.get("nameKey") ?? ""));
   });
+  const groupCardIds = new Set(Array.from(groups.keys(), cardIdFor));
+  const orphanSearchIds: string[] = [];
+  await readAll(SEARCH, (docs) => {
+    for (const d of docs) if (!groupCardIds.has(d.id)) orphanSearchIds.push(d.id);
+  });
 
   const snapshotVersion: Timestamp = version ?? admin.firestore.Timestamp.now();
   const now = Date.now();
@@ -469,22 +510,32 @@ export async function reconcileAllCards(opts: { dryRun?: boolean } = {}): Promis
     else if (o === "stale") report.cardsStale++;
     else report.cardsUnchanged++;
   };
-  for (const [key, docs] of groups) {
+  for (const [key, docs] of Array.from(groups)) {
     tasks.push(async () => {
       const reviews = docs.flatMap((d) => reviewsById.get(d.id) ?? []);
       tally(await commitCard(key, buildCardData(key, docs, reviews, now), snapshotVersion, dryRun));
     });
   }
-  for (const [cardId, key] of existingCardKeys) {
+  for (const [cardId, key] of Array.from(existingCardKeys)) {
     if (key && groups.has(key) && cardIdFor(key) === cardId) continue;
     tasks.push(async () => {
       if (key && cardIdFor(key) === cardId) {
         tally(await commitCard(key, null, snapshotVersion, dryRun));
       } else {
         // Malformed card doc: no valid key, so no trigger can ever fix it.
-        if (!dryRun) await firestore.collection(CARDS).doc(cardId).delete();
+        if (!dryRun) {
+          await firestore.collection(CARDS).doc(cardId).delete();
+          await firestore.collection(SEARCH).doc(cardId).delete();
+        }
         report.cardsDeleted++;
       }
+    });
+  }
+  for (const id of orphanSearchIds) {
+    if (existingCardKeys.has(id)) continue; // removed together with its card above
+    tasks.push(async () => {
+      if (!dryRun) await firestore.collection(SEARCH).doc(id).delete();
+      report.searchDocsDeleted++;
     });
   }
 

@@ -145,7 +145,7 @@ export type RetailerProfile = {
 import { MarketplaceProduct } from '../types/product';
 import type { CartItem, OrderDoc, OrderItem, OrderStatus, SellerType, StatusHistoryEntry } from '../types/order';
 import { generateAndStoreInvoice } from './utils/invoice-storage';
-import { buildRatingAgg, mapMarketplaceDoc, mergeMarketplaceProducts } from './lib/marketplace-merge';
+import { CARDS_COLLECTION, cardToProduct } from './lib/marketplace-cards';
 
 export async function saveRetailerApplication(payload: RetailerApplication) {
   const products = payload.products
@@ -295,30 +295,16 @@ export async function saveRetailerProduct(
   }
 }
 
+/**
+ * Every marketplace card: one pre-merged doc per product name, with ratings,
+ * built by Cloud Functions (functions/src/marketplace/cards.ts). This used to
+ * read every products doc (~32 copies per name) and every review and merge
+ * them in the browser.
+ */
 export async function fetchMarketplaceProducts(): Promise<MarketplaceProduct[]> {
   try {
-    const [snapshot, reviewsSnap] = await Promise.all([
-      getDocs(collection(db, 'products')),
-      getDocs(collection(db, 'productReviews')).catch(() => null),
-    ]);
-
-    // Ratings computed straight from the review documents (source of truth), keyed
-    // by catalogId — avoids depending on aggregate fields being kept in sync.
-    const ratingAgg = buildRatingAgg(
-      (reviewsSnap?.docs ?? []).map((d) => ({
-        catalogId: String(d.data().catalogId || ''),
-        rating: Number(d.data().rating || 0),
-      })),
-    );
-
-    const allMapped = snapshot.docs
-      .filter((item) => item.data().isActive !== false)
-      .map((item) => mapMarketplaceDoc(item.id, item.data()));
-
-    // Dedup by name + merge copies + finalize price/ratings/sellMode.
-    // Shared with the paginated /api/marketplace/products route so both produce
-    // identical merged cards.
-    return mergeMarketplaceProducts(allMapped, ratingAgg);
+    const snapshot = await getDocs(query(collection(db, CARDS_COLLECTION), orderBy('nameKey')));
+    return snapshot.docs.map((d) => cardToProduct(d.data()));
   } catch (error) {
     console.error('Error fetching products from Firestore:', error);
     throw error;
