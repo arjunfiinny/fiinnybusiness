@@ -390,6 +390,11 @@ Use these when building something new or reviewing a pull request.
    rules where you can, because each one is an extra read.
 10. **Measure before and after.** Check Query insights and Performance before
     a change and a few days after it.
+11. **Test security rules with data the app saved, not only the website's.**
+    The app saves a whole number like 450 as `450.0`; the website saves `450`.
+    A rule that compares whole list entries (`==`, `in`, `removeAll()`) counts
+    those as different values, while `diff()` and sets count them as equal.
+    The products seller-list rule hit this (see `updateOwnAvailabilityEntries`).
 
 ---
 

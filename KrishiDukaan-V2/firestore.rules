@@ -615,13 +615,21 @@ service cloud.firestore {
         phoneMatches(resource.data.retailerDocId) ||
         // Allow claiming assigned product if it matches the user's retailerDocId (from invite or admin assignment)
         ((resource.data.source == 'manufacturer_assigned' || resource.data.source == 'admin_assigned') && resource.data.retailerDocId != null && request.resource.data.retailerId == request.auth.uid) ||
+        // A write that changes no value. diff() counts 450 and 450.0 as equal
+        // and an order change as a change. The website writes a product's
+        // availability list back unchanged before editing its own entry when
+        // the app saved whole numbers as decimals (see availabilityWriteAllowed).
+        request.resource.data.diff(resource.data).affectedKeys().size() == 0 ||
         // A seller may add their store to another seller's product, or edit or
         // remove their own entry in its availability array — never anyone
         // else's. This used to allow any signed-in user to rewrite the whole
         // array (other sellers' prices and stock, or remove them). The
         // product's manufacturer of record, and team members helping with
-        // inventory, may manage the whole list.
+        // inventory, may manage the whole list. updatedAt, when sent, must be
+        // the server time: it dates the product for listings and the sitemap.
         (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['availability', 'updatedAt'])
+          && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['updatedAt'])
+              || request.resource.data.updatedAt == request.time)
           && (availabilityWriteAllowed() || teamHas('inventory'))) ||
         // Allow any authed shopper to bump the analytics counters only
         // (trackProductImpression/Click/StoreCall/DirectionRequest in
@@ -807,6 +815,9 @@ service cloud.firestore {
     // allowed when every entry added, edited or removed is the caller's own
     // (an edited entry shows up in both lists: new value added, old removed),
     // or when the caller is the product's manufacturer of record by phone.
+    // removeAll() compares entries strictly by type: a price the app saved as
+    // 450.0 that the website sends back as 450 counts as edited. The website
+    // handles that refusal (updateOwnAvailabilityEntries); the app keeps types.
     function availabilityWriteAllowed() {
       let me = myPhone();
       let token = request.auth.token.get('phone_number', '');

@@ -105,7 +105,7 @@ exit on those writes without reading anything.
 | Collection | Before | After |
 |---|---|---|
 | `enquiries`, `notifications` | Any signed-in user could list all (buyers' names and phones) | Only queries for the caller's own phone; admin; team "users" for enquiries |
-| `products` | Any signed-in user could rewrite any product's `availability` (other sellers' prices, stock) and set `maxDiscountPct` / `effectiveDiscountPct` | Non-owners may add, edit or remove only their own entry; discount fields owner-only |
+| `products` | Any signed-in user could rewrite any product's `availability` (other sellers' prices, stock) and set `maxDiscountPct` / `effectiveDiscountPct` | Non-owners may add, edit or remove only their own entry, and may set `updatedAt` only to the server time; discount fields owner-only |
 | `users` | Any seller could read or list every user | Sellers read other seller accounts only (role filter); farmers' records private |
 | `manufacturerRetailers` | Anyone, signed in or not, could list every invite and link | Invite-code lookups one at a time (signup still works signed out); own invites/network; admin/team |
 | `siteVisits` | Anyone could write anything | Only +1 on the day's counters |
@@ -113,9 +113,16 @@ exit on those writes without reading anything.
 
 Visible changes: @-tagging finds seller accounts only (farmers' records are
 no longer searchable by sellers); the current website's people search shows
-nothing until the new website is deployed (shops still show). The brand
+nothing until the new website is deployed (shops still show). Also until
+then, in an uncommon case a stock change made on the current website may not
+reach the brand's product page: when another seller of that product saved
+from the app and a price is still stored the app's way (450.0, which the rule
+reads as different from the website's 450). Price, discount and size changes
+reach that page anyway, through the `syncSellerProductToCanonical` function.
+The new website handles this case, so deploy it (step 4) soon after this
+step. The brand
 pages' public dealer list (`manufacturers/{phone}/retailers`) stays public by
-design. Tests: `firestore.rules` checked against 79 emulator cases covering
+design. Tests: `firestore.rules` checked against 93 emulator cases covering
 every query and write shape the website, app and invite flows use.
 
 ### 3. Build the cards and the store directory once
@@ -152,7 +159,8 @@ Check on the live site: home top picks; Market browse, scroll and a category;
 search for `urea`, `uria`, `यूरिया`, `neem oil`, a shop name; a product page;
 add to cart and the store picker; the store map; a `/stores/...` page; a seller's
 dashboard analytics; Admin Overview; typing `@` in a reel comment; the
-manufacturer add-retailer form; `/sitemap.xml`.
+manufacturer add-retailer form; `/sitemap.xml`; a retailer changing a price on
+the website and the brand's product page showing it.
 
 ### 5. App release
 
@@ -260,6 +268,12 @@ production):
 - Store directory: build, field selection, ratings, change detection, chunking
   (17 checks); every field the web, SEO and app store merges read is present.
 - Counter rules (12 checks).
+- Privacy and safety rules (93 checks): each query and write shape the
+  website, app and invite flows use, the abuse each rule now stops, and the
+  website's price sync on a product whose other sellers saved prices from the
+  app (stored as decimals).
+- "Up to N% OFF" function: follows discount changes, inactive copies, deletes,
+  ignores view-counter writes, no write loop (10 checks).
 - App: `flutter analyze` (no new issues), `flutter test` (135 passing, 7 new).
 - Web and functions typecheck: no new errors. `next build` compiles every page
   and route; its later page-data step needs the production Razorpay keys, which

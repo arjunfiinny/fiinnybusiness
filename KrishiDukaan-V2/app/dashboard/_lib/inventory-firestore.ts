@@ -17,6 +17,7 @@ import {
 } from "firebase/firestore";
 
 import { db } from "../../firebase";
+import { updateOwnAvailabilityEntries } from "./own-availability-entries";
 import type {
   BulkDiscountTier,
   DiscountUpdateInput,
@@ -1331,21 +1332,13 @@ export async function updateDiscountRecord(
 
 /**
  * Updates the `discountPct` field on the matching entry in the original product's
- * `availability[]` array. Uses a transaction to safely replace the array element.
+ * `availability[]` array, in a transaction (updateOwnAvailabilityEntries).
  */
 async function syncAvailabilityDiscount(
   rootProductId: string,
   sellerProductId: string,
   effectivePct: number,
 ): Promise<void> {
-  const rootRef = doc(db, "products", rootProductId);
-  const snap = await getDoc(rootRef);
-  if (!snap.exists()) return;
-
-  const data = snap.data() as Record<string, unknown>;
-  const availability = Array.isArray(data.availability) ? [...(data.availability as Record<string, unknown>[])] : [];
-  if (!availability.length) return;
-
   // Fetch the seller product to get its ownerId / retailerId for matching
   const sellerSnap = await getDoc(doc(db, "products", sellerProductId));
   if (!sellerSnap.exists()) return;
@@ -1353,16 +1346,14 @@ async function syncAvailabilityDiscount(
   const sellerOwnerId  = String(seller.ownerId  ?? "");
   const sellerPhone    = String(seller.retailerPhone ?? seller.ownerPhone ?? "");
 
-  const updated = availability.map((entry) => {
+  await updateOwnAvailabilityEntries(doc(db, "products", rootProductId), (entry) => {
     const storeId    = String(entry.storeId    ?? "");
     const storePhone = String(entry.storePhone ?? "");
     const matches =
       (sellerOwnerId && storeId === sellerOwnerId) ||
       (sellerPhone   && (storePhone === sellerPhone || storeId === sellerPhone));
-    return matches ? { ...entry, discountPct: effectivePct } : entry;
+    return matches ? { ...entry, discountPct: effectivePct } : null;
   });
-
-  await updateDoc(rootRef, { availability: updated });
 }
 
 /**
@@ -1378,24 +1369,13 @@ async function syncAvailabilityPriceStock(
   stockLevel: string,
   variants?: { unit: string; price: number; stock?: number }[],
 ): Promise<void> {
-  const rootRef = doc(db, "products", rootProductId);
-  const snap = await getDoc(rootRef);
-  if (!snap.exists()) return;
-  const data = snap.data() as Record<string, unknown>;
-  const availability = Array.isArray(data.availability)
-    ? [...(data.availability as Record<string, unknown>[])]
-    : [];
-  if (!availability.length) return;
-
-  let changed = false;
-  const updated = availability.map((entry) => {
+  await updateOwnAvailabilityEntries(doc(db, "products", rootProductId), (entry) => {
     const storeId = String(entry.storeId ?? "");
     const storePhone = String(entry.storePhone ?? "");
     const matches =
       (match.ownerId && (storeId === match.ownerId || storePhone === match.ownerId)) ||
       (match.phone && (storePhone === match.phone || storeId === match.phone));
-    if (!matches) return entry;
-    changed = true;
+    if (!matches) return null;
     // The marketplace's seller tiles read this array, so per-size stock has to
     // land here too — otherwise a size the seller just restocked still shows
     // as unavailable on the product page.
@@ -1406,8 +1386,6 @@ async function syncAvailabilityPriceStock(
       ...(variants !== undefined ? { variants } : {}),
     };
   });
-
-  if (changed) await updateDoc(rootRef, { availability: updated });
 }
 
 
