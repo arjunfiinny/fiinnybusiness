@@ -27,14 +27,26 @@ merges run unchanged on it.
 
 ## Deploy order
 
-Do this on **UAT first** (`karan-arjun-uat`, `npm run copy:prod-to-uat` gives it
-real data), check it, then repeat on production. All commands run from
-`KrishiDukaan-V2/`.
+Do this on **UAT first** (see "Testing on UAT" below), then production. All
+commands run from `KrishiDukaan-V2/`.
+
+### 0. Check which service serves krishidukan.com
+
+`ENVIRONMENTS.md` says the website deploys through **App Hosting** on every push
+to `main`, but production traffic in the Functions list goes to the **Firebase
+Hosting** server `ssrkrishidukane8315`. In the Firebase console, see whether the
+`krishidukan.com` custom domain is under **Hosting** or under **App Hosting**:
+
+- **Hosting:** the website deploys with `firebase deploy --only hosting` (step 4),
+  and the region change in `firebase.json` applies.
+- **App Hosting:** merging this branch into `main` deploys the website. Do not
+  merge until steps 1–3 are done. The region change in `firebase.json` would not
+  apply; an App Hosting backend's region is chosen when the backend is created.
 
 ### 1. Security rules and indexes
 
 ```
-firebase deploy --only firestore --project prod
+npm run deploy:prod     # rules, indexes, storage and functions (steps 1 and 2)
 ```
 
 Then open Firebase console → Firestore → Indexes and wait until the three new
@@ -46,11 +58,7 @@ before this work; if the deploy complains about it, move it into `indexes`.
 
 ### 2. Cloud Functions
 
-```
-firebase deploy --only functions --project prod
-```
-
-New functions (all `asia-south1`):
+Deployed by `npm run deploy:prod` above. New functions (all `asia-south1`):
 `syncMarketplaceCardOnProductWrite`, `syncMarketplaceCardOnReviewWrite`,
 `recomputeDueMarketplaceCards` (every 15 min), `reconcileMarketplaceCards`
 (nightly 02:30 IST), `markStoreDirectoryDirtyOn{Retailer,Manufacturer,Profile,Store,StoreReview}`,
@@ -74,12 +82,17 @@ old way). Now check in the console: `marketplaceCards` has about that many docs
 
 ### 4. Website
 
+If krishidukan.com is on **Hosting** (step 0):
+
 ```
 firebase deploy --only hosting --project prod
 ```
 
 This creates the SSR function in `asia-south1`; the old `us-central1` one stays
 until deleted in step 7, which is what makes a rollback instant.
+
+If it is on **App Hosting**: merge this branch into the `main` branch App
+Hosting watches; that push deploys the website.
 
 Check on the live site: home top picks; Market browse, scroll and a category;
 search for `urea`, `uria`, `यूरिया`, `neem oil`, a shop name; a product page;
@@ -108,6 +121,24 @@ write counters onto products, which the rules still allow.
 firebase functions:delete ssrkrishidukane8315 --region us-central1 --project prod
 firebase functions:delete ssrkrishidukanadmin --region us-central1 --project prod
 ```
+
+## Testing on UAT
+
+Needs your usual `.env.uat` file and access to `karan-arjun-uat`.
+
+```
+npm run copy:prod-to-uat     # optional: real catalogue and stores in UAT
+npm run deploy:uat           # rules, indexes, storage and functions to UAT
+cd functions
+npx tsx scripts/backfill-marketplace-cards.ts --project karan-arjun-uat --write
+npx tsx scripts/build-store-directory.ts --project karan-arjun-uat --write
+cd ..
+npm run dev:uat              # this website, on your computer, against UAT
+```
+
+Open http://localhost:3000 and run the step 4 checklist. For the app, run it on
+a phone with the UAT flavor from `ENVIRONMENTS.md`
+(`flutter run --flavor uat --dart-define=...`) and run the step 5 checklist.
 
 ## Rollback
 
