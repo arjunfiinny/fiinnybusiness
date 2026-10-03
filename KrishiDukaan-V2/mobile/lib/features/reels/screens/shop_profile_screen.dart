@@ -797,10 +797,11 @@ class _ReelGridCard extends StatelessWidget {
             if (_gridThumb(reel) != null) ...[
               ClipRRect(
                 borderRadius: BorderRadius.circular(8),
-                child: Image.network(
-                  _gridThumb(reel)!,
+                child: CachedNetworkImage(
+                  imageUrl: _gridThumb(reel)!,
                   fit: BoxFit.cover,
-                  errorBuilder: (context, error, stackTrace) => const SizedBox.shrink(),
+                  memCacheWidth: 400,
+                  errorWidget: (context, url, error) => const SizedBox.shrink(),
                 ),
               ),
               // Dark overlay for text readability
@@ -1321,12 +1322,13 @@ class _ProductTile extends StatelessWidget {
                 top: Radius.circular(11),
               ),
               child: listing.imageUrl != null
-                  ? Image.network(
-                      listing.imageUrl!,
+                  ? CachedNetworkImage(
+                      imageUrl: listing.imageUrl!,
                       height: 100,
                       width: 130,
                       fit: BoxFit.cover,
-                      errorBuilder: (_, _, _) => _placeholder(),
+                      memCacheWidth: 400,
+                      errorWidget: (_, _, _) => _placeholder(),
                     )
                   : _placeholder(),
             ),
@@ -1731,10 +1733,11 @@ class _SingleReelViewState extends ConsumerState<_SingleReelView>
       fit: StackFit.expand,
       children: [
         if (thumb != null && thumb.isNotEmpty)
-          Image.network(
-            thumb,
+          CachedNetworkImage(
+            imageUrl: thumb,
             fit: BoxFit.cover,
-            errorBuilder: (context, error, stackTrace) => const SizedBox.shrink(),
+            memCacheWidth: 1000,
+            errorWidget: (context, url, error) => const SizedBox.shrink(),
           ),
         const Center(
           child: CircularProgressIndicator(
@@ -2043,12 +2046,13 @@ class _ProductBadge extends StatelessWidget {
             if (reel.linkedProductImageUrl != null)
               ClipRRect(
                 borderRadius: BorderRadius.circular(4),
-                child: Image.network(
-                  reel.linkedProductImageUrl!,
+                child: CachedNetworkImage(
+                  imageUrl: reel.linkedProductImageUrl!,
                   width: 28,
                   height: 28,
                   fit: BoxFit.cover,
-                  errorBuilder: (_, _, _) => const Icon(
+                  memCacheWidth: 200,
+                  errorWidget: (_, _, _) => const Icon(
                     Icons.shopping_bag_outlined,
                     color: Colors.white,
                     size: 18,

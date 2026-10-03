@@ -1,3 +1,4 @@
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -971,10 +972,11 @@ class _ReelPageState extends ConsumerState<_ReelPage>
       fit: StackFit.expand,
       children: [
         if (thumb != null && thumb.isNotEmpty)
-          Image.network(
-            thumb,
+          CachedNetworkImage(
+            imageUrl: thumb,
             fit: BoxFit.cover,
-            errorBuilder: (context, error, stackTrace) => const SizedBox.shrink(),
+            memCacheWidth: 1000,
+            errorWidget: (context, url, error) => const SizedBox.shrink(),
           ),
         const Center(
           child: CircularProgressIndicator(
@@ -1334,10 +1336,11 @@ class _ShopAvatar extends StatelessWidget {
       ),
       child: ClipOval(
         child: imageUrl != null
-            ? Image.network(
-                imageUrl!,
+            ? CachedNetworkImage(
+                imageUrl: imageUrl!,
                 fit: BoxFit.cover,
-                errorBuilder: (_, _, _) => _initials(),
+                memCacheWidth: 200,
+                errorWidget: (_, _, _) => _initials(),
               )
             : _initials(),
       ),
@@ -1438,12 +1441,13 @@ class _ProductCard extends StatelessWidget {
             if (productImageUrl != null)
               ClipRRect(
                 borderRadius: BorderRadius.circular(4),
-                child: Image.network(
-                  productImageUrl!,
+                child: CachedNetworkImage(
+                  imageUrl: productImageUrl!,
                   width: 26,
                   height: 26,
                   fit: BoxFit.cover,
-                  errorBuilder: (_, _, _) => const Icon(
+                  memCacheWidth: 200,
+                  errorWidget: (_, _, _) => const Icon(
                     Icons.shopping_bag_outlined,
                     color: Colors.white,
                     size: 16,
@@ -2265,10 +2269,11 @@ class _ReelGridTile extends StatelessWidget {
             fit: StackFit.expand,
             children: [
               if (thumb != null && thumb.isNotEmpty)
-                Image.network(
-                  thumb,
+                CachedNetworkImage(
+                  imageUrl: thumb,
                   fit: BoxFit.cover,
-                  errorBuilder: (context, error, stackTrace) => Container(
+                  memCacheWidth: 400,
+                  errorWidget: (context, url, error) => Container(
                     color: Colors.grey.shade900,
                     child: const Icon(Icons.play_circle_fill_rounded, color: Colors.white38, size: 28),
                   ),
