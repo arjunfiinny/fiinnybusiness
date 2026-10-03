@@ -2,6 +2,7 @@ import 'dart:developer' as dev;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../../core/models/store_model.dart';
+import '../../../core/services/perf_trace.dart';
 
 class StoreRepository {
   final _db = FirebaseFirestore.instance;
@@ -12,7 +13,8 @@ class StoreRepository {
     // retailers/, manufacturers/ and stores/ — plus storeReviews totals per
     // phone, read from the 1–2 storeDirectory docs Cloud Functions keep current
     // (functions/src/stores/directory.ts) instead of every doc of all five.
-    final directory = await _db.collection('storeDirectory').get();
+    final directory = await traced(
+        'load_store_directory', () => _db.collection('storeDirectory').get());
     final parsed =
         parseStoreDirectory(directory.docs.map((d) => d.data()).toList());
 

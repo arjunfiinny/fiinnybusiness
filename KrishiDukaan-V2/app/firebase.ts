@@ -60,6 +60,11 @@ if (typeof window !== 'undefined') {
       getAnalytics(app);
     }
   });
+  // Real visitors' page-load and network timings, shown in the Firebase
+  // console under Performance. Loaded lazily so it never delays the page.
+  import('firebase/performance')
+    .then(({ getPerformance }) => getPerformance(app))
+    .catch(() => {});
 }
 
 export { db, auth, storage };

@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../../core/constants/app_config.dart';
 import '../../../core/models/catalog_model.dart';
+import '../../../core/services/perf_trace.dart';
 
 const _col = 'products';
 
@@ -59,7 +60,8 @@ class CatalogRepository {
 
   Future<List<CatalogModel>> _loadCards() async {
     try {
-      final snap = await _db.collection(_cardsCol).get();
+      final snap = await traced(
+          'load_marketplace_cards', () => _db.collection(_cardsCol).get());
       final cards = snap.docs.map((doc) => CatalogModel.fromCard(doc.data())).toList()
         ..sort((a, b) {
           if (a.createdAt == null) return b.createdAt == null ? 0 : 1;
