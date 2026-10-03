@@ -705,6 +705,8 @@ export default function MarketView({
               >
                 <div className="aspect-[4/3] relative overflow-hidden bg-surface-container">
                   <img
+                    loading="lazy"
+                    decoding="async"
                     src={product.image}
                     alt={product.name}
                     className="w-full h-full object-contain transition-transform duration-500 group-hover:scale-105 bg-white"

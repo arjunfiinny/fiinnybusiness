@@ -28,6 +28,7 @@ import {
   limit,
 } from "firebase/firestore/lite";
 import { getClientDb } from "../firebase-client-server";
+import { STORE_DIRECTORY, sourcesFromDirectory } from "../store-directory";
 import { buildProductSlug, filterServableProductIds } from "./products-server";
 
 export interface SeoStore {
@@ -246,13 +247,15 @@ export async function getAllStores(): Promise<SeoStore[]> {
   if (_cache) return _cache;
   try {
     const db = getClientDb();
-    const [profilesSnap, retailersSnap, manufacturersSnap, storesSnap] =
-      await Promise.all([
-        getDocs(collection(db, "profiles")).catch(() => null),
-        getDocs(collection(db, "retailers")).catch(() => null),
-        getDocs(collection(db, "manufacturers")).catch(() => null),
-        getDocs(collection(db, "stores")).catch(() => null),
-      ]);
+    // The four source collections, from the 1–2 storeDirectory docs Cloud
+    // Functions keep current rather than a full read of each.
+    const directory = await getDocs(collection(db, STORE_DIRECTORY));
+    const {
+      profiles: profilesSnap,
+      retailers: retailersSnap,
+      manufacturers: manufacturersSnap,
+      stores: storesSnap,
+    } = sourcesFromDirectory(directory.docs.map((d) => d.data()));
 
     const raw: Raw[] = [];
 

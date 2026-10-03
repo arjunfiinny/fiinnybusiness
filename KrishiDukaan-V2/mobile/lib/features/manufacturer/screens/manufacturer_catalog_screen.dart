@@ -945,12 +945,13 @@ class _ProductSheetState extends ConsumerState<_ProductSheet> {
                           leading: cat.images.isNotEmpty
                               ? ClipRRect(
                                   borderRadius: BorderRadius.circular(6),
-                                  child: Image.network(
-                                    cat.images.first,
+                                  child: CachedNetworkImage(
+                                    imageUrl: cat.images.first,
                                     width: 36,
                                     height: 36,
                                     fit: BoxFit.cover,
-                                    errorBuilder: (_, _, _) =>
+                                    memCacheWidth: 200,
+                                    errorWidget: (_, _, _) =>
                                         const Icon(Icons.agriculture, size: 28),
                                   ),
                                 )

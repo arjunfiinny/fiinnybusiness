@@ -44,6 +44,8 @@ export default function Footer({ onNavigate, onCategoryClick, userRole, onUpgrad
           <div className="col-span-2 md:col-span-1">
             <div className="flex items-center gap-2 mb-4 group cursor-pointer" onClick={() => onNavigate?.('home')}>
               <img 
+                loading="lazy"
+                decoding="async"
                 src="/images/krishidukan icon.webp" 
                 alt="Logo" 
                 className="w-10 h-10 object-contain"

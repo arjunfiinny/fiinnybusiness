@@ -17,6 +17,7 @@ import {
 } from "firebase/firestore";
 
 import { db } from "../../firebase";
+import { updateOwnAvailabilityEntries } from "./own-availability-entries";
 import type {
   BulkDiscountTier,
   DiscountUpdateInput,
@@ -466,7 +467,7 @@ export async function fetchRetailerInventoryRows(
         source: p.source ?? "retailer_inventory",
         ownerId: p.ownerId,
         // manufacturer_assigned copies use manufacturerProductId instead of originalProductId —
-        // fall back to it so syncAvailabilityDiscount + recomputeMaxDiscount find the root.
+        // fall back to it so syncAvailabilityDiscount finds the root.
         originalProductId: (raw.originalProductId || raw.manufacturerProductId)
           ? String(raw.originalProductId || raw.manufacturerProductId)
           : null,
@@ -1242,8 +1243,8 @@ export async function activateProduct(
 
 /**
  * Saves discount settings for a seller's inventory record and mirrors the
- * computed effectiveDiscountPct to the product doc. Also triggers a
- * recompute of maxDiscountPct on the original product (fire-and-forget).
+ * computed effectiveDiscountPct to the product doc. The root product's
+ * maxDiscountPct follows server-side (syncMaxDiscountOnProductWrite).
  */
 export async function updateDiscountRecord(
   inventoryId: string,
@@ -1321,32 +1322,23 @@ export async function updateDiscountRecord(
   await batch.commit();
 
   // Sync discountPct into the availability[] entry on the root product (fire-and-forget).
+  // maxDiscountPct on the root is recomputed server-side by the
+  // syncMaxDiscountOnProductWrite Cloud Function when effectiveDiscountPct
+  // changes; firestore.rules no longer lets non-owners write it.
   if (originalProductId) {
     syncAvailabilityDiscount(originalProductId, productId, effectivePct).catch(() => {});
   }
-
-  // Recompute maxDiscountPct on the root/original product (fire-and-forget).
-  const rootId = originalProductId ?? productId;
-  recomputeMaxDiscount(rootId).catch(() => {});
 }
 
 /**
  * Updates the `discountPct` field on the matching entry in the original product's
- * `availability[]` array. Uses a transaction to safely replace the array element.
+ * `availability[]` array, in a transaction (updateOwnAvailabilityEntries).
  */
 async function syncAvailabilityDiscount(
   rootProductId: string,
   sellerProductId: string,
   effectivePct: number,
 ): Promise<void> {
-  const rootRef = doc(db, "products", rootProductId);
-  const snap = await getDoc(rootRef);
-  if (!snap.exists()) return;
-
-  const data = snap.data() as Record<string, unknown>;
-  const availability = Array.isArray(data.availability) ? [...(data.availability as Record<string, unknown>[])] : [];
-  if (!availability.length) return;
-
   // Fetch the seller product to get its ownerId / retailerId for matching
   const sellerSnap = await getDoc(doc(db, "products", sellerProductId));
   if (!sellerSnap.exists()) return;
@@ -1354,16 +1346,14 @@ async function syncAvailabilityDiscount(
   const sellerOwnerId  = String(seller.ownerId  ?? "");
   const sellerPhone    = String(seller.retailerPhone ?? seller.ownerPhone ?? "");
 
-  const updated = availability.map((entry) => {
+  await updateOwnAvailabilityEntries(doc(db, "products", rootProductId), (entry) => {
     const storeId    = String(entry.storeId    ?? "");
     const storePhone = String(entry.storePhone ?? "");
     const matches =
       (sellerOwnerId && storeId === sellerOwnerId) ||
       (sellerPhone   && (storePhone === sellerPhone || storeId === sellerPhone));
-    return matches ? { ...entry, discountPct: effectivePct } : entry;
+    return matches ? { ...entry, discountPct: effectivePct } : null;
   });
-
-  await updateDoc(rootRef, { availability: updated });
 }
 
 /**
@@ -1379,24 +1369,13 @@ async function syncAvailabilityPriceStock(
   stockLevel: string,
   variants?: { unit: string; price: number; stock?: number }[],
 ): Promise<void> {
-  const rootRef = doc(db, "products", rootProductId);
-  const snap = await getDoc(rootRef);
-  if (!snap.exists()) return;
-  const data = snap.data() as Record<string, unknown>;
-  const availability = Array.isArray(data.availability)
-    ? [...(data.availability as Record<string, unknown>[])]
-    : [];
-  if (!availability.length) return;
-
-  let changed = false;
-  const updated = availability.map((entry) => {
+  await updateOwnAvailabilityEntries(doc(db, "products", rootProductId), (entry) => {
     const storeId = String(entry.storeId ?? "");
     const storePhone = String(entry.storePhone ?? "");
     const matches =
       (match.ownerId && (storeId === match.ownerId || storePhone === match.ownerId)) ||
       (match.phone && (storePhone === match.phone || storeId === match.phone));
-    if (!matches) return entry;
-    changed = true;
+    if (!matches) return null;
     // The marketplace's seller tiles read this array, so per-size stock has to
     // land here too — otherwise a size the seller just restocked still shows
     // as unavailable on the product page.
@@ -1407,48 +1386,8 @@ async function syncAvailabilityPriceStock(
       ...(variants !== undefined ? { variants } : {}),
     };
   });
-
-  if (changed) await updateDoc(rootRef, { availability: updated });
 }
 
-/**
- * Finds all active seller copies of a product (via originalProductId) and
- * updates maxDiscountPct on the root doc with the highest active discount.
- */
-async function recomputeMaxDiscount(rootProductId: string): Promise<void> {
-  // Query both link fields: admin_assigned copies use originalProductId,
-  // manufacturer_assigned copies use manufacturerProductId.
-  const [rootSnap, byOriginalSnap, byMfgSnap] = await Promise.all([
-    getDoc(doc(db, "products", rootProductId)),
-    getDocs(
-      query(
-        collection(db, "products"),
-        where("originalProductId", "==", rootProductId),
-        where("isActive", "==", true),
-      ),
-    ),
-    getDocs(
-      query(
-        collection(db, "products"),
-        where("manufacturerProductId", "==", rootProductId),
-        where("isActive", "==", true),
-      ),
-    ),
-  ]);
-
-  const pcts: number[] = [];
-  if (rootSnap.exists()) {
-    const d = rootSnap.data() as Record<string, unknown>;
-    if (d.isActive !== false) pcts.push(toNum(d.effectiveDiscountPct, 0));
-  }
-  const allCopies = [...byOriginalSnap.docs, ...byMfgSnap.docs];
-  allCopies.forEach((d) =>
-    pcts.push(toNum((d.data() as Record<string, unknown>).effectiveDiscountPct, 0)),
-  );
-
-  const maxPct = Math.max(0, ...pcts);
-  await updateDoc(doc(db, "products", rootProductId), { maxDiscountPct: maxPct });
-}
 
 /**
  * Hard-deletes a product and its inventory record (if given).

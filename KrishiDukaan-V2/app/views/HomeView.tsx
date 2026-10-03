@@ -201,7 +201,7 @@ export default function HomeView({
       ctaEnabled: true,
       bgClass: 'from-emerald-950 via-emerald-900/90 to-emerald-700/10',
       bgImg: 'https://images.unsplash.com/photo-1625246333195-78d9c38ad449?auto=format&fit=crop&w=1400&q=80',
-      imgUrl: '/product-images/Product_Images/Power Plus.png',
+      imgUrl: '/product-images/Product_Images/Power Plus.webp',
       onCta: 'powerPlus',
     },
     {
@@ -365,7 +365,7 @@ export default function HomeView({
               className={`group bg-gradient-to-br ${c.color} rounded-2xl p-3 flex flex-col items-center gap-2 shadow-sm hover:shadow-ambient border border-white transition-all`}
             >
               <div className="w-12 h-12 rounded-full overflow-hidden shadow-sm bg-white group-hover:scale-110 transition-transform">
-                <img src={c.imgUrl} alt={c.label} className="w-full h-full object-cover" />
+                <img loading="lazy" decoding="async" src={c.imgUrl} alt={c.label} className="w-full h-full object-cover" />
               </div>
               <span className="text-[11px] font-bold text-on-surface text-center leading-tight">
                 {c.label}
@@ -395,7 +395,7 @@ export default function HomeView({
               className="group bg-surface-container-low rounded-2xl p-3 flex flex-col items-center gap-2 shadow-sm hover:shadow-ambient hover:bg-surface-container transition-all border border-transparent hover:border-outline-variant"
             >
               <div className="w-14 h-14 rounded-full bg-white shadow-sm overflow-hidden border border-surface-container-highest group-hover:scale-110 transition-transform">
-                <img src={crop.image} alt={crop.name} className="w-full h-full object-cover" />
+                <img loading="lazy" decoding="async" src={crop.image} alt={crop.name} className="w-full h-full object-cover" />
               </div>
               <span className="text-[11px] font-bold text-on-surface text-center leading-tight">
                 {crop.name}
@@ -434,7 +434,7 @@ export default function HomeView({
                 title={reel.caption}
               >
                 {reel.thumbnailUrl ? (
-                  <img src={reel.thumbnailUrl} alt="" className="w-full h-56 object-cover" />
+                  <img loading="lazy" decoding="async" src={reel.thumbnailUrl} alt="" className="w-full h-56 object-cover" />
                 ) : (
                   <div className="w-full h-56 bg-surface-variant flex items-center justify-center">
                     <Video className="w-8 h-8 text-on-surface-variant/30" />
@@ -507,6 +507,8 @@ export default function HomeView({
             >
               <div className="aspect-square relative overflow-hidden bg-surface-container-low">
                 <img
+                  loading="lazy"
+                  decoding="async"
                   src={product.image}
                   alt={product.name}
                   className="w-full h-full object-contain bg-white p-2 group-hover:scale-105 transition-transform duration-500"

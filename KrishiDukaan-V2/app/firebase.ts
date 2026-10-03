@@ -60,6 +60,11 @@ if (typeof window !== 'undefined') {
       getAnalytics(app);
     }
   });
+  // Real visitors' page-load and network timings, shown in the Firebase
+  // console under Performance. Loaded lazily so it never delays the page.
+  import('firebase/performance')
+    .then(({ getPerformance }) => getPerformance(app))
+    .catch(() => {});
 }
 
 export { db, auth, storage };
@@ -145,7 +150,8 @@ export type RetailerProfile = {
 import { MarketplaceProduct } from '../types/product';
 import type { CartItem, OrderDoc, OrderItem, OrderStatus, SellerType, StatusHistoryEntry } from '../types/order';
 import { generateAndStoreInvoice } from './utils/invoice-storage';
-import { buildRatingAgg, mapMarketplaceDoc, mergeMarketplaceProducts } from './lib/marketplace-merge';
+import { CARDS_COLLECTION, cardToProduct } from './lib/marketplace-cards';
+import { STORE_DIRECTORY, sourcesFromDirectory, type StoreSources } from './lib/store-directory';
 
 export async function saveRetailerApplication(payload: RetailerApplication) {
   const products = payload.products
@@ -295,30 +301,16 @@ export async function saveRetailerProduct(
   }
 }
 
+/**
+ * Every marketplace card: one pre-merged doc per product name, with ratings,
+ * built by Cloud Functions (functions/src/marketplace/cards.ts). This used to
+ * read every products doc (~32 copies per name) and every review and merge
+ * them in the browser.
+ */
 export async function fetchMarketplaceProducts(): Promise<MarketplaceProduct[]> {
   try {
-    const [snapshot, reviewsSnap] = await Promise.all([
-      getDocs(collection(db, 'products')),
-      getDocs(collection(db, 'productReviews')).catch(() => null),
-    ]);
-
-    // Ratings computed straight from the review documents (source of truth), keyed
-    // by catalogId — avoids depending on aggregate fields being kept in sync.
-    const ratingAgg = buildRatingAgg(
-      (reviewsSnap?.docs ?? []).map((d) => ({
-        catalogId: String(d.data().catalogId || ''),
-        rating: Number(d.data().rating || 0),
-      })),
-    );
-
-    const allMapped = snapshot.docs
-      .filter((item) => item.data().isActive !== false)
-      .map((item) => mapMarketplaceDoc(item.id, item.data()));
-
-    // Dedup by name + merge copies + finalize price/ratings/sellMode.
-    // Shared with the paginated /api/marketplace/products route so both produce
-    // identical merged cards.
-    return mergeMarketplaceProducts(allMapped, ratingAgg);
+    const snapshot = await getDocs(query(collection(db, CARDS_COLLECTION), orderBy('nameKey')));
+    return snapshot.docs.map((d) => cardToProduct(d.data()));
   } catch (error) {
     console.error('Error fetching products from Firestore:', error);
     throw error;
@@ -352,33 +344,27 @@ export type Store = {
   onlineDelivery?: boolean;
 };
 
+/**
+ * The stores, retailers, manufacturers and profiles records plus per-phone
+ * review totals, from the 1–2 storeDirectory docs Cloud Functions keep current,
+ * instead of reading all five collections.
+ */
+export async function fetchStoreSources(): Promise<StoreSources> {
+  const directory = await getDocs(collection(db, STORE_DIRECTORY));
+  return sourcesFromDirectory(directory.docs.map((d) => d.data()));
+}
+
 export async function fetchStores(): Promise<Store[]> {
   try {
-    const [storesSnapshot, retailersSnapshot, manufacturersSnapshot, storeReviewsSnap, profilesSnap] = await Promise.all([
-      getDocs(collection(db, 'stores')),
-      getDocs(collection(db, 'retailers')),
-      getDocs(collection(db, 'manufacturers')),
-      getDocs(collection(db, 'storeReviews')).catch(() => null),
-      // profiles/{phone} is the unified new-schema profile and the mobile app's
-      // primary store source. The web read every OTHER collection but this one,
-      // so profile-only sellers never appeared in the locator.
-      getDocs(collection(db, 'profiles')).catch(() => null),
-    ]);
-
-    // Aggregate store ratings straight from review docs (source of truth), keyed by storePhone.
-    const storeRatingAgg = new Map<string, { sum: number; count: number }>();
-    if (storeReviewsSnap) {
-      for (const d of storeReviewsSnap.docs) {
-        const rd = d.data();
-        const phone = String(rd.storePhone || '');
-        const rating = Number(rd.rating || 0);
-        if (!phone || !(rating > 0)) continue;
-        const cur = storeRatingAgg.get(phone) ?? { sum: 0, count: 0 };
-        cur.sum += rating;
-        cur.count += 1;
-        storeRatingAgg.set(phone, cur);
-      }
-    }
+    // profiles/{phone} is the unified new-schema profile and the mobile app's
+    // primary store source.
+    const {
+      stores: storesSnapshot,
+      retailers: retailersSnapshot,
+      manufacturers: manufacturersSnapshot,
+      profiles: profilesSnap,
+      ratings: storeRatingAgg,
+    } = await fetchStoreSources();
 
     // Brand-page slugs, keyed by manufacturer phone. Collected before the
     // cross-collection dedup below so the slug survives even when a profiles/
@@ -2066,59 +2052,79 @@ export async function trackUserActivity(opts: {
   }
 }
 
-export async function trackProductImpression(productId: string, position: number) {
-  try {
-    const ref = doc(db, 'products', productId);
-    const dayKey = getLocalDayKey();
-    await updateDoc(ref, {
-      impressions: increment(1),
-      positionSum: increment(position),
-      [`impressionsByDay.${dayKey}`]: increment(1),
-    });
-  } catch (error) {
-    // Silent fail for analytics
-    console.warn('Impression track failed', error);
+// Seller-analytics counters live in productStats/{productId}, not on the
+// product doc: every write to products/{id} runs syncSellerProductToCanonical
+// and notifyLowStock, so counting a view there cost two Cloud Function runs.
+// Readers add these to the legacy fields still on older product docs.
+type ProductStatField = 'impressions' | 'positionSum' | 'clicks' | 'calls' | 'directionRequests';
+
+const PRODUCT_STATS_FLUSH_MS = 800;
+const pendingProductStats = new Map<string, Map<ProductStatField, number>>();
+let productStatsTimer: ReturnType<typeof setTimeout> | null = null;
+
+function queueProductStats(
+  productId: string,
+  deltas: Partial<Record<ProductStatField, number>>,
+  flushNow = false,
+) {
+  // Only signed-in users may write counters (firestore.rules). Writing for
+  // signed-out visitors produced a denied request per product scrolled past.
+  if (!productId || !auth.currentUser) return;
+  const pending = pendingProductStats.get(productId) ?? new Map<ProductStatField, number>();
+  for (const [field, value] of Object.entries(deltas) as [ProductStatField, number][]) {
+    pending.set(field, (pending.get(field) ?? 0) + value);
+  }
+  pendingProductStats.set(productId, pending);
+
+  if (flushNow) {
+    if (productStatsTimer) clearTimeout(productStatsTimer);
+    void flushProductStats();
+  } else if (!productStatsTimer) {
+    productStatsTimer = setTimeout(() => void flushProductStats(), PRODUCT_STATS_FLUSH_MS);
   }
 }
 
-export async function trackProductClick(productId: string) {
-  try {
-    const ref = doc(db, 'products', productId);
-    const dayKey = getLocalDayKey();
-    await updateDoc(ref, {
-      clicks: increment(1),
-      [`clicksByDay.${dayKey}`]: increment(1),
-    });
-  } catch (error) {
-    // Silent fail for analytics
-    console.warn('Click track failed', error);
+async function flushProductStats() {
+  productStatsTimer = null;
+  const entries = Array.from(pendingProductStats.entries());
+  pendingProductStats.clear();
+  if (entries.length === 0) return;
+
+  const dayKey = getLocalDayKey();
+  for (let i = 0; i < entries.length; i += 400) {
+    const batch = writeBatch(db);
+    for (const [productId, deltas] of entries.slice(i, i + 400)) {
+      const payload: Record<string, unknown> = {};
+      deltas.forEach((value, field) => {
+        payload[field] = increment(value);
+        // set+merge treats dotted keys literally, so the per-day bucket must be
+        // a nested map rather than `impressionsByDay.<day>`.
+        if (field !== 'positionSum') payload[`${field}ByDay`] = { [dayKey]: increment(value) };
+      });
+      batch.set(doc(db, 'productStats', productId), payload, { merge: true });
+    }
+    try {
+      await batch.commit();
+    } catch (error) {
+      console.warn('Product stats write failed', error);
+    }
   }
 }
 
-export async function trackStoreCall(productId: string) {
-  try {
-    const ref = doc(db, 'products', productId);
-    const dayKey = getLocalDayKey();
-    await updateDoc(ref, {
-      calls: increment(1),
-      [`callsByDay.${dayKey}`]: increment(1),
-    });
-  } catch (error) {
-    console.warn('Call track failed', error);
-  }
+export function trackProductImpression(productId: string, position: number) {
+  queueProductStats(productId, { impressions: 1, positionSum: position });
 }
 
-export async function trackDirectionRequest(productId: string) {
-  try {
-    const ref = doc(db, 'products', productId);
-    const dayKey = getLocalDayKey();
-    await updateDoc(ref, {
-      directionRequests: increment(1),
-      [`directionRequestsByDay.${dayKey}`]: increment(1),
-    });
-  } catch (error) {
-    console.warn('Direction request track failed', error);
-  }
+export function trackProductClick(productId: string) {
+  queueProductStats(productId, { clicks: 1 }, true);
+}
+
+export function trackStoreCall(productId: string) {
+  queueProductStats(productId, { calls: 1 }, true);
+}
+
+export function trackDirectionRequest(productId: string) {
+  queueProductStats(productId, { directionRequests: 1 }, true);
 }
 
 export async function fetchHubs(): Promise<Hub[]> {
@@ -2306,10 +2312,6 @@ export async function fetchRetailerProfiles(): Promise<StoreAutocompleteOption[]
     .filter(r => r.shopName && r.address);
 }
 
-export async function fetchAllRetailers(): Promise<any[]> {
-  const snapshot = await getDocs(collection(db, 'retailers'));
-  return snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-}
 
 export async function fetchAllPayments(): Promise<any[]> {
   const snapshot = await getDocs(collection(db, 'payments'));

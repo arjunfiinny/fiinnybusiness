@@ -22,6 +22,21 @@ export {
   notifyLowStock,
 } from "./notifications/inventory";
 export { sendStoreAnalyticsDigest } from "./notifications/digest";
+export {
+  syncMarketplaceCardOnProductWrite,
+  syncMarketplaceCardOnReviewWrite,
+  recomputeDueMarketplaceCards,
+  reconcileMarketplaceCards,
+} from "./marketplace/cards";
+export { syncMaxDiscountOnProductWrite } from "./marketplace/max-discount";
+export {
+  markStoreDirectoryDirtyOnRetailer,
+  markStoreDirectoryDirtyOnManufacturer,
+  markStoreDirectoryDirtyOnProfile,
+  markStoreDirectoryDirtyOnStore,
+  markStoreDirectoryDirtyOnStoreReview,
+  rebuildStoreDirectoryIfDirty,
+} from "./stores/directory";
 export { raiseAbandonedCheckoutEnquiries } from "./notifications/enquiries";
 export { notifySellerOfOrderOffer, expireOrderReassignments } from "./notifications/reassignment";
 export { generateInvoiceForNewOrder, sweepMissingInvoices } from "./orders/invoices";

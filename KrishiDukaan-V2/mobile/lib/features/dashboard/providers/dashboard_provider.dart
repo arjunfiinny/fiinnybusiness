@@ -23,6 +23,14 @@ final myListingsProvider =
   return _repo.watchMyListings(phone);
 });
 
+/// Keyed by the comma-joined, sorted product ids so it only refetches when
+/// the seller's set of listings changes, not on every listing update.
+final productStatsTotalsProvider =
+    FutureProvider.family<Map<String, int>, String>((ref, idsKey) {
+  final ids = idsKey.isEmpty ? <String>[] : idsKey.split(',');
+  return _repo.fetchProductStatsTotals(ids);
+});
+
 final sellerOrdersProvider =
     StreamProvider.family<List<OrderModel>, String>((ref, phone) {
   return _repo.watchSellerOrders(phone);

@@ -1,5 +1,6 @@
 import {
   collection,
+  documentId,
   getDocs,
   query,
   Timestamp,
@@ -285,26 +286,46 @@ export async function fetchRetailerAnalytics(
     ),
   );
 
+  const addCounters = (data: Record<string, unknown>) => {
+    totalImpressions += Number(data.impressions || 0);
+    totalClicks += Number(data.clicks || 0);
+    totalPositionSum += Number(data.positionSum || 0);
+
+    const impressionsDay = (data.impressionsByDay ?? {}) as Record<string, unknown>;
+    const callsDay = (data.callsByDay ?? {}) as Record<string, unknown>;
+    const directionsDay = (data.directionRequestsByDay ?? {}) as Record<string, unknown>;
+    days.forEach((day) => {
+      viewsByDay[day.key] += Number(impressionsDay[day.key] || 0);
+      callsByDay[day.key] += Number(callsDay[day.key] || 0);
+      directionsByDay[day.key] += Number(directionsDay[day.key] || 0);
+    });
+  };
+
   const seenProductIds = new Set<string>();
   for (const snap of productSnaps) {
     if (!snap) continue;
     for (const doc of snap.docs) {
       if (seenProductIds.has(doc.id)) continue; // dedupe across field/id combos
       seenProductIds.add(doc.id);
-      const data = doc.data();
-      totalImpressions += Number(data.impressions || 0);
-      totalClicks += Number(data.clicks || 0);
-      totalPositionSum += Number(data.positionSum || 0);
-
-      const impressionsDay = (data.impressionsByDay ?? {}) as Record<string, unknown>;
-      const callsDay = (data.callsByDay ?? {}) as Record<string, unknown>;
-      const directionsDay = (data.directionRequestsByDay ?? {}) as Record<string, unknown>;
-      days.forEach((day) => {
-        viewsByDay[day.key] += Number(impressionsDay[day.key] || 0);
-        callsByDay[day.key] += Number(callsDay[day.key] || 0);
-        directionsByDay[day.key] += Number(directionsDay[day.key] || 0);
-      });
+      // Legacy counters still written by older app versions.
+      addCounters(doc.data());
     }
+  }
+
+  const productIds = Array.from(seenProductIds);
+  const statSnaps = await Promise.all(
+    Array.from({ length: Math.ceil(productIds.length / 30) }, (_, i) =>
+      getDocs(
+        query(collection(db, "productStats"), where(documentId(), "in", productIds.slice(i * 30, i * 30 + 30))),
+      ).catch((err) => {
+        errors.push(err);
+        console.error("[analytics] productStats read failed:", err);
+        return null;
+      }),
+    ),
+  );
+  for (const snap of statSnaps) {
+    for (const doc of snap?.docs ?? []) addCounters(doc.data());
   }
 
   // ── Orders: revenue and volume ───────────────────────────────────────────
