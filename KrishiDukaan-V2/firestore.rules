@@ -630,6 +630,18 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
+    // Merged marketplace cards, built only by Cloud Functions
+    // (functions/src/marketplace/cards.ts). Public like the products they merge.
+    match /marketplaceCards/{cardId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Product -> card index, used only by Cloud Functions.
+    match /cardMembers/{productId} {
+      allow read, write: if false;
+    }
+
     match /storeStats/{storePhone} {
       allow read: if isAuthed();
       allow create: if isAuthed() && request.resource.data.keys().hasOnly(['storeViews', 'storeViewsByDay']);

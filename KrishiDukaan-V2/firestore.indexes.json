@@ -1355,6 +1355,64 @@
         }
       ],
       "density": "SPARSE_ALL"
+    },
+    {
+      "collectionGroup": "marketplaceCards",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "categoryKey",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "nameKey",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "marketplaceCards",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "searchKeywords",
+          "arrayConfig": "CONTAINS"
+        },
+        {
+          "fieldPath": "nameKey",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "marketplaceCards",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "searchKeywords",
+          "arrayConfig": "CONTAINS"
+        },
+        {
+          "fieldPath": "categoryKey",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "nameKey",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "ASCENDING"
+        }
+      ]
     }
   ],
   "fieldOverrides": [
@@ -1417,6 +1475,56 @@
           "order": "ASCENDING"
         }
       ]
+    },
+    {
+      "collectionGroup": "marketplaceCards",
+      "fieldPath": "availability",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "marketplaceCards",
+      "fieldPath": "description",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "marketplaceCards",
+      "fieldPath": "variants",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "marketplaceCards",
+      "fieldPath": "images",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "marketplaceCards",
+      "fieldPath": "composition",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "marketplaceCards",
+      "fieldPath": "customFields",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "marketplaceCards",
+      "fieldPath": "categoryInfo",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "marketplaceCards",
+      "fieldPath": "sellerDiscounts",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "marketplaceCards",
+      "fieldPath": "memberIds",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "marketplaceCards",
+      "fieldPath": "contentHash",
+      "indexes": []
     }
   ]
 }

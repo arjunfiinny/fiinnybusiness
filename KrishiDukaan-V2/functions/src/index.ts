@@ -22,6 +22,12 @@ export {
   notifyLowStock,
 } from "./notifications/inventory";
 export { sendStoreAnalyticsDigest } from "./notifications/digest";
+export {
+  syncMarketplaceCardOnProductWrite,
+  syncMarketplaceCardOnReviewWrite,
+  recomputeDueMarketplaceCards,
+  reconcileMarketplaceCards,
+} from "./marketplace/cards";
 export { raiseAbandonedCheckoutEnquiries } from "./notifications/enquiries";
 export { notifySellerOfOrderOffer, expireOrderReassignments } from "./notifications/reassignment";
 export { generateInvoiceForNewOrder, sweepMissingInvoices } from "./orders/invoices";
