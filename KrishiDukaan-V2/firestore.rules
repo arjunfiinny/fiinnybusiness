@@ -613,6 +613,31 @@ service cloud.firestore {
       ));
     }
 
+    // Seller-analytics counters, kept off products/{id} and retailers/{phone}
+    // so a shopper's view no longer fires the product Cloud Functions. These
+    // checks need no get()/exists() lookups, so a counter write costs no
+    // extra rule reads.
+    function productStatKeys() {
+      return ['impressions', 'positionSum', 'clicks', 'calls', 'directionRequests',
+              'impressionsByDay', 'clicksByDay', 'callsByDay', 'directionRequestsByDay'];
+    }
+
+    match /productStats/{productId} {
+      allow read: if isAuthed();
+      allow create: if isAuthed() && request.resource.data.keys().hasOnly(productStatKeys());
+      allow update: if isAuthed()
+                       && request.resource.data.diff(resource.data).affectedKeys().hasOnly(productStatKeys());
+      allow delete: if isAdmin();
+    }
+
+    match /storeStats/{storePhone} {
+      allow read: if isAuthed();
+      allow create: if isAuthed() && request.resource.data.keys().hasOnly(['storeViews', 'storeViewsByDay']);
+      allow update: if isAuthed()
+                       && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['storeViews', 'storeViewsByDay']);
+      allow delete: if isAdmin();
+    }
+
     match /retailers/{retailerId} {
       allow read: if true;
       allow create: if isAuthed();

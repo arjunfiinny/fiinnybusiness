@@ -455,7 +455,16 @@ export type ProductMetrics = {
  */
 export async function getProductMetrics(range: DateRange): Promise<ProductMetrics> {
   const products = collection(db, "products");
-  const sumField = (field: string) => getAggregateFromServer(products, { v: sum(field) });
+  const productStats = collection(db, "productStats");
+  // Counters moved to productStats/{id}; older app versions still bump the
+  // legacy fields on products, so both are summed.
+  const sumField = async (field: string) => {
+    const [legacy, current] = await Promise.all([
+      getAggregateFromServer(products, { v: sum(field) }),
+      getAggregateFromServer(productStats, { v: sum(field) }).catch(() => null),
+    ]);
+    return Number(legacy.data().v ?? 0) + Number(current?.data().v ?? 0);
+  };
   const [total, added, impressions, clicks, calls, directionRequests, addedDocs] = await Promise.all([
     getUniqueProductCount(),
     getCountFromServer(query(products, ...createdAtRange("createdAt", range))),
@@ -477,10 +486,10 @@ export async function getProductMetrics(range: DateRange): Promise<ProductMetric
   return {
     totalProducts: total,
     addedInRange: added.data().count,
-    impressions: Number(impressions.data().v ?? 0),
-    clicks: Number(clicks.data().v ?? 0),
-    calls: Number(calls.data().v ?? 0),
-    directionRequests: Number(directionRequests.data().v ?? 0),
+    impressions,
+    clicks,
+    calls,
+    directionRequests,
     perDay: dayKeysInRange(range).map((date) => ({ date, added: perDayMap.get(date)! })),
   };
 }

@@ -6,6 +6,7 @@ import '../../../core/constants/app_text_styles.dart';
 import '../../../core/models/listing_model.dart';
 import '../../../core/models/review_model.dart';
 import '../data/dashboard_repository.dart' show SeatStats;
+import '../providers/dashboard_provider.dart' show productStatsTotalsProvider;
 
 /// Shared "seller overview" widgets rendered on the Profile tab, which is
 /// the seller's Overview — the single seller-facing overview screen (see
@@ -174,11 +175,12 @@ class _QuickActionRow extends StatelessWidget {
 /// Mirrors web's dashboard Overview cards exactly (`app/dashboard/page.tsx`):
 /// Total Views (impressions), Interactions (clicks), Directions
 /// (directionRequests) — all summed across the seller's own listings, same
-/// fields web's fetchRetailerAnalytics reads off the same `products` docs —
-/// and Products Listed (catalog count). Web hardcodes the "vs last week"
-/// deltas to +0.0%/0.0%/0 today (no real trend computation yet), so this
-/// matches that rather than fabricating a number web itself doesn't have.
-class OverviewGrid extends StatelessWidget {
+/// sources web's fetchRetailerAnalytics reads (productStats plus legacy
+/// counters on the `products` docs) — and Products Listed (catalog count).
+/// Web hardcodes the "vs last week" deltas to +0.0%/0.0%/0 today (no real
+/// trend computation yet), so this matches that rather than fabricating a
+/// number web itself doesn't have.
+class OverviewGrid extends ConsumerWidget {
   final AsyncValue<List<dynamic>> listingsAsync;
   final AsyncValue<Map<String, int>>? analyticsAsync;
   final bool isManufacturer;
@@ -191,15 +193,22 @@ class OverviewGrid extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     if (listingsAsync.isLoading) return const StatsShimmer();
     final listings =
         listingsAsync.value?.cast<ListingModel>() ?? const <ListingModel>[];
 
-    final totalViews = listings.fold<int>(0, (sum, l) => sum + l.impressions);
-    final interactions = listings.fold<int>(0, (sum, l) => sum + l.clicks);
+    final idsKey = (listings.map((l) => l.id).toSet().toList()..sort()).join(',');
+    final stats = ref.watch(productStatsTotalsProvider(idsKey)).value ??
+        const <String, int>{};
+
+    final totalViews = listings.fold<int>(0, (sum, l) => sum + l.impressions) +
+        (stats['impressions'] ?? 0);
+    final interactions = listings.fold<int>(0, (sum, l) => sum + l.clicks) +
+        (stats['clicks'] ?? 0);
     final directions =
-        listings.fold<int>(0, (sum, l) => sum + l.directionRequests);
+        listings.fold<int>(0, (sum, l) => sum + l.directionRequests) +
+            (stats['directionRequests'] ?? 0);
     final productsListed = isManufacturer
         ? (analyticsAsync?.value?['catalogProducts'] ?? listings.length)
         : listings.length;

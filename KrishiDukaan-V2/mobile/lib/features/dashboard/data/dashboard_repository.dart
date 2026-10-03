@@ -35,6 +35,30 @@ class DashboardRepository {
 
   // ── Stats ────────────────────────────────────────────────────────────────
 
+  /// Lifetime engagement counters from productStats/{id} for the given
+  /// products. Legacy values on the product docs are added by the caller.
+  Future<Map<String, int>> fetchProductStatsTotals(List<String> ids) async {
+    final totals = {'impressions': 0, 'clicks': 0, 'directionRequests': 0};
+    for (var i = 0; i < ids.length; i += 30) {
+      try {
+        final snap = await _db
+            .collection('productStats')
+            .where(FieldPath.documentId,
+                whereIn: ids.sublist(i, i + 30 > ids.length ? ids.length : i + 30))
+            .get();
+        for (final doc in snap.docs) {
+          final d = doc.data();
+          for (final field in totals.keys.toList()) {
+            totals[field] = totals[field]! + ((d[field] as num?)?.toInt() ?? 0);
+          }
+        }
+      } catch (_) {
+        // Unreadable stats — the caller still shows the legacy counters.
+      }
+    }
+    return totals;
+  }
+
   Future<Map<String, int>> fetchStats(String sellerPhone) async {
     final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
 

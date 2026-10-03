@@ -2066,59 +2066,79 @@ export async function trackUserActivity(opts: {
   }
 }
 
-export async function trackProductImpression(productId: string, position: number) {
-  try {
-    const ref = doc(db, 'products', productId);
-    const dayKey = getLocalDayKey();
-    await updateDoc(ref, {
-      impressions: increment(1),
-      positionSum: increment(position),
-      [`impressionsByDay.${dayKey}`]: increment(1),
-    });
-  } catch (error) {
-    // Silent fail for analytics
-    console.warn('Impression track failed', error);
+// Seller-analytics counters live in productStats/{productId}, not on the
+// product doc: every write to products/{id} runs syncSellerProductToCanonical
+// and notifyLowStock, so counting a view there cost two Cloud Function runs.
+// Readers add these to the legacy fields still on older product docs.
+type ProductStatField = 'impressions' | 'positionSum' | 'clicks' | 'calls' | 'directionRequests';
+
+const PRODUCT_STATS_FLUSH_MS = 800;
+const pendingProductStats = new Map<string, Map<ProductStatField, number>>();
+let productStatsTimer: ReturnType<typeof setTimeout> | null = null;
+
+function queueProductStats(
+  productId: string,
+  deltas: Partial<Record<ProductStatField, number>>,
+  flushNow = false,
+) {
+  // Only signed-in users may write counters (firestore.rules). Writing for
+  // signed-out visitors produced a denied request per product scrolled past.
+  if (!productId || !auth.currentUser) return;
+  const pending = pendingProductStats.get(productId) ?? new Map<ProductStatField, number>();
+  for (const [field, value] of Object.entries(deltas) as [ProductStatField, number][]) {
+    pending.set(field, (pending.get(field) ?? 0) + value);
+  }
+  pendingProductStats.set(productId, pending);
+
+  if (flushNow) {
+    if (productStatsTimer) clearTimeout(productStatsTimer);
+    void flushProductStats();
+  } else if (!productStatsTimer) {
+    productStatsTimer = setTimeout(() => void flushProductStats(), PRODUCT_STATS_FLUSH_MS);
   }
 }
 
-export async function trackProductClick(productId: string) {
-  try {
-    const ref = doc(db, 'products', productId);
-    const dayKey = getLocalDayKey();
-    await updateDoc(ref, {
-      clicks: increment(1),
-      [`clicksByDay.${dayKey}`]: increment(1),
-    });
-  } catch (error) {
-    // Silent fail for analytics
-    console.warn('Click track failed', error);
+async function flushProductStats() {
+  productStatsTimer = null;
+  const entries = Array.from(pendingProductStats.entries());
+  pendingProductStats.clear();
+  if (entries.length === 0) return;
+
+  const dayKey = getLocalDayKey();
+  for (let i = 0; i < entries.length; i += 400) {
+    const batch = writeBatch(db);
+    for (const [productId, deltas] of entries.slice(i, i + 400)) {
+      const payload: Record<string, unknown> = {};
+      deltas.forEach((value, field) => {
+        payload[field] = increment(value);
+        // set+merge treats dotted keys literally, so the per-day bucket must be
+        // a nested map rather than `impressionsByDay.<day>`.
+        if (field !== 'positionSum') payload[`${field}ByDay`] = { [dayKey]: increment(value) };
+      });
+      batch.set(doc(db, 'productStats', productId), payload, { merge: true });
+    }
+    try {
+      await batch.commit();
+    } catch (error) {
+      console.warn('Product stats write failed', error);
+    }
   }
 }
 
-export async function trackStoreCall(productId: string) {
-  try {
-    const ref = doc(db, 'products', productId);
-    const dayKey = getLocalDayKey();
-    await updateDoc(ref, {
-      calls: increment(1),
-      [`callsByDay.${dayKey}`]: increment(1),
-    });
-  } catch (error) {
-    console.warn('Call track failed', error);
-  }
+export function trackProductImpression(productId: string, position: number) {
+  queueProductStats(productId, { impressions: 1, positionSum: position });
 }
 
-export async function trackDirectionRequest(productId: string) {
-  try {
-    const ref = doc(db, 'products', productId);
-    const dayKey = getLocalDayKey();
-    await updateDoc(ref, {
-      directionRequests: increment(1),
-      [`directionRequestsByDay.${dayKey}`]: increment(1),
-    });
-  } catch (error) {
-    console.warn('Direction request track failed', error);
-  }
+export function trackProductClick(productId: string) {
+  queueProductStats(productId, { clicks: 1 }, true);
+}
+
+export function trackStoreCall(productId: string) {
+  queueProductStats(productId, { calls: 1 }, true);
+}
+
+export function trackDirectionRequest(productId: string) {
+  queueProductStats(productId, { directionRequests: 1 }, true);
 }
 
 export async function fetchHubs(): Promise<Hub[]> {

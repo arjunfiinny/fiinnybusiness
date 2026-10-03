@@ -46,12 +46,14 @@ class _ShopProfileScreenState extends ConsumerState<ShopProfileScreen> {
     );
   }
 
-  /// Best-effort, silent bump of `retailers/{phone}.storeViews` and today's
+  /// Best-effort, silent bump of `storeStats/{phone}.storeViews` and today's
   /// bucket in `storeViewsByDay` — the counters the weekly/monthly/yearly
-  /// analytics digest reads for "store views". Same shape and same
-  /// authenticated-shopper gate as _trackProductEvent in the product detail
-  /// screen; a seller opening their own storefront is not a view, and a
-  /// tracking failure must never affect the page.
+  /// analytics digest reads for "store views". Kept off `retailers/{phone}`
+  /// because that doc is downloaded by every store-list read, and a growing
+  /// per-day map made each of those reads heavier. Same authenticated-shopper
+  /// gate as _trackProductEvent in the product detail screen; a seller opening
+  /// their own storefront is not a view, and a tracking failure must never
+  /// affect the page.
   void _trackStoreView() {
     final auth = FirebaseAuth.instance.currentUser;
     if (auth == null) return;
@@ -63,12 +65,15 @@ class _ShopProfileScreenState extends ConsumerState<ShopProfileScreen> {
     final dayKey = '${now.year}-${now.month.toString().padLeft(2, '0')}-'
         '${now.day.toString().padLeft(2, '0')}';
     FirebaseFirestore.instance
-        .collection('retailers')
+        .collection('storeStats')
         .doc(widget.shopPhone)
-        .update({
-      'storeViews': FieldValue.increment(1),
-      'storeViewsByDay.$dayKey': FieldValue.increment(1),
-    }).catchError((_) {});
+        .set(
+      {
+        'storeViews': FieldValue.increment(1),
+        'storeViewsByDay': {dayKey: FieldValue.increment(1)},
+      },
+      SetOptions(merge: true),
+    ).catchError((_) {});
   }
 
   @override
