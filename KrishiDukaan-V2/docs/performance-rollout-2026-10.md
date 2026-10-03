@@ -118,6 +118,25 @@ Stores tab, a seller's Profile overview and Analytics, tagging in comments), the
 publish. Older app versions keep working: they still read the raw collections and
 write counters onto products, which the rules still allow.
 
+### 5b. Cache header for photos already in Storage (once)
+
+New uploads now get `Cache-Control: public, max-age=31536000, immutable`, so
+browsers and the app stop re-checking each photo on every view. Photos uploaded
+before this change need the same header once. It only changes metadata (the
+files and their links stay the same), and is safe to re-run:
+
+```
+gcloud storage objects update "gs://krishidukan-e8315.firebasestorage.app/product-images/**" --cache-control="public, max-age=31536000, immutable"
+gcloud storage objects update "gs://krishidukan-e8315.firebasestorage.app/profile-images/**" --cache-control="public, max-age=31536000, immutable"
+gcloud storage objects update "gs://krishidukan-e8315.firebasestorage.app/hub-images/**" --cache-control="public, max-age=31536000, immutable"
+gcloud storage objects update "gs://krishidukan-e8315.firebasestorage.app/blog-images/**" --cache-control="public, max-age=31536000, immutable"
+gcloud storage objects update "gs://krishidukan-e8315.firebasestorage.app/blog-covers/**" --cache-control="public, max-age=31536000, immutable"
+```
+
+Leave `kyc/**` and invoices alone: those are private documents. While in the
+console, note the bucket's location (Storage → Files): if it is not
+`asia-south1`, every uncached photo travels further to farmers in India.
+
 ### 6. Watch for a week
 
 - Firestore → Usage: daily reads should fall sharply.
