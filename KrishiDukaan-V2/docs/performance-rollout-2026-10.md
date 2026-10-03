@@ -111,19 +111,28 @@ exit on those writes without reading anything.
 | `siteVisits` | Anyone could write anything | Only +1 on the day's counters |
 | `reel_likes`, `follows` | Any signed-in user could delete or forge anyone's | Own likes and follows only |
 
-Visible changes: @-tagging finds seller accounts only (farmers' records are
-no longer searchable by sellers); the current website's people search shows
-nothing until the new website is deployed (shops still show). Also until
-then, in an uncommon case a stock change made on the current website may not
-reach the brand's product page: when another seller of that product saved
-from the app and a price is still stored the app's way (450.0, which the rule
-reads as different from the website's 450). Price, discount and size changes
-reach that page anyway, through the `syncSellerProductToCanonical` function.
-The new website handles this case, so deploy it (step 4) soon after this
-step. The brand
-pages' public dealer list (`manufacturers/{phone}/retailers`) stays public by
-design. Tests: `firestore.rules` checked against 93 emulator cases covering
-every query and write shape the website, app and invite flows use.
+Visible changes:
+
+- @-tagging in reel comments finds seller accounts only (farmers' records are
+  no longer searchable by sellers).
+- The current website and app load every user to suggest @-tags. The rules
+  now refuse that for sellers, as they already did for farmers. So until the
+  new website is live, sellers get no @-tag suggestions on the website, and
+  until they install the new app version, the app's suggestion list just
+  keeps loading (it closes when they type a space). Farmers see the same
+  today. Posting comments is not affected.
+- Also until the new website is live, in an uncommon case a stock change
+  made on the current website may not reach the brand's product page. This
+  happens when another seller of that product saved from the app and a price
+  is still stored the app's way (450.0, which the rule reads as different
+  from the website's 450). Price, discount and size changes still reach that
+  page through the `syncSellerProductToCanonical` function, and the new
+  website handles this case.
+
+So deploy the website (step 4) soon after this step. The brand pages' public
+dealer list (`manufacturers/{phone}/retailers`) stays public by design.
+Tests: `firestore.rules` checked against 93 emulator cases covering every
+query and write shape the website, app and invite flows use.
 
 ### 3. Build the cards and the store directory once
 
