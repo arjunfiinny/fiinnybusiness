@@ -3709,20 +3709,6 @@ export async function saveContactMessage(
   return ref.id;
 }
 
-export async function fetchContactMessages(): Promise<ContactMessage[]> {
-  try {
-    const q = query(collection(db, 'contactMessages'), orderBy('createdAt', 'desc'));
-    const snapshot = await getDocs(q);
-    return snapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data()
-    })) as ContactMessage[];
-  } catch (error) {
-    console.error('Error fetching contact messages:', error);
-    throw error;
-  }
-}
-
 export async function deleteContactMessage(id: string): Promise<void> {
   await deleteDoc(doc(db, 'contactMessages', id));
 }

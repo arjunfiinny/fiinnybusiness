@@ -6,6 +6,8 @@ import {
   where,
   type DocumentData,
   type Firestore,
+  type QueryConstraint,
+  type QueryDocumentSnapshot,
 } from "firebase/firestore";
 
 // Firestore's limit for an "in" filter.
@@ -31,4 +33,27 @@ export async function getDocsByIds(
   const out = new Map<string, DocumentData>();
   for (const snap of snaps) for (const d of snap.docs) out.set(d.id, d.data());
   return out;
+}
+
+/**
+ * Docs whose `field` equals any of `values`: "in" queries of 30, in parallel,
+ * with optional extra filters (e.g. where("status", "==", "active")).
+ * Deduplicated by doc id.
+ */
+export async function getDocsWhereIn(
+  db: Firestore,
+  collectionPath: string,
+  field: string,
+  values: Iterable<string>,
+  ...extra: QueryConstraint[]
+): Promise<QueryDocumentSnapshot<DocumentData>[]> {
+  const unique = Array.from(new Set(Array.from(values).filter(Boolean)));
+  const chunks: string[][] = [];
+  for (let i = 0; i < unique.length; i += IN_LIMIT) chunks.push(unique.slice(i, i + IN_LIMIT));
+  const snaps = await Promise.all(
+    chunks.map((chunk) => getDocs(query(collection(db, collectionPath), where(field, "in", chunk), ...extra))),
+  );
+  const byId = new Map<string, QueryDocumentSnapshot<DocumentData>>();
+  for (const snap of snaps) for (const d of snap.docs) byId.set(d.id, d);
+  return Array.from(byId.values());
 }

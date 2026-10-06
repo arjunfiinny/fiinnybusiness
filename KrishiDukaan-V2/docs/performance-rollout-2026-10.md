@@ -225,6 +225,7 @@ says which steps it needs. Brief: `docs/follow-up-seller-admin-performance.md`.
 | S2 | Admin WhatsApp inbox pages conversations | Live listeners on **all** of `waIncomingMessages` and `waConversations`: every message ever on open, and the whole set again on every new message; full message contents logged to the browser console | The newest 50 conversations (live), 50 more per "Load more"; messages only for the open chat (newest 100, "Load earlier"); no message content in the console |
 | S3 | Manufacturer network map and a retailer's assigned products | One `retailers/{id}` read per retailer (200 retailers = 200 reads, one trip each); one product read per assigned listing | Addresses and locations from the store directory (1–2 reads), the mirror doc filling gaps; assigned products in parallel queries of 30 |
 | S4a | Admin Overview product count; Admin Analytics | Overview read every product (~4,222) to count them. Analytics read every order, subscription, payment attempt and new user in the window ("All time" = whole collections) on each tab open | Overview: 2 count reads on `marketplaceCards`. Analytics: one small `platformDailyStats` doc per day with activity, kept by Cloud Functions |
+| S4b | Admin lists: Messages, Moderation, Payments, Payouts, Sales team, WhatsApp templates | Whole `contactMessages`, `contentReports`, `payoutAccounts`, `dealerVisits`, `dealers`, `uidIndex`, `retailerSeatListings` collections, all users for template audiences, the newest 500 payment attempts | 50 rows at a time, newest first, filters in the query, totals from count/sum queries; template audiences read sellers only and look up their subscriptions, seats and KYC docs by id |
 
 ### S1. Add-product search
 
@@ -324,6 +325,28 @@ says which steps it needs. Brief: `docs/follow-up-seller-admin-performance.md`.
 - **Check:** Admin → Overview product count equals the Market's "Showing N
   products"; Admin → Analytics, each tab, "All time", "Last 30 days" and a
   single day: numbers match a note of the old page taken before the deploy.
+
+### S4b. Admin lists
+
+- **Indexes (step 1):** `contentReports` (`status`, `createdAt` ↓);
+  `paymentAttempts` (`status`, `amount`) for the "value not collected" sum;
+  `payoutAccounts` (`status`, `updatedAt` ↓).
+- **Website (step 4) only.**
+- **Differences:**
+  - Payments: the tab counts and "value not collected" now cover every
+    attempt, not just the newest 500.
+  - Sales team: "Retailers visited" is now for the last 30 days (a distinct
+    count needs the visits themselves, and only that window is read); total
+    visits and dealers added are all-time counts as before. The executive's
+    own page is unchanged.
+  - WhatsApp templates: "App update" and "Reel promo" go to every user, so
+    they still load the whole user list, but only when that template is
+    opened. The others read sellers, active subscriptions and the matching
+    seat listings, uidIndex and payout docs only.
+- **Check:** each page lists the newest rows, "Load more" adds older ones,
+  the tabs/filters and their counts match; WhatsApp templates: Subscription
+  expiry, New product reminder (vacant seats), KYC pending/success show the
+  same people as before.
 
 ## Testing on UAT
 

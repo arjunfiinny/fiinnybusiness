@@ -1,10 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { collection, getDocs } from "firebase/firestore";
+import { collection, getCountFromServer, orderBy, query, where } from "firebase/firestore";
 import { getAuth } from "firebase/auth";
 import { Banknote, CheckCircle2, Copy, ExternalLink, KeyRound, Loader2, RefreshCw, ShieldAlert, Upload, Zap } from "lucide-react";
 import { db } from "../../firebase";
+import { usePagedQuery } from "../_lib/use-paged-query";
+import { LoadMore } from "../_components/load-more";
 
 /**
  * Seller payout verification.
@@ -87,43 +89,43 @@ function fileToBase64(file: File): Promise<string> {
 }
 
 export default function AdminPayoutsPage() {
-  const [rows, setRows] = useState<PayoutRow[]>([]);
-  const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<PayoutStatus | "all">("pending_verification");
   const [open, setOpen] = useState<PayoutRow | null>(null);
+  const [counts, setCounts] = useState({ pending_verification: 0, verified: 0, rejected: 0, all: 0 });
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  // The selected status, most recently updated first, 50 at a time. Every
+  // writer sets status and updatedAt (seller form, admin KYC and review routes).
+  const base = useMemo(() => {
+    const col = collection(db, "payoutAccounts");
+    return filter === "all"
+      ? query(col, orderBy("updatedAt", "desc"))
+      : query(col, where("status", "==", filter), orderBy("updatedAt", "desc"));
+  }, [filter]);
+  const paged = usePagedQuery(base, (d) => ({ phone: d.id, ...(d.data() as Omit<PayoutRow, "phone">) }) as PayoutRow);
+  const visible = paged.rows;
+  const loading = paged.loading;
+
+  const loadCounts = useCallback(async () => {
+    const col = collection(db, "payoutAccounts");
+    const count = async (status?: PayoutStatus) =>
+      (await getCountFromServer(status ? query(col, where("status", "==", status)) : col)).data().count;
     try {
-      const snap = await getDocs(collection(db, "payoutAccounts"));
-      setRows(snap.docs.map((d) => ({ phone: d.id, ...(d.data() as Omit<PayoutRow, "phone">) })));
+      const [pending_verification, verified, rejected, all] = await Promise.all([
+        count("pending_verification"), count("verified"), count("rejected"), count(),
+      ]);
+      setCounts({ pending_verification, verified, rejected, all });
     } catch {
-      setRows([]);
-    } finally {
-      setLoading(false);
+      // counts are informational
     }
   }, []);
 
+  const load = useCallback(async () => {
+    await Promise.all([paged.reload(), loadCounts()]);
+  }, [paged.reload, loadCounts]); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
-    void load();
-  }, [load]);
-
-  const counts = useMemo(() => {
-    const c = { pending_verification: 0, verified: 0, rejected: 0 };
-    for (const r of rows) {
-      const s = (r.status ?? "pending_verification") as PayoutStatus;
-      if (s in c) c[s] += 1;
-    }
-    return c;
-  }, [rows]);
-
-  const visible = useMemo(
-    () =>
-      filter === "all"
-        ? rows
-        : rows.filter((r) => (r.status ?? "pending_verification") === filter),
-    [rows, filter],
-  );
+    void loadCounts();
+  }, [loadCounts]);
 
   return (
     <div className="pb-16">
@@ -141,7 +143,7 @@ export default function AdminPayoutsPage() {
             ["pending_verification", `Pending (${counts.pending_verification})`],
             ["verified", `Verified (${counts.verified})`],
             ["rejected", `Rejected (${counts.rejected})`],
-            ["all", `All (${rows.length})`],
+            ["all", `All (${counts.all})`],
           ] as const
         ).map(([value, label]) => (
           <button
@@ -180,6 +182,9 @@ export default function AdminPayoutsPage() {
             <PayoutCard key={r.phone} row={r} onOpen={() => setOpen(r)} />
           ))}
         </div>
+      )}
+      {!loading && (
+        <LoadMore hasMore={paged.hasMore} loading={paged.loadingMore} onClick={() => void paged.loadMore()} />
       )}
 
       {open && (
