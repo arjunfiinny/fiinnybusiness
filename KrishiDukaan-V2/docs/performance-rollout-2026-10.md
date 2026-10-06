@@ -452,9 +452,16 @@ says which steps it needs. Brief: `docs/follow-up-seller-admin-performance.md`.
 - **Website (step 4) and app (step 5) only.** No index, function or rule.
   The app's OR query uses only equality filters, which Firestore serves
   without a composite index.
+- **App dashboard home (`fetchStats`)** read every order the seller ever
+  had to count pending and total orders, and the products through four
+  overlapping queries; it now takes the order counts from the seller stats
+  docs (S5, deploy steps 1–3 first) and reads the products with the same
+  single OR query. The app's engagement totals (`productStats`) read their
+  batches of 30 in parallel.
 - **Check:** website Inventory and Subscription pages show product names;
   app Profile → My listings shows the same products as before (retailer and
-  manufacturer).
+  manufacturer); the app dashboard tiles show the same listing, in-stock,
+  pending and total order numbers.
 
 ## Testing on UAT
 

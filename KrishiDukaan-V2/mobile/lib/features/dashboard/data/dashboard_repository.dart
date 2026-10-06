@@ -84,21 +84,24 @@ class DashboardRepository {
   /// products. Legacy values on the product docs are added by the caller.
   Future<Map<String, int>> fetchProductStatsTotals(List<String> ids) async {
     final totals = {'impressions': 0, 'clicks': 0, 'directionRequests': 0};
-    for (var i = 0; i < ids.length; i += 30) {
-      try {
-        final snap = await _db
+    // 30 ids per query (the whereIn limit), all in parallel.
+    final snaps = await Future.wait([
+      for (var i = 0; i < ids.length; i += 30)
+        _db
             .collection('productStats')
             .where(FieldPath.documentId,
                 whereIn: ids.sublist(i, i + 30 > ids.length ? ids.length : i + 30))
-            .get();
-        for (final doc in snap.docs) {
-          final d = doc.data();
-          for (final field in totals.keys.toList()) {
-            totals[field] = totals[field]! + ((d[field] as num?)?.toInt() ?? 0);
-          }
+            .get()
+            .then<QuerySnapshot<Map<String, dynamic>>?>((s) => s)
+            // Unreadable stats — the caller still shows the legacy counters.
+            .catchError((_) => null),
+    ]);
+    for (final snap in snaps) {
+      for (final doc in snap?.docs ?? const <QueryDocumentSnapshot<Map<String, dynamic>>>[]) {
+        final d = doc.data();
+        for (final field in totals.keys.toList()) {
+          totals[field] = totals[field]! + ((d[field] as num?)?.toInt() ?? 0);
         }
-      } catch (_) {
-        // Unreadable stats — the caller still shows the legacy counters.
       }
     }
     return totals;
@@ -121,50 +124,22 @@ class DashboardRepository {
     // ownerId==uid branch below already covers self-owned docs for both
     // roles (ownerId uniquely identifies one account), so no
     // manufacturerId==uid branch is needed at all.
-    final productFutures = <Future<QuerySnapshot>>[
-      _db
-          .collection('products')
-          .where('retailerPhone', isEqualTo: sellerPhone)
-          .get(),
-      _db
-          .collection('products')
-          .where('manufacturerPhone', isEqualTo: sellerPhone)
-          .where('ownerType', isEqualTo: 'manufacturer')
-          .get(),
-      if (uid.isNotEmpty)
-        _db.collection('products').where('retailerId', isEqualTo: uid).get(),
-      if (uid.isNotEmpty)
-        _db.collection('products').where('ownerId', isEqualTo: uid).get(),
-    ];
-    final orderFutures = <Future<QuerySnapshot>>[
-      _db
-          .collection('orders')
-          .where('sellerPhone', isEqualTo: sellerPhone)
-          .get(),
-      if (uid.isNotEmpty)
-        _db.collection('orders').where('sellerId', isEqualTo: uid).get(),
-    ];
+    // One OR query (each product read once), and the order counts from the
+    // seller's stats docs instead of every order the seller ever had.
+    final productFilter = _myProductsFilter(sellerPhone, uid);
+    final productsFuture = productFilter == null
+        ? Future.value(<QueryDocumentSnapshot<Map<String, dynamic>>>[])
+        : _db.collection('products').where(productFilter).get().then((s) => s.docs);
+    final totalsFuture = fetchSellerOrderTotals(sellerPhone);
 
-    final productResults = await Future.wait(productFutures);
-    final orderResults = await Future.wait(orderFutures);
-
-    final seen = <String>{};
-    final allProducts = productResults
-        .expand((s) => s.docs)
-        .where((d) => seen.add(d.id))
-        .toList();
-
-    final seenOrders = <String>{};
-    final allOrders = orderResults
-        .expand((s) => s.docs)
-        .where((d) => seenOrders.add(d.id))
-        .toList();
+    final allProducts = await productsFuture;
+    final totals = await totalsFuture;
 
     return {
       'totalListings': allProducts.length,
       'inStock': allProducts.where(_isDocInStock).length,
-      'pendingOrders': allOrders.where((d) => d['status'] == 'placed').length,
-      'totalOrders': allOrders.length,
+      'pendingOrders': totals.countOf('placed'),
+      'totalOrders': totals.count,
     };
   }
 
@@ -228,25 +203,11 @@ class DashboardRepository {
   Stream<List<ListingModel>> watchMyListings(String sellerPhone) {
     final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
 
-    final productMatches = <Filter>[
-      if (sellerPhone.isNotEmpty) Filter('retailerPhone', isEqualTo: sellerPhone),
-      if (sellerPhone.isNotEmpty)
-        Filter.and(
-          Filter('manufacturerPhone', isEqualTo: sellerPhone),
-          Filter('ownerType', isEqualTo: 'manufacturer'),
-        ),
-      if (uid.isNotEmpty) Filter('retailerId', isEqualTo: uid),
-      if (uid.isNotEmpty) Filter('ownerId', isEqualTo: uid),
-    ];
+    final productFilter = _myProductsFilter(sellerPhone, uid);
 
     final streams = <Stream<QuerySnapshot>>[
-      if (productMatches.length == 1)
-        _db.collection('products').where(productMatches.single).snapshots()
-      else if (productMatches.length > 1)
-        _db
-            .collection('products')
-            .where(_anyOf(productMatches))
-            .snapshots(),
+      if (productFilter != null)
+        _db.collection('products').where(productFilter).snapshots(),
       _db
           .collection('listings')
           .where('sellerPhone', isEqualTo: sellerPhone)
@@ -280,6 +241,23 @@ class DashboardRepository {
       }
     };
     return controller.stream;
+  }
+
+  /// The seller's own products (see watchMyListings for the fields), as one
+  /// filter for an OR query; null when there is nothing to match.
+  static Filter? _myProductsFilter(String sellerPhone, String uid) {
+    final matches = <Filter>[
+      if (sellerPhone.isNotEmpty) Filter('retailerPhone', isEqualTo: sellerPhone),
+      if (sellerPhone.isNotEmpty)
+        Filter.and(
+          Filter('manufacturerPhone', isEqualTo: sellerPhone),
+          Filter('ownerType', isEqualTo: 'manufacturer'),
+        ),
+      if (uid.isNotEmpty) Filter('retailerId', isEqualTo: uid),
+      if (uid.isNotEmpty) Filter('ownerId', isEqualTo: uid),
+    ];
+    if (matches.isEmpty) return null;
+    return matches.length == 1 ? matches.single : _anyOf(matches);
   }
 
   /// Filter.or over a list (it takes up to 30 positional filters).
