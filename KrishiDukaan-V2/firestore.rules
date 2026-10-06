@@ -1104,6 +1104,13 @@ service cloud.firestore {
       allow read: if isAdmin();
     }
 
+    // Per-day platform totals (orders, subscriptions, payments, sign-ups,
+    // products added) kept by the platformStatsOn* functions for Admin →
+    // Analytics. Written only by the Admin SDK.
+    match /platformDailyStats/{date} {
+      allow read: if isAdmin();
+    }
+
     // Retention cohort summaries written by the CF.
     match /retention/{cohortDay} {
       allow read: if isAdmin();

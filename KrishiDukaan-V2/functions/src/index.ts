@@ -56,6 +56,14 @@ export {
   redeemErpHandoffCode,
 } from "./erp-bridge";
 export { onActiveUserPresence } from "./analytics/activity";
+export {
+  platformStatsOnOrderWrite,
+  platformStatsOnSubscriptionWrite,
+  platformStatsOnPaymentAttemptWrite,
+  platformStatsOnUserWrite,
+  platformStatsOnProductCreate,
+  platformStatsOnProductDelete,
+} from "./stats/platform-daily";
 
 admin.initializeApp();
 const db = admin.firestore();

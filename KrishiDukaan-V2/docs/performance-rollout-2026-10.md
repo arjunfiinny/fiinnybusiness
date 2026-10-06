@@ -224,6 +224,7 @@ says which steps it needs. Brief: `docs/follow-up-seller-admin-performance.md`.
 | S1 | "Add product" name search (retailers, manufacturers, admins) reads cards | Every product (~4,222 reads, a few MB) on each typing pause | A name prefix query on `marketplaceCards` plus name tokens on `marketplaceSearch`: at most ~45 small reads (usually 10-20), plus 1 product read when a suggestion is picked |
 | S2 | Admin WhatsApp inbox pages conversations | Live listeners on **all** of `waIncomingMessages` and `waConversations`: every message ever on open, and the whole set again on every new message; full message contents logged to the browser console | The newest 50 conversations (live), 50 more per "Load more"; messages only for the open chat (newest 100, "Load earlier"); no message content in the console |
 | S3 | Manufacturer network map and a retailer's assigned products | One `retailers/{id}` read per retailer (200 retailers = 200 reads, one trip each); one product read per assigned listing | Addresses and locations from the store directory (1–2 reads), the mirror doc filling gaps; assigned products in parallel queries of 30 |
+| S4a | Admin Overview product count; Admin Analytics | Overview read every product (~4,222) to count them. Analytics read every order, subscription, payment attempt and new user in the window ("All time" = whole collections) on each tab open | Overview: 2 count reads on `marketplaceCards`. Analytics: one small `platformDailyStats` doc per day with activity, kept by Cloud Functions |
 
 ### S1. Add-product search
 
@@ -285,6 +286,44 @@ says which steps it needs. Brief: `docs/follow-up-seller-admin-performance.md`.
 - **Check:** a manufacturer's Company page and Admin → Companies → a
   manufacturer: the network map shows the same pins and addresses as before;
   a retailer's assigned products list shows names, prices and photos.
+
+### S4a. Overview and Analytics
+
+- **Rules and indexes (step 1):** admins can read `platformDailyStats`.
+  Indexes `subscriptions` (`ownerPhone`, `createdAt`) and (`ownerId`,
+  `createdAt`), for the renewal check.
+- **Functions (step 2):** `platformStatsOnOrderWrite`,
+  `platformStatsOnSubscriptionWrite`, `platformStatsOnPaymentAttemptWrite`,
+  `platformStatsOnUserWrite`, `platformStatsOnProductCreate`,
+  `platformStatsOnProductDelete` (all `asia-south1`). They keep
+  `platformDailyStats/{YYYY-MM-DD}` (India dates): orders (count, GMV with the
+  `grandTotal ?? total ?? subtotal+delivery+GST` fallback, platform fee, count
+  per status), subscriptions (count, paid and manual revenue, seats,
+  renewals), payment attempts (paid, failed, unfinished, failed amount), new
+  users per role, products added. Each change is applied exactly once (a
+  marker per event in `statsEvents`).
+- **Optional:** let Firestore delete old markers automatically:
+
+  ```
+  gcloud firestore fields ttls update expireAt --collection-group=statsEvents --enable-ttl --project krishidukan-e8315
+  ```
+
+- **Script (step 3, after functions):** builds the history; re-run any time
+  to correct drift (it rewrites each day from the source docs):
+
+  ```
+  cd functions
+  npx tsx scripts/backfill-platform-daily-stats.ts --project krishidukan-e8315           # preview
+  npx tsx scripts/backfill-platform-daily-stats.ts --project krishidukan-e8315 --write
+  ```
+
+- **Differences:** "Renewals" now means subscriptions in the window whose
+  owner already had an earlier subscription (before, only repeats inside the
+  window counted; "All time" is unchanged). "All time" GMV leaves out orders
+  without a `createdAt` (the date-range views already did).
+- **Check:** Admin → Overview product count equals the Market's "Showing N
+  products"; Admin → Analytics, each tab, "All time", "Last 30 days" and a
+  single day: numbers match a note of the old page taken before the deploy.
 
 ## Testing on UAT
 
