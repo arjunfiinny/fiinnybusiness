@@ -1427,6 +1427,24 @@
           "order": "ASCENDING"
         }
       ]
+    },
+    {
+      "collectionGroup": "marketplaceSearch",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "nameKeywords",
+          "arrayConfig": "CONTAINS"
+        },
+        {
+          "fieldPath": "nameKey",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "__name__",
+          "order": "ASCENDING"
+        }
+      ]
     }
   ],
   "fieldOverrides": [

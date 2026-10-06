@@ -66,8 +66,9 @@ from Firebase console → Storage → Rules as `storage.rules` to use the script
   console after 30 Sep, compare with `firestore.rules` first.
 
 Then open Firebase console → Firestore → Indexes and wait until **every** index
-shows **Enabled** (minutes): the three new `marketplaceCards` /
-`marketplaceSearch` ones, `users` (`role`, `name`) for @-tagging, and the
+shows **Enabled** (minutes): the four new `marketplaceCards` /
+`marketplaceSearch` ones (the fourth, `nameKeywords` + `nameKey`, is for the
+sellers' add-product search; see "Seller, manufacturer and admin side" below), `users` (`role`, `name`) for @-tagging, and the
 `waNotifications` index (`status`,
 `createdAt` ↓, `retryCount`) from Sai's 30 Sep change, which the WhatsApp retry
 job in step 2 needs. Deploying functions before it is ready makes that job fail
@@ -211,6 +212,40 @@ console, note the bucket's location (Storage → Files): if it is not
 firebase functions:delete ssrkrishidukane8315 --region us-central1 --project prod
 firebase functions:delete ssrkrishidukanadmin --region us-central1 --project prod
 ```
+
+## Seller, manufacturer and admin side (follow-up on this branch)
+
+Same branch, same deploy order: rules and indexes in step 1, functions in
+step 2, scripts in step 3, website in step 4, app in step 5. Each item below
+says which steps it needs. Brief: `docs/follow-up-seller-admin-performance.md`.
+
+| # | Change | Before | After |
+|---|---|---|---|
+| S1 | "Add product" name search (retailers, manufacturers, admins) reads cards | Every product (~4,222 reads, a few MB) on each typing pause | A name prefix query on `marketplaceCards` plus name tokens on `marketplaceSearch`: at most ~45 small reads (usually 10-20), plus 1 product read when a suggestion is picked |
+
+### S1. Add-product search
+
+- **Index (step 1):** `marketplaceSearch` (`nameKeywords` array-contains,
+  `nameKey` ↑).
+- **Function (step 2):** the card builder now also writes `nameKeywords` (the
+  product name's own search words) on each `marketplaceSearch` doc, so
+  description and shop-name matches can't crowd name matches out.
+- **Script (step 3):** the card backfill writes `nameKeywords` on every
+  search doc; run it after the functions deploy as written. If cards were
+  already backfilled (e.g. on UAT) before this change, run the backfill again
+  (or wait for the nightly repair, which rewrites any card whose content
+  changed).
+- **Website (step 4):** suggestions come from cards; the picked product's own
+  doc is read once to autofill exact sizes and prices (cards merge sizes
+  across sellers). The chosen id is the card's canonical product, which is the
+  `manufacturer_inventory` product whenever one exists, as before.
+- **Difference:** products without a photo or price, inactive products, and
+  products that exist only as retailer copies have no card, so they are no
+  longer suggested. Same-name products in different categories now show as
+  one suggestion (the card).
+- **Check:** in a retailer's and a manufacturer's dashboard, Add product:
+  type `ure`, `urea`, `neem oil`; pick a suggestion; the form fills in sizes,
+  photos and NPK as before.
 
 ## Testing on UAT
 
