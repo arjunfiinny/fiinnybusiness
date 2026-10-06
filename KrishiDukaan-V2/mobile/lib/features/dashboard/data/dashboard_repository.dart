@@ -212,49 +212,46 @@ class DashboardRepository {
   }
 
   /// Streams the seller's own products.
-  /// Queries by retailerPhone, retailerId (legacy), and ownerId (web new schema)
+  /// Matches retailerPhone, retailerId (legacy), and ownerId (web new schema)
   /// so products created via web or mobile both appear.
   ///
   /// manufacturerPhone is scoped to ownerType=='manufacturer' — see the
   /// comment on fetchStats above for why an unscoped match pulls in every
   /// retailer's copy of this seller's assigned products. No manufacturerId==
-  /// uid stream is needed: the plain ownerId==uid stream below already
-  /// covers self-owned docs (ownerId uniquely identifies one account).
+  /// uid match is needed: ownerId==uid already covers self-owned docs
+  /// (ownerId uniquely identifies one account).
+  ///
+  /// The product matches run as ONE OR query, so a product carrying several
+  /// of these fields (a retailer's own product usually has retailerPhone,
+  /// retailerId and ownerId) is read once, not once per listener. The legacy
+  /// `listings` collection keeps its own listener.
   Stream<List<ListingModel>> watchMyListings(String sellerPhone) {
     final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
 
+    final productMatches = <Filter>[
+      if (sellerPhone.isNotEmpty) Filter('retailerPhone', isEqualTo: sellerPhone),
+      if (sellerPhone.isNotEmpty)
+        Filter.and(
+          Filter('manufacturerPhone', isEqualTo: sellerPhone),
+          Filter('ownerType', isEqualTo: 'manufacturer'),
+        ),
+      if (uid.isNotEmpty) Filter('retailerId', isEqualTo: uid),
+      if (uid.isNotEmpty) Filter('ownerId', isEqualTo: uid),
+    ];
+
     final streams = <Stream<QuerySnapshot>>[
-      _db
-          .collection('products')
-          .where('retailerPhone', isEqualTo: sellerPhone)
-          .snapshots(),
-      _db
-          .collection('products')
-          .where('manufacturerPhone', isEqualTo: sellerPhone)
-          .where('ownerType', isEqualTo: 'manufacturer')
-          .snapshots(),
+      if (productMatches.length == 1)
+        _db.collection('products').where(productMatches.single).snapshots()
+      else if (productMatches.length > 1)
+        _db
+            .collection('products')
+            .where(_anyOf(productMatches))
+            .snapshots(),
       _db
           .collection('listings')
           .where('sellerPhone', isEqualTo: sellerPhone)
           .snapshots(),
     ];
-    if (uid.isNotEmpty) {
-      streams.add(
-        _db
-            .collection('products')
-            .where('retailerId', isEqualTo: uid)
-            .snapshots(),
-      );
-      streams.add(
-        _db.collection('products').where('ownerId', isEqualTo: uid).snapshots(),
-      );
-    }
-
-    if (streams.length == 1) {
-      return streams[0].map(
-        (s) => s.docs.map(ListingModel.fromFirestore).toList(),
-      );
-    }
 
     final controller = StreamController<List<ListingModel>>();
     final results = List<List<DocumentSnapshot>>.filled(streams.length, []);
@@ -283,6 +280,19 @@ class DashboardRepository {
       }
     };
     return controller.stream;
+  }
+
+  /// Filter.or over a list (it takes up to 30 positional filters).
+  static Filter _anyOf(List<Filter> f) {
+    assert(f.length >= 2 && f.length <= 4);
+    switch (f.length) {
+      case 2:
+        return Filter.or(f[0], f[1]);
+      case 3:
+        return Filter.or(f[0], f[1], f[2]);
+      default:
+        return Filter.or(f[0], f[1], f[2], f[3]);
+    }
   }
 
   Future<void> addListing({

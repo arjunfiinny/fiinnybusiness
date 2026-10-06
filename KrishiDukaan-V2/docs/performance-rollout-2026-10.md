@@ -229,6 +229,7 @@ says which steps it needs. Brief: `docs/follow-up-seller-admin-performance.md`.
 | S4c | Admin tables: Users, Team, Companies, Reports, Subscriptions, Products, Orders | The shared cache downloaded all users, all products, all subscriptions and all orders (10 min), on every Refresh, and again for any search or filter | 50 rows at a time with filters in the query; searches are a few small queries (name, shop, email prefixes; exact phone, ID, invoice, Razorpay ID); totals from count/sum queries; "Export" downloads everything only when clicked |
 | S5 | Seller dashboard Home and Analytics (website) | Every order the seller ever had (up to 12 overlapping queries), every follower and reel, and the seller's products up to 30 times over (5 owner fields × each id form); Home loaded the products twice | Two small stats docs per seller id plus one doc per day with orders in the chosen window; follower count and reel sums from count/sum queries; Home reuses its product list |
 | S6 | Order and enquiry lists (website seller Orders; app seller Orders, manufacturer hub, my Orders, Enquiries, Analytics) | Every order (website: every id form × 2 fields; app: 3 live listeners each, one always refused by the rules) and every enquiry, live, no limit | Newest 30 per query, merged in date order; app: live listener on the first page only, "Load more" reads older pages once; tab counts and paid totals from the seller stats docs; app Analytics reads only the chosen window |
+| S7 | Product-name lookups (website inventory and subscription pages); app "My listings" | Batches of 10 or 30 read one after another; app: 5 live listeners over the seller's products, most products read 2-3 times | Batches of 30 in parallel; app: one OR query over the products (each read once) plus the legacy `listings` listener |
 
 ### S1. Add-product search
 
@@ -445,6 +446,15 @@ says which steps it needs. Brief: `docs/follow-up-seller-admin-performance.md`.
   older orders", accept an order and see it move; a new order appears at
   the top live in the app; my Orders and Enquiries load more; hub tiles
   show all-time numbers.
+
+### S7. Small fixes
+
+- **Website (step 4) and app (step 5) only.** No index, function or rule.
+  The app's OR query uses only equality filters, which Firestore serves
+  without a composite index.
+- **Check:** website Inventory and Subscription pages show product names;
+  app Profile → My listings shows the same products as before (retailer and
+  manufacturer).
 
 ## Testing on UAT
 
