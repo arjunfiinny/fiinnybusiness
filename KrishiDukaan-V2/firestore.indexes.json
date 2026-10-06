@@ -1445,6 +1445,52 @@
           "order": "ASCENDING"
         }
       ]
+    },
+    {
+      "collectionGroup": "waConversations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "hasIncoming",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "lastMessageAt",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "waConversations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "hasIncoming",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "lastMessageAt",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "waIncomingMessages",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "phone",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "timestamp",
+          "order": "DESCENDING"
+        }
+      ]
     }
   ],
   "fieldOverrides": [

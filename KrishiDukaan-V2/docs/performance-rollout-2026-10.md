@@ -222,6 +222,7 @@ says which steps it needs. Brief: `docs/follow-up-seller-admin-performance.md`.
 | # | Change | Before | After |
 |---|---|---|---|
 | S1 | "Add product" name search (retailers, manufacturers, admins) reads cards | Every product (~4,222 reads, a few MB) on each typing pause | A name prefix query on `marketplaceCards` plus name tokens on `marketplaceSearch`: at most ~45 small reads (usually 10-20), plus 1 product read when a suggestion is picked |
+| S2 | Admin WhatsApp inbox pages conversations | Live listeners on **all** of `waIncomingMessages` and `waConversations`: every message ever on open, and the whole set again on every new message; full message contents logged to the browser console | The newest 50 conversations (live), 50 more per "Load more"; messages only for the open chat (newest 100, "Load earlier"); no message content in the console |
 
 ### S1. Add-product search
 
@@ -246,6 +247,34 @@ says which steps it needs. Brief: `docs/follow-up-seller-admin-performance.md`.
 - **Check:** in a retailer's and a manufacturer's dashboard, Add product:
   type `ure`, `urea`, `neem oil`; pick a suggestion; the form fills in sizes,
   photos and NPK as before.
+
+### S2. Admin WhatsApp inbox
+
+- **Indexes (step 1):** `waConversations` (`hasIncoming`, `lastMessageAt` ↓)
+  and (`hasIncoming`, `status`, `lastMessageAt` ↓); `waIncomingMessages`
+  (`phone`, `timestamp` ↓).
+- **Function (step 2):** the functions webhook (`webhookReceiver`) now also
+  updates `waConversations/{phone}` (unread count, last message, status), as
+  the website's webhook already did. Every writer (both webhooks, Send, Send
+  document, payment-failed templates) now sets `lastMessageAt`; incoming ones
+  also set `hasIncoming: true`.
+- **Script (step 3, after functions):** fills the new fields on old docs and
+  creates a conversation doc for any phone that has messages but no doc:
+
+  ```
+  cd functions
+  npx tsx scripts/backfill-wa-inbox.ts --project krishidukan-e8315           # preview
+  npx tsx scripts/backfill-wa-inbox.ts --project krishidukan-e8315 --write
+  ```
+
+  Safe to re-run; a second run reports 0 changes.
+- **Website (step 4):** the inbox reads only the pages it shows. Search
+  filters the loaded conversations; typing a full phone number also opens a
+  conversation that isn't loaded yet (1 read). Unknown numbers are looked up
+  once per visit instead of on every new message.
+- **Check:** Admin → WhatsApp: the list shows the newest conversations with
+  unread counts; Open/Resolved tabs; "Load more"; open a chat, send a reply,
+  it moves to the top; a new incoming message shows up live.
 
 ## Testing on UAT
 

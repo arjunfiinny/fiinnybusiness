@@ -4539,7 +4539,6 @@ export async function resolveWaUserByPhone(phone: string): Promise<WaResolvedUse
     tenDigit,       // "9876543210" — 10-digit for admin-pre-created accounts
   ]));
 
-  console.log(`[WA Resolve] phone="${phone}" candidates:`, candidates);
 
   for (const p of candidates) {
     const userSnap = await getDoc(doc(db, "users", p));
@@ -4551,7 +4550,6 @@ export async function resolveWaUserByPhone(phone: string): Promise<WaResolvedUse
         businessName: d.shopName || d.businessName || "",
         role: normalizeWaRole(rawRole),
       };
-      console.log(`[WA Resolve] HIT users/${p} → name="${result.name}" role="${rawRole}"→"${result.role}"`);
       return result;
     }
   }
@@ -4565,7 +4563,6 @@ export async function resolveWaUserByPhone(phone: string): Promise<WaResolvedUse
         businessName: d.shopName || d.businessName || "",
         role: "retailer",
       };
-      console.log(`[WA Resolve] HIT retailers/${p} → name="${result.name}"`);
       return result;
     }
   }
@@ -4579,12 +4576,10 @@ export async function resolveWaUserByPhone(phone: string): Promise<WaResolvedUse
         businessName: d.businessName || d.shopName || "",
         role: "manufacturer",
       };
-      console.log(`[WA Resolve] HIT manufacturers/${p} → name="${result.name}"`);
       return result;
     }
   }
 
-  console.log(`[WA Resolve] MISS — no document found for any candidate`);
   return null;
 }
 
