@@ -228,6 +228,7 @@ says which steps it needs. Brief: `docs/follow-up-seller-admin-performance.md`.
 | S4b | Admin lists: Messages, Moderation, Payments, Payouts, Sales team, WhatsApp templates | Whole `contactMessages`, `contentReports`, `payoutAccounts`, `dealerVisits`, `dealers`, `uidIndex`, `retailerSeatListings` collections, all users for template audiences, the newest 500 payment attempts | 50 rows at a time, newest first, filters in the query, totals from count/sum queries; template audiences read sellers only and look up their subscriptions, seats and KYC docs by id |
 | S4c | Admin tables: Users, Team, Companies, Reports, Subscriptions, Products, Orders | The shared cache downloaded all users, all products, all subscriptions and all orders (10 min), on every Refresh, and again for any search or filter | 50 rows at a time with filters in the query; searches are a few small queries (name, shop, email prefixes; exact phone, ID, invoice, Razorpay ID); totals from count/sum queries; "Export" downloads everything only when clicked |
 | S5 | Seller dashboard Home and Analytics (website) | Every order the seller ever had (up to 12 overlapping queries), every follower and reel, and the seller's products up to 30 times over (5 owner fields × each id form); Home loaded the products twice | Two small stats docs per seller id plus one doc per day with orders in the chosen window; follower count and reel sums from count/sum queries; Home reuses its product list |
+| S6 | Order and enquiry lists (website seller Orders; app seller Orders, manufacturer hub, my Orders, Enquiries, Analytics) | Every order (website: every id form × 2 fields; app: 3 live listeners each, one always refused by the rules) and every enquiry, live, no limit | Newest 30 per query, merged in date order; app: live listener on the first page only, "Load more" reads older pages once; tab counts and paid totals from the seller stats docs; app Analytics reads only the chosen window |
 
 ### S1. Add-product search
 
@@ -418,6 +419,32 @@ says which steps it needs. Brief: `docs/follow-up-seller-admin-performance.md`.
 - **Check:** a seller's dashboard Home tiles and Analytics (Week, Month,
   Year, a custom range) show the same order totals, revenue chart, status
   counts, top products, followers and reel numbers as before the deploy.
+
+### S6. Order and enquiry lists
+
+- **Indexes (step 1):** `orders` (`sellerId`, `createdAt` ↓), (`sellerId`,
+  `status`, `createdAt` ↓), (`customerId`, `createdAt` ↓); `enquiries`
+  (`sellerPhones` array-contains, `createdAt` ↓).
+- **Function (step 2):** `sellerStatsOnOrderWrite` (S5) now also counts
+  orders paid online and their amount. If S5 was already backfilled, run its
+  script again after this deploy.
+- **Website (step 4):** the seller Orders page loads 30 at a time per tab;
+  tab counts and paid totals are all-time (stats docs).
+- **App (step 5):** seller Orders, manufacturer hub, my Orders and
+  Enquiries: the newest 30 per query are live, "Load more" at the end of
+  the list. The hub's pending count and revenue and the Orders tab counts
+  come from the stats docs (revenue now leaves out cancelled orders as well
+  as rejected ones, as the website always did). Analytics reads only the
+  orders in the selected window. Older app versions keep their unlimited
+  listeners until they update; nothing they read changed.
+- **Not paged:** the app's Payouts screen (earnings) still reads every
+  order the seller has, because its "paid out", "on hold" and "due" totals
+  need each paid order; it lost its always-refused third listener. Keeping
+  those totals on the server is a follow-up.
+- **Check:** website and app seller Orders: newest first, each tab, "Load
+  older orders", accept an order and see it move; a new order appears at
+  the top live in the app; my Orders and Enquiries load more; hub tiles
+  show all-time numbers.
 
 ## Testing on UAT
 

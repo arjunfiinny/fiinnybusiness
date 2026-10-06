@@ -16,6 +16,7 @@ import '../../../core/providers/user_provider.dart';
 import '../../../core/utils/currency_utils.dart';
 import '../../../core/widgets/empty_state.dart';
 import '../../../core/widgets/error_view.dart';
+import '../../../core/widgets/load_more_tile.dart';
 import '../data/dashboard_repository.dart';
 import '../data/order_offers_repository.dart';
 import '../providers/dashboard_provider.dart';
@@ -74,6 +75,8 @@ class _SellerOrdersBodyState extends ConsumerState<_SellerOrdersBody> {
   @override
   Widget build(BuildContext context) {
     final ordersAsync = ref.watch(sellerOrdersProvider(widget.sellerPhone));
+    // All-time counts from the seller's stats docs; the loaded rows until then.
+    final totals = ref.watch(sellerOrderTotalsProvider(widget.sellerPhone)).value;
     // Never errors (the repository resolves failures to an empty list), so an
     // unreadable offers path can't take the real orders list down with it.
     final offers =
@@ -92,6 +95,7 @@ class _SellerOrdersBodyState extends ConsumerState<_SellerOrdersBody> {
             icon: const Icon(Icons.refresh, color: Colors.white),
             onPressed: () {
               ref.invalidate(sellerOrdersProvider(widget.sellerPhone));
+              ref.invalidate(sellerOrderTotalsProvider(widget.sellerPhone));
               ref.invalidate(openOrderOffersProvider(widget.sellerPhone));
             },
           ),
@@ -105,18 +109,23 @@ class _SellerOrdersBodyState extends ConsumerState<_SellerOrdersBody> {
           return ErrorView(message: 'Could not load orders: $err');
         },
         data: (orders) {
-          // Count statuses
-          final total = orders.length;
-          final placedCount = orders.where((o) => o.status == 'placed').length;
-          final acceptedCount = orders.where((o) => o.status == 'accepted').length;
-          final dispatchedCount = orders.where((o) => o.status == 'dispatched').length;
-          final outForDeliveryCount =
-              orders.where((o) => o.status == 'out_for_delivery').length;
-          final deliveredCount = orders.where((o) => o.status == 'delivered').length;
-          final rejectedCount = orders.where((o) => o.status == 'rejected').length;
+          // Count statuses: all-time totals when the stats docs have them,
+          // else the loaded orders.
+          final useTotals = totals != null && totals.count > 0;
+          int countOf(String s) => useTotals
+              ? totals.countOf(s)
+              : orders.where((o) => o.status == s).length;
+          final total = useTotals ? totals.count : orders.length;
+          final placedCount = countOf('placed');
+          final acceptedCount = countOf('accepted');
+          final dispatchedCount = countOf('dispatched');
+          final outForDeliveryCount = countOf('out_for_delivery');
+          final deliveredCount = countOf('delivered');
+          final rejectedCount = countOf('rejected');
 
-          final paidOrders = orders.where((o) => o.payment?.status == 'paid').toList();
-          final paidOrdersCount = paidOrders.length;
+          final paidOrdersCount = useTotals
+              ? totals.paid
+              : orders.where((o) => o.payment?.status == 'paid').length;
 
           final filteredOrders = _activeFilter == 'all'
               ? orders
@@ -169,17 +178,33 @@ class _SellerOrdersBodyState extends ConsumerState<_SellerOrdersBody> {
                 Expanded(
                   child: filteredOrders.isEmpty
                       ? Center(
-                          child: Text(
-                            'No orders in this category',
-                            style: AppTextStyles.body.copyWith(
-                              color: AppColors.onSurfaceVariant,
-                            ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                'No orders in this category',
+                                style: AppTextStyles.body.copyWith(
+                                  color: AppColors.onSurfaceVariant,
+                                ),
+                              ),
+                              // Older orders may still be in this category.
+                              LoadMoreTile(
+                                feed: ref.read(sellerOrdersFeedProvider(widget.sellerPhone)),
+                                label: 'Load older orders',
+                              ),
+                            ],
                           ),
                         )
                       : ListView.builder(
                           padding: const EdgeInsets.only(left: 16, right: 16, bottom: 16),
-                          itemCount: filteredOrders.length,
-                          itemBuilder: (_, i) => _SellerOrderCard(
+                          // The newest 30 are live; "Load more" reads older ones.
+                          itemCount: filteredOrders.length + 1,
+                          itemBuilder: (_, i) => i == filteredOrders.length
+                              ? LoadMoreTile(
+                                  feed: ref.read(sellerOrdersFeedProvider(widget.sellerPhone)),
+                                  label: 'Load older orders',
+                                )
+                              : _SellerOrderCard(
                             order: filteredOrders[i],
                             sellerName: widget.sellerName,
                             sellerPhone: widget.sellerPhone,
@@ -317,8 +342,14 @@ class _SellerOrdersBodyState extends ConsumerState<_SellerOrdersBody> {
 
   Widget _buildPaymentsView(List<OrderModel> orders) {
     final paidOrders = orders.where((o) => o.payment?.status == 'paid').toList();
-    final paidOrdersCount = paidOrders.length;
-    final totalRevenue = paidOrders.fold<double>(0.0, (sum, o) => sum + (o.payment?.amount ?? 0.0));
+    // All-time figures from the seller's stats docs; the loaded orders until then.
+    final totals = ref.watch(sellerOrderTotalsProvider(widget.sellerPhone)).value;
+    final useTotals = totals != null && totals.count > 0;
+    final paidOrdersCount = useTotals ? totals.paid : paidOrders.length;
+    final allOrdersCount = useTotals ? totals.count : orders.length;
+    final totalRevenue = useTotals
+        ? totals.paidAmount
+        : paidOrders.fold<double>(0.0, (sum, o) => sum + (o.payment?.amount ?? 0.0));
 
     return ListView(
       padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -408,7 +439,7 @@ class _SellerOrdersBodyState extends ConsumerState<_SellerOrdersBody> {
                           ),
                           const SizedBox(height: 2),
                           Text(
-                            '$paidOrdersCount / ${orders.length}',
+                            '$paidOrdersCount / $allOrdersCount',
                             style: AppTextStyles.heading3.copyWith(
                               color: AppColors.primary,
                               fontWeight: FontWeight.bold,
@@ -441,6 +472,10 @@ class _SellerOrdersBodyState extends ConsumerState<_SellerOrdersBody> {
               return _PaymentCard(order: order);
             },
           ),
+        LoadMoreTile(
+          feed: ref.read(sellerOrdersFeedProvider(widget.sellerPhone)),
+          label: 'Load older orders',
+        ),
       ],
     );
   }

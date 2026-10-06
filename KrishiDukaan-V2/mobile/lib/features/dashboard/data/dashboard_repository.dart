@@ -2,12 +2,12 @@ import 'dart:async';
 import 'dart:developer' as dev;
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 
+import '../../../core/data/paged_feed.dart';
 import '../../../core/models/listing_model.dart';
 import '../../../core/models/order_model.dart';
 import '../../../core/models/subscription_model.dart';
@@ -27,6 +27,51 @@ class SeatStats {
     required this.available,
     this.expiringSoon = 0,
   });
+}
+
+/// A seller's all-time order totals (see fetchSellerOrderTotals).
+class SellerOrderTotals {
+  final int count;
+  final double revenue;
+  final int paid;
+  final double paidAmount;
+  final Map<String, int> status;
+
+  const SellerOrderTotals({
+    this.count = 0,
+    this.revenue = 0,
+    this.paid = 0,
+    this.paidAmount = 0,
+    this.status = const {},
+  });
+
+  factory SellerOrderTotals.fromMap(Map<dynamic, dynamic> m) {
+    final status = <String, int>{};
+    final raw = m['status'];
+    if (raw is Map) {
+      raw.forEach((k, v) => status['$k'] = (v as num?)?.toInt() ?? 0);
+    }
+    return SellerOrderTotals(
+      count: (m['count'] as num?)?.toInt() ?? 0,
+      revenue: (m['revenue'] as num?)?.toDouble() ?? 0,
+      paid: (m['paid'] as num?)?.toInt() ?? 0,
+      paidAmount: (m['paidAmount'] as num?)?.toDouble() ?? 0,
+      status: status,
+    );
+  }
+
+  SellerOrderTotals operator +(SellerOrderTotals o) => SellerOrderTotals(
+        count: count + o.count,
+        revenue: revenue + o.revenue,
+        paid: paid + o.paid,
+        paidAmount: paidAmount + o.paidAmount,
+        status: {
+          for (final k in {...status.keys, ...o.status.keys})
+            k: (status[k] ?? 0) + (o.status[k] ?? 0),
+        },
+      );
+
+  int countOf(String s) => status[s] ?? 0;
 }
 
 class DashboardRepository {
@@ -1146,105 +1191,84 @@ class DashboardRepository {
 
   // ── Seller orders ─────────────────────────────────────────────────────────
 
-  Stream<List<OrderModel>> watchSellerOrders(String sellerPhone) {
+  /// The seller's orders, newest first, 30 at a time per query: live for the
+  /// first page, [PagedFeed.loadMore] for older ones. Orders are filed under
+  /// `sellerPhone` (app) or the seller's Auth UID in `sellerId` (older web
+  /// orders). `sellerId == phone` is not queried: the rules only allow
+  /// `sellerId == uid`, so that listener was always refused.
+  PagedFeed<OrderModel> sellerOrdersFeed(String sellerPhone) {
     final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
-
-    final streams = <Stream<QuerySnapshot>>[
-      _db
-          .collection('orders')
-          .where('sellerPhone', isEqualTo: sellerPhone)
-          .snapshots(),
-    ];
-    if (uid.isNotEmpty) {
-      streams.add(
-        _db.collection('orders').where('sellerId', isEqualTo: uid).snapshots(),
-      );
-    }
-    // Include bySellerId = sellerPhone for legacy support
-    streams.add(
-      _db
-          .collection('orders')
-          .where('sellerId', isEqualTo: sellerPhone)
-          .snapshots(),
+    final orders = _db.collection('orders');
+    return PagedFeed<OrderModel>(
+      queries: [
+        if (sellerPhone.isNotEmpty) orders.where('sellerPhone', isEqualTo: sellerPhone),
+        if (uid.isNotEmpty) orders.where('sellerId', isEqualTo: uid),
+      ],
+      map: OrderModel.fromFirestore,
     );
+  }
 
-    final controller = StreamController<List<OrderModel>>();
-    final results = List<List<DocumentSnapshot>>.filled(streams.length, []);
-
-    void emit() {
-      try {
-        final seen = <String>{};
-        final merged = results
-            .expand((docs) => docs)
-            .where((d) => seen.add(d.id))
-            .toList();
-
-        merged.sort((a, b) {
-          try {
-            final dataA = a.data() as Map<String, dynamic>? ?? {};
-            final dataB = b.data() as Map<String, dynamic>? ?? {};
-
-            final rawA = dataA['createdAt'];
-            final rawB = dataB['createdAt'];
-
-            int timeA = 0;
-            if (rawA is Timestamp) {
-              timeA = rawA.millisecondsSinceEpoch;
-            } else if (rawA is String) {
-              timeA = DateTime.tryParse(rawA)?.millisecondsSinceEpoch ?? 0;
-            }
-
-            int timeB = 0;
-            if (rawB is Timestamp) {
-              timeB = rawB.millisecondsSinceEpoch;
-            } else if (rawB is String) {
-              timeB = DateTime.tryParse(rawB)?.millisecondsSinceEpoch ?? 0;
-            }
-
-            return timeB.compareTo(timeA);
-          } catch (e) {
-            return 0;
-          }
-        });
-
-        if (!controller.isClosed) {
-          final mappedOrders = <OrderModel>[];
-          for (final doc in merged) {
-            try {
-              mappedOrders.add(OrderModel.fromFirestore(doc));
-            } catch (err, stack) {
-              debugPrint('Error mapping order ${doc.id}: $err');
-              debugPrint(stack.toString());
-            }
-          }
-          controller.add(mappedOrders);
-        }
-      } catch (err, stack) {
-        debugPrint('Error in watchSellerOrders emit: $err');
-        debugPrint(stack.toString());
-      }
+  /// The seller's orders created in [start, end) (all of them, one read), for
+  /// the analytics window.
+  Future<List<OrderModel>> fetchSellerOrdersInRange(
+    String sellerPhone,
+    DateTime start, [
+    DateTime? end,
+  ]) async {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final orders = _db.collection('orders');
+    Query<Map<String, dynamic>> windowed(Query<Map<String, dynamic>> q) {
+      var out = q.where('createdAt', isGreaterThanOrEqualTo: Timestamp.fromDate(start));
+      if (end != null) out = out.where('createdAt', isLessThan: Timestamp.fromDate(end));
+      return out.orderBy('createdAt', descending: true);
     }
 
-    final subs = List.generate(streams.length, (i) {
-      return streams[i].listen(
-        (s) {
-          results[i] = s.docs;
-          emit();
-        },
-        onError: (_) {
-          // A single query may be denied by rules (e.g. sellerId == phone is not
-          // permitted — rules only allow sellerId == uid). Silence it so the
-          // other queries (sellerPhone, sellerId == uid) still populate results.
-        },
-      );
-    });
-
-    controller.onCancel = () {
-      for (final s in subs) {
-        s.cancel();
+    final snaps = await Future.wait([
+      if (sellerPhone.isNotEmpty)
+        windowed(orders.where('sellerPhone', isEqualTo: sellerPhone))
+            .get()
+            .then<QuerySnapshot<Map<String, dynamic>>?>((s) => s)
+            .catchError((_) => null),
+      if (uid.isNotEmpty)
+        windowed(orders.where('sellerId', isEqualTo: uid))
+            .get()
+            .then<QuerySnapshot<Map<String, dynamic>>?>((s) => s)
+            .catchError((_) => null),
+    ]);
+    final byId = <String, OrderModel>{};
+    for (final snap in snaps) {
+      for (final d in snap?.docs ?? const <QueryDocumentSnapshot<Map<String, dynamic>>>[]) {
+        try {
+          byId[d.id] = OrderModel.fromFirestore(d);
+        } catch (_) {}
       }
+    }
+    return byId.values.toList()
+      ..sort((a, b) => (b.createdAt ?? DateTime(0)).compareTo(a.createdAt ?? DateTime(0)));
+  }
+
+  /// All-time order totals from sellerStats/{key}, kept by the
+  /// sellerStatsOnOrderWrite Cloud Function: one doc per key the seller's
+  /// orders are filed under (+91 phone, Auth UID), each order under one key.
+  Future<SellerOrderTotals> fetchSellerOrderTotals(String sellerPhone) async {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final digits = sellerPhone.replaceAll(RegExp(r'\D'), '');
+    final keys = <String>{
+      if (digits.length >= 10) '+91${digits.substring(digits.length - 10)}',
+      if (uid.isNotEmpty) uid,
     };
-    return controller.stream;
+    final docs = await Future.wait(keys.map((k) => _db
+        .collection('sellerStats')
+        .doc(k)
+        .get()
+        .then<DocumentSnapshot<Map<String, dynamic>>?>((d) => d)
+        .catchError((_) => null)));
+    var totals = const SellerOrderTotals();
+    for (final d in docs) {
+      final orders = d?.data()?['orders'];
+      if (orders is Map) totals = totals + SellerOrderTotals.fromMap(orders);
+    }
+    return totals;
   }
 
   /// Writes a canonical order status (see FirestoreKeys.orderStatusFlow).

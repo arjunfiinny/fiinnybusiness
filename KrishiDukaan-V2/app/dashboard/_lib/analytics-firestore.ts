@@ -161,7 +161,7 @@ function sellerKeyOf(value: unknown): string {
 }
 
 type SellerTotals = {
-  orders?: { count?: number; revenue?: number; status?: Record<string, number> };
+  orders?: { count?: number; revenue?: number; paid?: number; paidAmount?: number; status?: Record<string, number> };
   items?: Record<string, { name?: string; qty?: number; revenue?: number }>;
 };
 
@@ -176,20 +176,44 @@ async function readSellerOrderStats(keys: string[], fromKey: string, toKey: stri
   const reads = await Promise.allSettled(keys.map(async (key) => {
     const [totals, daySnap] = await Promise.all([
       getDoc(doc(db, "sellerStats", key)),
-      getDocs(query(
-        collection(db, "sellerDailyStats"),
-        where("sellerKey", "==", key),
-        where("date", ">=", fromKey),
-        where("date", "<=", toKey),
-      )),
+      toKey
+        ? getDocs(query(
+          collection(db, "sellerDailyStats"),
+          where("sellerKey", "==", key),
+          where("date", ">=", fromKey),
+          where("date", "<=", toKey),
+        ))
+        : Promise.resolve(null),
     ]);
-    return { totals: (totals.exists() ? totals.data() : {}) as SellerTotals, days: daySnap.docs.map((d) => d.data()) };
+    return { totals: (totals.exists() ? totals.data() : {}) as SellerTotals, days: daySnap?.docs.map((d) => d.data()) ?? [] };
   }));
   const ok = reads.filter((r): r is PromiseFulfilledResult<{ totals: SellerTotals; days: Record<string, any>[] }> => r.status === "fulfilled");
   return {
     results: ok.map((r) => r.value),
     errors: reads.filter((r): r is PromiseRejectedResult => r.status === "rejected").map((r) => r.reason),
   };
+}
+
+/** The keys a seller's orders may be filed under in sellerStats. */
+function sellerKeysFor(uid: string | null, profile?: any): string[] {
+  return Array.from(new Set(
+    [uid, profile?.uid, profile?.id, profile?.phone].filter(Boolean).map(sellerKeyOf).filter(Boolean),
+  ));
+}
+
+export type SellerOrderTotals = { count: number; paid: number; paidAmount: number; status: Record<string, number> };
+
+/** All-time order totals for the seller's Orders page tabs and tiles (2-3 doc reads). */
+export async function fetchSellerOrderTotals(uid: string | null, profile?: any): Promise<SellerOrderTotals> {
+  const out: SellerOrderTotals = { count: 0, paid: 0, paidAmount: 0, status: {} };
+  const { results } = await readSellerOrderStats(sellerKeysFor(uid, profile), "", "");
+  for (const { totals } of results) {
+    out.count += Number(totals.orders?.count ?? 0) || 0;
+    out.paid += Number(totals.orders?.paid ?? 0) || 0;
+    out.paidAmount += Number(totals.orders?.paidAmount ?? 0) || 0;
+    for (const [k, n] of Object.entries(totals.orders?.status ?? {})) out.status[k] = (out.status[k] ?? 0) + (Number(n) || 0);
+  }
+  return out;
 }
 
 /** Products the dashboard already loaded, so analytics doesn't read them again. */
@@ -367,9 +391,7 @@ export async function fetchRetailerAnalytics(
 
   // All-time totals and the window's per-day series from the seller's stats
   // docs (sellerStatsOnOrderWrite), instead of every order the seller ever had.
-  const sellerKeys = Array.from(new Set(
-    [retailerId, profile?.uid, profile?.id, profile?.phone].filter(Boolean).map(sellerKeyOf).filter(Boolean),
-  ));
+  const sellerKeys = sellerKeysFor(retailerId, profile);
   const orderStats = await readSellerOrderStats(sellerKeys, days[0].key, days[days.length - 1].key);
   errors.push(...orderStats.errors);
 

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import '../../../core/data/paged_feed.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../../../core/models/cart_model.dart';
 import '../../../core/models/order_model.dart';
@@ -229,60 +230,22 @@ class OrderRepository {
     );
   }
 
-  /// Streams all orders for the current user — as buyer and as seller.
-  /// Runs three separate queries so a permission denial on any one (e.g. phone
-  /// queries when myPhone() fails in rules) never kills the other results.
-  Stream<List<OrderModel>> watchCustomerOrders() {
+  /// The current user's orders — as buyer and as seller — newest first, 30
+  /// at a time per query: live for the first page, [PagedFeed.loadMore] for
+  /// older ones. Each query is separate so a permission denial on one (e.g.
+  /// phone queries when myPhone() fails in rules) never hides the others.
+  PagedFeed<OrderModel> customerOrdersFeed() {
     final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return Stream.value([]);
-
-    final phone = user.phoneNumber ?? '';
-
-    final controller = StreamController<List<OrderModel>>();
-    List<DocumentSnapshot> uidDocs    = [];
-    List<DocumentSnapshot> buyerDocs  = [];
-    List<DocumentSnapshot> sellerDocs = [];
-
-    void emit() {
-      final seen = <String>{};
-      final orders = [...uidDocs, ...buyerDocs, ...sellerDocs]
-          .where((d) => seen.add(d.id))
-          .map((d) {
-            try { return OrderModel.fromFirestore(d); } catch (_) { return null; }
-          })
-          .whereType<OrderModel>()
-          .toList()
-        ..sort((a, b) =>
-            (b.createdAt ?? DateTime(0)).compareTo(a.createdAt ?? DateTime(0)));
-      if (!controller.isClosed) controller.add(orders);
-    }
-
-    // Query 1: by Firebase Auth UID — always allowed by security rules
-    final sub1 = _db.collection('orders')
-        .where('customerId', isEqualTo: user.uid)
-        .snapshots()
-        .listen((s) { uidDocs = s.docs; emit(); }, onError: (_) {});
-
-    // Queries 2 & 3: by phone — may be denied if myPhone() fails in rules; silenced
-    StreamSubscription? sub2;
-    StreamSubscription? sub3;
-    if (phone.isNotEmpty) {
-      sub2 = _db.collection('orders')
-          .where('customerPhone', isEqualTo: phone)
-          .snapshots()
-          .listen((s) { buyerDocs = s.docs; emit(); }, onError: (_) {});
-      sub3 = _db.collection('orders')
-          .where('sellerPhone', isEqualTo: phone)
-          .snapshots()
-          .listen((s) { sellerDocs = s.docs; emit(); }, onError: (_) {});
-    }
-
-    controller.onCancel = () {
-      sub1.cancel();
-      sub2?.cancel();
-      sub3?.cancel();
-    };
-    return controller.stream;
+    final phone = user?.phoneNumber ?? '';
+    final orders = _db.collection('orders');
+    return PagedFeed<OrderModel>(
+      queries: [
+        if (user != null) orders.where('customerId', isEqualTo: user.uid),
+        if (phone.isNotEmpty) orders.where('customerPhone', isEqualTo: phone),
+        if (phone.isNotEmpty) orders.where('sellerPhone', isEqualTo: phone),
+      ],
+      map: OrderModel.fromFirestore,
+    );
   }
 
   /// Streams the orders where the current user is the SELLER — the source of
@@ -297,6 +260,11 @@ class OrderRepository {
   /// Each query silences its own errors rather than adding to the stream: a
   /// permission denial on one must not blank out the others (the same trap
   /// that previously made the orders screens flash data and then error).
+  /// `sellerId == phone` is not queried: the rules only allow
+  /// `sellerId == uid`, so that listener was always refused.
+  ///
+  /// Not paged: the earnings totals (paid out, on hold, …) need every paid
+  /// order.
   Stream<List<OrderModel>> watchSellerOrders() {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return Stream.value([]);
@@ -305,12 +273,11 @@ class OrderRepository {
 
     final controller = StreamController<List<OrderModel>>();
     List<DocumentSnapshot> byPhone = [];
-    List<DocumentSnapshot> byId = [];
     List<DocumentSnapshot> byUid = [];
 
     void emit() {
       final seen = <String>{};
-      final orders = [...byPhone, ...byId, ...byUid]
+      final orders = [...byPhone, ...byUid]
           .where((d) => seen.add(d.id))
           .map((d) {
             try { return OrderModel.fromFirestore(d); } catch (_) { return null; }
@@ -326,10 +293,6 @@ class OrderRepository {
           .where('sellerPhone', isEqualTo: phone)
           .snapshots()
           .listen((s) { byPhone = s.docs; emit(); }, onError: (_) {}));
-      subs.add(_db.collection('orders')
-          .where('sellerId', isEqualTo: phone)
-          .snapshots()
-          .listen((s) { byId = s.docs; emit(); }, onError: (_) {}));
     }
     // Legacy web orders that recorded the seller's Auth UID.
     subs.add(_db.collection('orders')

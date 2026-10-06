@@ -223,7 +223,15 @@ class _Body extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final ordersAsync = ref.watch(sellerOrdersProvider(sellerPhone));
+    // Only the orders in the selected window (one read), not every order.
+    final range = customRange;
+    final today = DateTime.now();
+    final start = range?.start ??
+        DateTime(today.year, today.month, today.day)
+            .subtract(Duration(days: period.days));
+    final end = range?.end.add(const Duration(days: 1));
+    final ordersAsync = ref.watch(sellerOrdersInRangeProvider(
+        (phone: sellerPhone, start: start, end: end)));
     final reachAsync = ref.watch(storeAnalyticsProvider(
         (phone: sellerPhone, period: period, customRange: customRange)));
 

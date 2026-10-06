@@ -152,6 +152,7 @@ import type { CartItem, OrderDoc, OrderItem, OrderStatus, SellerType, StatusHist
 import { generateAndStoreInvoice } from './utils/invoice-storage';
 import { CARDS_COLLECTION, cardToProduct } from './lib/marketplace-cards';
 import { STORE_DIRECTORY, sourcesFromDirectory, type StoreSources } from './lib/store-directory';
+import { MergedPager, type PagerStream } from './lib/merged-pager';
 
 export async function saveRetailerApplication(payload: RetailerApplication) {
   const products = payload.products
@@ -1290,26 +1291,6 @@ export async function fetchDealers(): Promise<any[]> {
   }
 }
 
-export async function fetchRetailerOrders(retailerId: string): Promise<any[]> {
-  try {
-    const q = query(
-      collection(db, 'orders'),
-      where('sellerId', '==', retailerId),
-      where('sellerType', '==', 'retailer')
-    );
-    const snapshot = await getDocs(q);
-    const docs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    return docs.sort((a: any, b: any) => {
-      const ta = a.createdAt?.toMillis?.() ?? 0;
-      const tb = b.createdAt?.toMillis?.() ?? 0;
-      return tb - ta;
-    });
-  } catch (error) {
-    console.error('Error fetching retailer orders:', error);
-    throw error;
-  }
-}
-
 export async function fetchRetailerInventory(retailerId: string): Promise<any[]> {
   try {
     const q = query(collection(db, 'products'), where('retailerId', '==', retailerId));
@@ -1732,6 +1713,52 @@ function sellerIdentityCandidates(sellerId: string, profile?: any): string[] {
  * identify the account uniquely, and mobile orders hardcode
  * sellerType: 'retailer' regardless of the account's actual role.
  */
+/** Every identifier a seller's orders may carry in sellerId / sellerPhone. */
+async function sellerOrderCandidates(sellerId: string, profile?: any): Promise<string[]> {
+  const seed = new Set(sellerIdentityCandidates(sellerId, profile));
+  try {
+    const idxSnap = await getDoc(doc(db, "uidIndex", sellerId));
+    addPhoneForms(seed, idxSnap.data()?.phone);
+  } catch {
+    // Non-fatal: fall through with the identifiers we already have.
+  }
+  if (/^(\+91)?[6-9]\d{9}$/.test(sellerId.replace(/\s/g, ""))) addPhoneForms(seed, sellerId);
+  return Array.from(seed).filter(Boolean);
+}
+
+/**
+ * A seller's incoming orders newest first, `pageSize` at a time (call
+ * next() for each page), across every identity keying like
+ * fetchIncomingOrdersForSeller, optionally one status only. Each
+ * sellerId / sellerPhone "in" query reads one page at a time; one refused by
+ * the rules (a value that isn't the caller's) splits into single values.
+ */
+export async function createSellerOrdersPager(
+  sellerId: string,
+  profile?: any,
+  opts: { status?: string; pageSize?: number } = {},
+): Promise<MergedPager> {
+  const candidates = await sellerOrderCandidates(sellerId, profile);
+  const orders = collection(db, "orders");
+  const statusFilter = opts.status ? [where("status", "==", opts.status)] : [];
+  const streams: PagerStream[] = [];
+  for (const field of ["sellerId", "sellerPhone"]) {
+    for (let i = 0; i < candidates.length; i += 30) {
+      const chunk = candidates.slice(i, i + 30);
+      streams.push({
+        query: query(orders, where(field, "in", chunk), ...statusFilter, orderBy("createdAt", "desc")),
+        split: () => chunk.map((value) =>
+          query(orders, where(field, "==", value), ...statusFilter, orderBy("createdAt", "desc"))),
+      });
+    }
+  }
+  return new MergedPager(
+    streams,
+    opts.pageSize ?? 30,
+    (d) => (d.get("createdAt") as Timestamp | undefined)?.toMillis?.() ?? 0,
+  );
+}
+
 export async function fetchIncomingOrdersForSeller(
   sellerId: string,
   _sellerType: SellerType,

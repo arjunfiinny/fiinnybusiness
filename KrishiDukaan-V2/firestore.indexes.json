@@ -1723,6 +1723,66 @@
           "order": "ASCENDING"
         }
       ]
+    },
+    {
+      "collectionGroup": "orders",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "sellerId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "orders",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "sellerId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "orders",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "customerId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "enquiries",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "sellerPhones",
+          "arrayConfig": "CONTAINS"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        }
+      ]
     }
   ],
   "fieldOverrides": [

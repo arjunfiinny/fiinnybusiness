@@ -1,4 +1,5 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../core/data/paged_feed.dart';
 import '../../../core/models/listing_model.dart';
 import '../../../core/models/order_model.dart';
 import '../data/dashboard_repository.dart';
@@ -31,9 +32,31 @@ final productStatsTotalsProvider =
   return _repo.fetchProductStatsTotals(ids);
 });
 
+/// The seller's orders, newest first: the first 30 live, older pages on
+/// [PagedFeed.loadMore] (see the screens' "Load more").
+final sellerOrdersFeedProvider =
+    Provider.family<PagedFeed<OrderModel>, String>((ref, phone) {
+  final feed = _repo.sellerOrdersFeed(phone);
+  ref.onDispose(feed.dispose);
+  return feed;
+});
+
 final sellerOrdersProvider =
     StreamProvider.family<List<OrderModel>, String>((ref, phone) {
-  return _repo.watchSellerOrders(phone);
+  return ref.watch(sellerOrdersFeedProvider(phone)).stream;
+});
+
+/// All-time order counts and revenue for the seller (stats docs kept by a
+/// Cloud Function), for the tiles and tab counts.
+final sellerOrderTotalsProvider =
+    FutureProvider.family<SellerOrderTotals, String>((ref, phone) {
+  return _repo.fetchSellerOrderTotals(phone);
+});
+
+/// The seller's orders in a date window, for the analytics screen.
+final sellerOrdersInRangeProvider = FutureProvider.family<List<OrderModel>,
+    ({String phone, DateTime start, DateTime? end})>((ref, arg) {
+  return _repo.fetchSellerOrdersInRange(arg.phone, arg.start, arg.end);
 });
 
 final orderOffersRepoProvider = Provider((_) => OrderOffersRepository());

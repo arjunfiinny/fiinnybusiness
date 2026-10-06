@@ -11,7 +11,8 @@ import { orderTotal } from "./platform-daily";
  * seller's whole order history:
  *
  *   sellerStats/{sellerKey}            all time:
- *     { sellerKey, orders: { count, revenue, status: { placed: n, ... } },
+ *     { sellerKey, orders: { count, revenue, paid, paidAmount,
+ *                            status: { placed: n, ... } },
  *       items: { <key>: { name, qty, revenue } } }
  *   sellerDailyStats/{sellerKey}_{YYYY-MM-DD}   (India dates):
  *     { sellerKey, date, orders: { count, revenue } }
@@ -64,6 +65,11 @@ export function sellerContribution(d: Data): Contribution {
   addTo(c, totals, "orders.count", 1);
   addTo(c, totals, `orders.status.${fieldKey(status)}`, 1);
   if (!cancelled) addTo(c, totals, "orders.revenue", total);
+  // Paid online (the Orders page's "paid" tiles), whatever the status.
+  if (d.payment?.status === "paid") {
+    addTo(c, totals, "orders.paid", 1);
+    addTo(c, totals, "orders.paidAmount", Number(d.payment.amount ?? 0) || 0);
+  }
 
   const ms = millisOf(d.createdAt);
   if (ms > 0) {
