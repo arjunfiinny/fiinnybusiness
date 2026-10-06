@@ -1106,9 +1106,11 @@ service cloud.firestore {
 
     // Per-day platform totals (orders, subscriptions, payments, sign-ups,
     // products added) kept by the platformStatsOn* functions for Admin →
-    // Analytics. Written only by the Admin SDK.
+    // Analytics and the Orders page. Written only by the Admin SDK.
     match /platformDailyStats/{date} {
-      allow read: if isAdmin();
+      // Team "orders" members already read every order; the Orders page
+      // shows gross order value from these totals.
+      allow read: if isAdmin() || teamHas('orders');
     }
 
     // Retention cohort summaries written by the CF.

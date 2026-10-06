@@ -226,6 +226,7 @@ says which steps it needs. Brief: `docs/follow-up-seller-admin-performance.md`.
 | S3 | Manufacturer network map and a retailer's assigned products | One `retailers/{id}` read per retailer (200 retailers = 200 reads, one trip each); one product read per assigned listing | Addresses and locations from the store directory (1–2 reads), the mirror doc filling gaps; assigned products in parallel queries of 30 |
 | S4a | Admin Overview product count; Admin Analytics | Overview read every product (~4,222) to count them. Analytics read every order, subscription, payment attempt and new user in the window ("All time" = whole collections) on each tab open | Overview: 2 count reads on `marketplaceCards`. Analytics: one small `platformDailyStats` doc per day with activity, kept by Cloud Functions |
 | S4b | Admin lists: Messages, Moderation, Payments, Payouts, Sales team, WhatsApp templates | Whole `contactMessages`, `contentReports`, `payoutAccounts`, `dealerVisits`, `dealers`, `uidIndex`, `retailerSeatListings` collections, all users for template audiences, the newest 500 payment attempts | 50 rows at a time, newest first, filters in the query, totals from count/sum queries; template audiences read sellers only and look up their subscriptions, seats and KYC docs by id |
+| S4c | Admin tables: Users, Team, Companies, Reports, Subscriptions, Products, Orders | The shared cache downloaded all users, all products, all subscriptions and all orders (10 min), on every Refresh, and again for any search or filter | 50 rows at a time with filters in the query; searches are a few small queries (name, shop, email prefixes; exact phone, ID, invoice, Razorpay ID); totals from count/sum queries; "Export" downloads everything only when clicked |
 
 ### S1. Add-product search
 
@@ -347,6 +348,43 @@ says which steps it needs. Brief: `docs/follow-up-seller-admin-performance.md`.
   the tabs/filters and their counts match; WhatsApp templates: Subscription
   expiry, New product reminder (vacant seats), KYC pending/success show the
   same people as before.
+
+### S4c. Admin tables
+
+- **Rules (step 1):** team members with the Orders section may read
+  `platformDailyStats` (the Orders page's gross value; they already read
+  every order).
+- **Indexes (step 1):** `orders` (`status`, `createdAt` ↓), (`sellerType`,
+  `createdAt` ↓), (`status`, `sellerType`, `createdAt` ↓), (`payment.status`,
+  `payment.amount`); `users` (`isPaid`, `createdAt` ↓), (`role`, `isPaid`,
+  `createdAt` ↓); `subscriptions` (`subscriptionStatus`, `startDate` ↓).
+- **Website (step 4).** Needs S1 (cards) and S4a (daily totals) in place.
+- **Differences:**
+  - Users: search finds names, shop/business names and emails that *start*
+    with the typed text (any capitalization), and exact phone numbers and
+    IDs; it no longer matches text in the middle of a name, or city/state.
+    City, state, "not paid" and subscription filters narrow each loaded page
+    ("See More" for more).
+  - Orders: search finds an order by its ID, invoice number, Razorpay order or
+    payment ID, or the customer's or seller's phone, even if it isn't loaded
+    or has no date; other words match the loaded orders. Orders without a
+    `createdAt` only appear through that search. "Export CSV" downloads every
+    order matching the filters.
+  - Subscriptions: search finds owners by name/phone and Razorpay payment ID;
+    the expiry sort applies to loaded rows when a date filter is set.
+    Subscriptions without a `startDate` only appear through search.
+  - Products: one row per marketplace card (what buyers see). Products with
+    no photo or price, and names whose every doc is inactive, aren't listed
+    (they aren't on the marketplace either); "Export" downloads every product
+    doc. Edit and delete re-read the product's docs first and act on the same
+    doc as before (manufacturer, then admin, then newest), never on sellers'
+    copies. A change shows in the table after the card rebuild (seconds).
+  - Team, Reports, Companies read only team accounts / manufacturers.
+- **Check:** Users: search "ram", a phone with and without +91, an email;
+  role chips and date/paid filters; promote panel search. Orders: filters,
+  paste an order ID, invoice, `pay_…` and a phone; Export. Subscriptions:
+  filters, search a name and a phone, manual activate and assign pickers.
+  Products: categories, search, edit an admin product, assignments.
 
 ## Testing on UAT
 

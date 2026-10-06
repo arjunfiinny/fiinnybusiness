@@ -13,7 +13,8 @@ import {
   Users, UserPlus, Loader2, Trash2, Pencil, X, Check, ShieldAlert,
 } from "lucide-react";
 import { auth, adminUpdateTeamSections } from "../../firebase";
-import { getUsers, invalidateUsers } from "../_lib/admin-data";
+import { invalidateUsers } from "../_lib/admin-data";
+import { fetchUsersByRoles } from "../_lib/admin-queries";
 import { ADMIN_SECTIONS, type AdminSection } from "../_context/admin-auth-context";
 
 type TeamMember = {
@@ -287,9 +288,9 @@ export default function AdminTeamPage() {
     if (force) invalidateUsers();
     setLoading(true);
     try {
-      const all = await getUsers({ force });
+      // Only team accounts, not every user.
+      const all = await fetchUsersByRoles(["team"]);
       const team = all
-        .filter((u) => u.role === "team")
         .map((u) => ({
           uid: u.uid || u.id,
           name: String(u.name ?? ""),

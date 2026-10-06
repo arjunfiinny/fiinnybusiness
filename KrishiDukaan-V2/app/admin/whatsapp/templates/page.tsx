@@ -1505,7 +1505,10 @@ function NewProductReminderFlow() {
       ]);
       const ownerKeys = new Set<string>();
       for (const sub of subs) for (const k of [sub.ownerPhone, sub.ownerId]) if (k) ownerKeys.add(String(k));
-      const ownerPhones = Array.from(ownerKeys).filter((k) => isValidIndianPhone(k)).map((k) => toE164(k));
+      // Phones are stored as "+91…" (users ids, uidIndex.phone) but may be
+      // written other ways on subscriptions: look up every form.
+      const phoneForms = (raw: string) => [raw, toE164(raw), `+${toE164(raw)}`];
+      const ownerPhones = Array.from(ownerKeys).filter((k) => isValidIndianPhone(k)).flatMap(phoneForms);
       // Owners keyed by Auth UID: their phone comes from uidIndex/{uid}.
       const ownerUids = Array.from(ownerKeys).filter((k) => !isValidIndianPhone(k));
       const [uidIdxByUid, uidIdxByPhone] = await Promise.all([
@@ -1519,7 +1522,7 @@ function NewProductReminderFlow() {
       const indexedPhones = uidIdxDocs
         .map((d) => String((d.data() as { phone?: string }).phone ?? ""))
         .filter(isValidIndianPhone)
-        .map(toE164);
+        .flatMap(phoneForms);
       const [phoneUsers, uidUsers] = await Promise.all([
         getDocsByIds(db, "users", [...Array.from(ownerKeys), ...ownerPhones, ...indexedPhones]),
         getDocsWhereIn(db, "users", "uid", ownerUids),
@@ -2124,7 +2127,7 @@ function KycPendingFlow() {
         .filter((u) => u.subscriptionStatus === "active" || u.isPaid === true)
         .flatMap((u) => [u.phone, u.id].filter(Boolean).map(String))
         .filter(isValidIndianPhone)
-        .map(toE164);
+        .flatMap((p) => [p, `+${toE164(p)}`]);
       const payouts = await getDocsByIds(db, "payoutAccounts", subscribedPhones);
 
       // Map normalized phone → KYC status. Doc id is the seller phone.

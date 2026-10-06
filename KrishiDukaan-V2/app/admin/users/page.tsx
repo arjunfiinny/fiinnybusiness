@@ -17,8 +17,9 @@ import { PendingSignupPanel } from "../_components/pending-signup-panel";
 import { RefreshButton } from "../_components/refresh-button";
 import { useAdminAuth } from "../_context/admin-auth-context";
 import {
-  getUsers, getSubscriptions, getRoleCounts, invalidateUsers, newestAge, CACHE_KEYS,
+  getRoleCounts, invalidateUsers,
 } from "../_lib/admin-data";
+import { searchUsers } from "../_lib/admin-queries";
 import {
   addDoc, doc, setDoc, getDoc, serverTimestamp, collection, Timestamp, GeoPoint,
   query, where, getDocs, limit,
@@ -133,19 +134,35 @@ export default function AdminUsersPage() {
   // forces the whole collection into memory. Only the filters Firestore cannot
   // express as a paginated query still do — free-text search across several
   // fields, subscription joins, and the city/state/date predicates.
-  const isFiltering = !!debouncedSearch.trim() ||
-    filterActive !== "all" || filterHasSubscription !== "all" ||
-    !!filterDateFrom || !!filterDateTo ||
-    !!filterCity.trim() || !!filterState.trim();
-  const needsFullData = isFiltering || showPromotePanel;
+  // Text search runs as queries (searchUsers: name/shop/business/email
+  // prefixes, phone, id) instead of downloading every user. The advanced
+  // filters page through the users 20 at a time: sign-up dates and "paid"
+  // run in the query, the rest narrow each loaded page.
+  const isFiltering = !!debouncedSearch.trim();
 
   // Derived "current dataset" — paginated browse-mode pages by default, or the fully
   // cached collections once full mode has been triggered and loaded.
   const users = isFiltering ? (fullUsers ?? []) : pageUsers;
   const allSubs = isFiltering ? (fullSubs ?? []) : pageSubs;
-  // Promote-to-admin search always needs the full user list regardless of the main
-  // table's mode, falling back to whatever page is loaded while the full fetch is in flight.
-  const promoteSourceUsers = fullUsers ?? pageUsers;
+  // Promote-to-admin: the users found by its own search box (or the loaded page).
+  const [promoteResults, setPromoteResults] = useState<any[] | null>(null);
+  const promoteSourceUsers = promoteResults ?? pageUsers;
+  useEffect(() => {
+    const q = promoteSearch.trim();
+    if (q.length < 2) { setPromoteResults(null); return; }
+    let cancelled = false;
+    const t = setTimeout(() => {
+      searchUsers(q).then((us) => { if (!cancelled) setPromoteResults(us); });
+    }, 300);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [promoteSearch]);
+
+  /** Server-side part of the advanced filters, for fetchUsersPage. */
+  const serverFilters = () => ({
+    fromMs: filterDateFrom ? new Date(filterDateFrom).getTime() : null,
+    toMs: filterDateTo ? new Date(filterDateTo).getTime() + 86399999 : null,
+    paidOnly: filterActive === "active",
+  });
 
   /**
    * Reloads the first page. `force` (the Refresh button, and every write on this tab)
@@ -159,7 +176,7 @@ export default function AdminUsersPage() {
     setLastDoc(null); setHasMore(true);
     setFullUsers(null); setFullSubs(null);
     return Promise.all([
-      fetchUsersPage(PAGE_SIZE, null, role as UserRoleFilter),
+      fetchUsersPage(PAGE_SIZE, null, role as UserRoleFilter, serverFilters()),
       getRoleCounts({ force }),
     ])
       .then(async ([page, counts]) => {
@@ -182,7 +199,7 @@ export default function AdminUsersPage() {
   useEffect(() => {
     if (!didMountRole.current) { didMountRole.current = true; return; }
     load(false, filterRole);
-  }, [filterRole]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [filterRole, filterDateFrom, filterDateTo, filterActive]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     // Clearing the box takes effect immediately; typing settles after 250ms.
@@ -201,7 +218,7 @@ export default function AdminUsersPage() {
     if (!lastDoc || loadingMore) return;
     setLoadingMore(true);
     try {
-      const page = await fetchUsersPage(PAGE_SIZE, lastDoc, filterRole as UserRoleFilter);
+      const page = await fetchUsersPage(PAGE_SIZE, lastDoc, filterRole as UserRoleFilter, serverFilters());
       setPageUsers(prev => [...prev, ...page.users]);
       setLastDoc(page.lastDoc);
       setHasMore(page.hasMore);
@@ -215,19 +232,21 @@ export default function AdminUsersPage() {
     }
   };
 
-  // Pull the full collections the moment full mode is needed. Both come from the shared
-  // admin cache, so searching after the first time costs no Firestore reads at all.
+  // Search mode: the matching users (a few small queries) and their subscriptions.
   useEffect(() => {
-    if (!needsFullData || fullUsers !== null || fullLoading) return;
+    const q = debouncedSearch.trim();
+    if (!q) { setFullUsers(null); setFullSubs(null); return; }
+    let cancelled = false;
     setFullLoading(true);
-    Promise.all([getUsers(), getSubscriptions().catch(() => [])])
-      .then(([us, ss]) => {
+    searchUsers(q)
+      .then(async (us) => {
+        const ss = await fetchSubscriptionsForPhones(us.map((u) => u.phone || u.id).filter(Boolean)).catch(() => []);
+        if (cancelled) return;
         setFullUsers(us); setFullSubs(ss);
-        const age = newestAge(CACHE_KEYS.users);
-        if (age !== null) setDataAge(Date.now() - age);
       })
-      .finally(() => setFullLoading(false));
-  }, [needsFullData, fullUsers, fullLoading]);
+      .finally(() => { if (!cancelled) setFullLoading(false); });
+    return () => { cancelled = true; };
+  }, [debouncedSearch]);
 
   // Google Maps autocomplete for the Create User modal
   useEffect(() => {
@@ -403,6 +422,7 @@ export default function AdminUsersPage() {
       const promote = (prev: any[]) => prev.map(u => u.id === promoteTarget.id ? { ...u, role: "admin", isPaid: true } : u);
       setPageUsers(promote);
       setFullUsers(prev => (prev === null ? prev : promote(prev)));
+      setPromoteResults(prev => (prev === null ? prev : promote(prev)));
       getRoleCounts({ force: true }).then(setRoleCounts).catch(() => {});
       setPromoteTarget(null);
       setConfirmEmail("");
@@ -761,7 +781,7 @@ export default function AdminUsersPage() {
             </span>
             {fullLoading && (
               <span className="flex items-center gap-1 text-[11px] text-on-surface-variant">
-                <Loader2 className="h-3 w-3 animate-spin" /> Searching all users…
+                <Loader2 className="h-3 w-3 animate-spin" /> Searching users…
               </span>
             )}
           </div>

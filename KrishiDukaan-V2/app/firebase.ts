@@ -1809,25 +1809,6 @@ export async function fetchIncomingOrdersForSeller(
   });
 }
 
-/**
- * Every order on the platform, newest first — backs the admin Orders tab.
- *
- * Deliberately NOT using orderBy("createdAt"): Firestore silently drops
- * documents missing the ordered field, which would hide any legacy order
- * written before createdAt existed — exactly the orders an admin chasing an
- * unexplained Razorpay payment is most likely looking for. Sorting client-side
- * keeps them visible (they sink to the bottom instead of disappearing).
- */
-export async function fetchAllOrdersForAdmin(): Promise<OrderDoc[]> {
-  const snapshot = await getDocs(collection(db, "orders"));
-  const docs = snapshot.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<OrderDoc, "id">) }));
-  return docs.sort((a, b) => {
-    const ta = (a.createdAt as any)?.toMillis?.() ?? 0;
-    const tb = (b.createdAt as any)?.toMillis?.() ?? 0;
-    return tb - ta;
-  });
-}
-
 export async function updateOrderStatus(orderId: string, status: OrderStatus): Promise<void> {
   await updateDoc(doc(db, "orders", orderId), {
     status,
@@ -2190,11 +2171,16 @@ export async function fetchUsersPage(
   pageSize: number,
   cursor?: QueryDocumentSnapshot<DocumentData> | null,
   role: UserRoleFilter = 'all',
+  // Applied by Firestore too: sign-up date bounds and "paid users only".
+  extra: { fromMs?: number | null; toMs?: number | null; paidOnly?: boolean } = {},
 ): Promise<{ users: any[]; lastDoc: QueryDocumentSnapshot<DocumentData> | null; hasMore: boolean }> {
   const serverFilterable = role === 'retailer' || role === 'manufacturer' || role === 'admin';
 
   const constraints = [
     ...(serverFilterable ? [where('role', '==', role)] : []),
+    ...(extra.paidOnly ? [where('isPaid', '==', true)] : []),
+    ...(extra.fromMs != null ? [where('createdAt', '>=', Timestamp.fromMillis(extra.fromMs))] : []),
+    ...(extra.toMs != null ? [where('createdAt', '<=', Timestamp.fromMillis(extra.toMs))] : []),
     orderBy('createdAt', 'desc'),
     ...(cursor ? [startAfter(cursor)] : []),
     limit(pageSize),
@@ -2468,11 +2454,6 @@ export async function adminUpdateUser(uid: string, updates: {
 
 }
 
-export async function fetchAllSubscriptions(): Promise<any[]> {
-  const snapshot = await getDocs(collection(db, 'subscriptions'));
-  return snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-}
-
 // `plans` has a public read rule (see firestore.rules) — writes all go through
 // app/api/admin/plans/* (Admin SDK), so this is read-only client access.
 export async function fetchAllPlans(): Promise<any[]> {
@@ -2609,14 +2590,9 @@ export async function adminManualActivate(
  * the admin needs to see and manage every product doc individually. So this does NO
  * dedup, NO source exclusion, and NO image requirement. Sorted newest-first.
  */
-export async function fetchAllProductsForAdmin(): Promise<MarketplaceProduct[]> {
-  return mapAdminProductDocs(await fetchAllSellerProducts());
-}
-
 /**
- * Pure shape-mapper behind fetchAllProductsForAdmin(). Split out so callers that
- * already hold a cached raw `products` snapshot (see app/admin/_lib/admin-data.ts)
- * can render the admin table without triggering a second collection scan.
+ * Shape-mapper for the admin Products table: raw product docs (or marketplace
+ * cards) to MarketplaceProduct rows, most recently updated first.
  */
 export function mapAdminProductDocs(docs: RawProductDoc[]): MarketplaceProduct[] {
   return docs
@@ -3167,12 +3143,6 @@ function productOwnerKeys(d: RawProductDoc): string[] {
   return [d.ownerId, d.retailerId, d.manufacturerId, d.ownerPhone, d.retailerPhone, d.manufacturerPhone]
     .filter(Boolean)
     .map(String);
-}
-
-/** Fetches every product doc once (raw, with ownership fields) for client-side indexing. */
-export async function fetchAllSellerProducts(): Promise<RawProductDoc[]> {
-  const snap = await getDocs(collection(db, 'products'));
-  return snap.docs.map(d => ({ id: d.id, ...(d.data() as Record<string, unknown>) }));
 }
 
 /**
@@ -3926,25 +3896,6 @@ export async function logFailedPayment(
   } catch (err) {
     console.error('Error logging failed payment:', err);
   }
-}
-
-export async function fetchFailedPayments(): Promise<any[]> {
-  // No orderBy — avoids needing a composite index on failedPayments.
-  // Sort newest-first client-side instead.
-  const snapshot = await getDocs(collection(db, 'failedPayments'));
-  return snapshot.docs
-    .map(d => ({ id: d.id, ...d.data() }))
-    // Product-order failures belong in Admin -> Payments, not here: every row
-    // in this tab offers "Activate Subscription", which is meaningless for a
-    // cart order. Mobile used to write both kinds into this one collection.
-    // Rows predating the `kind` field are left visible rather than hidden,
-    // since an untagged row cannot be proven to be an order.
-    .filter((r: any) => r.kind !== 'cart')
-    .sort((a: any, b: any) => {
-      const ta = a.timestamp?.toMillis?.() ?? a.timestamp?.seconds ?? 0;
-      const tb = b.timestamp?.toMillis?.() ?? b.timestamp?.seconds ?? 0;
-      return tb - ta;
-    });
 }
 
 // ─── Admin profile save (phone-keyed — works before first OTP login) ──────────

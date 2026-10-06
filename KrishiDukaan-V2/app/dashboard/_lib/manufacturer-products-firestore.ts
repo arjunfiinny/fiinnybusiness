@@ -1,12 +1,9 @@
 import {
   collection,
   doc,
-  documentId,
   getDoc,
   getDocs,
   increment,
-  limit,
-  orderBy,
   query,
   serverTimestamp,
   setDoc,
@@ -15,7 +12,7 @@ import {
   writeBatch,
 } from "firebase/firestore";
 import { db } from "../../firebase";
-import { CARDS_COLLECTION, SEARCH_COLLECTION, searchTerms } from "../../lib/marketplace-cards";
+import { findCardsByName } from "../../lib/marketplace-card-search";
 import type { RetailerSeatListing } from "../_types/subscriptions";
 import {
   addSeatListingToBatch,
@@ -386,79 +383,26 @@ function toSearchResult(id: string, r: Record<string, unknown>): ProductSearchRe
   };
 }
 
-const NAME_SEARCH_LIMIT = 10;
-// Search docs whose name has the query's longest word; the whole query is
-// then checked against the name here.
-const NAME_SEARCH_TOKEN_SCAN = 25;
-
 /**
  * Existing products whose name contains `term`, for the add-product form's
  * suggestions: at most 10, sorted by name.
  *
  * Reads the marketplace cards (one per product name, built by Cloud
- * Functions) instead of the products collection: a name prefix query on
- * marketplaceCards plus the name tokens on the Market search's docs
- * (marketplaceSearch.nameKeywords), at most ~45 reads (usually ~10-20)
- * instead of every product. A card's id is the
- * product its merge chose as canonical, which is the manufacturer_inventory
- * product when one exists, so the chosen id (the new copy's
- * originalProductId) follows the same source ranking as before.
+ * Functions) instead of the products collection (see findCardsByName): at
+ * most ~35 small reads instead of every product. A card's id is the product
+ * its merge chose as canonical, which is the manufacturer_inventory product
+ * when one exists, so the chosen id (the new copy's originalProductId)
+ * follows the same source ranking as before.
  *
  * Cards merge variants across sellers; call fetchProductForAutofill with the
  * chosen id to autofill from that product's own doc.
  */
 export async function searchProductsByName(term: string): Promise<ProductSearchResult[]> {
-  const lower = term.trim().toLowerCase();
-  if (!lower) return [];
-  const cardsCol = collection(db, CARDS_COLLECTION);
-  const [primary] = searchTerms(lower);
-
-  const [prefixSnap, tokenSnap] = await Promise.all([
-    getDocs(query(
-      cardsCol,
-      where("nameKey", ">=", lower),
-      where("nameKey", "<", `${lower}\uf8ff`),
-      orderBy("nameKey"),
-      limit(NAME_SEARCH_LIMIT),
-    )),
-    primary
-      ? getDocs(query(
-        collection(db, SEARCH_COLLECTION),
-        where("nameKeywords", "array-contains", primary),
-        orderBy("nameKey"),
-        limit(NAME_SEARCH_TOKEN_SCAN),
-      ))
-      : Promise.resolve(null),
-  ]);
-
-  const nameById = new Map<string, string>();
-  const cardData = new Map<string, Record<string, unknown>>();
-  for (const d of prefixSnap.docs) {
-    nameById.set(d.id, String(d.get("nameKey") ?? ""));
-    cardData.set(d.id, d.data());
-  }
-  for (const d of tokenSnap?.docs ?? []) {
-    const nameKey = String(d.get("nameKey") ?? "");
-    if (nameKey.includes(lower)) nameById.set(d.id, nameKey);
-  }
-
-  const ids = Array.from(nameById.keys())
-    .sort((a, b) => nameById.get(a)!.localeCompare(nameById.get(b)!))
-    .slice(0, NAME_SEARCH_LIMIT);
-  const missing = ids.filter((id) => !cardData.has(id));
-  if (missing.length > 0) {
-    const snap = await getDocs(query(cardsCol, where(documentId(), "in", missing)));
-    for (const d of snap.docs) cardData.set(d.id, d.data());
-  }
-
-  return ids
-    .filter((id) => cardData.has(id))
-    .map((id) => {
-      const card = cardData.get(id)!;
-      // The card's `id` field is the canonical product's id; the card doc's
-      // own id is a hash of the name.
-      return toSearchResult(String(card.id ?? ""), card);
-    })
+  const cards = await findCardsByName(db, term, 10);
+  return cards
+    // The card's `id` field is the canonical product's id; the card doc's
+    // own id is a hash of the name.
+    .map(([, card]) => toSearchResult(String(card.id ?? ""), card))
     .filter((p) => p.id)
     .sort((a, b) => a.name.localeCompare(b.name));
 }
