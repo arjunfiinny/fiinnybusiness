@@ -3584,8 +3584,20 @@ export async function fetchManufacturerNetworkStores(manufacturerPhone: string):
       );
     });
 
-    const profiles = await Promise.all(
-      activeMirrors.map(async (d) => {
+    // Address and location come from the store directory (1-2 docs for every
+    // store, kept current by Cloud Functions) instead of one retailers/{id}
+    // read per retailer; the mirror doc fills anything missing.
+    const retailerById = new Map<string, Record<string, any>>();
+    if (activeMirrors.length > 0) {
+      try {
+        const { retailers } = await fetchStoreSources();
+        for (const rd of retailers.docs) retailerById.set(rd.id, rd.data());
+      } catch {
+        // directory unavailable: use the mirror docs alone
+      }
+    }
+
+    const profiles = activeMirrors.map((d) => {
         const r = d.data();
         const mirrorAddr = r.address || {};
         const mirrorGeo = r.geo || {};
@@ -3597,25 +3609,20 @@ export async function fetchManufacturerNetworkStores(manufacturerPhone: string):
         let lng = 0;
 
         const retailerDocId = String(r.retailerDocId ?? d.id);
-        try {
-          const rSnap = await getDoc(doc(db, 'retailers', retailerDocId));
-          if (rSnap.exists()) {
-            const rd = rSnap.data();
-            const rdAddr = rd.address || {};
-            const rdGeo = rd.geo || {};
+        const rd = retailerById.get(retailerDocId);
+        if (rd) {
+          const rdAddr = rd.address || {};
+          const rdGeo = rd.geo || {};
 
-            addressStr = [
-              rdAddr.line1 || mirrorAddr.line1,
-              rdAddr.city || mirrorAddr.city,
-              rdAddr.state || mirrorAddr.state,
-              rdAddr.pincode || mirrorAddr.pincode
-            ].filter(Boolean).join(', ');
+          addressStr = [
+            rdAddr.line1 || mirrorAddr.line1,
+            rdAddr.city || mirrorAddr.city,
+            rdAddr.state || mirrorAddr.state,
+            rdAddr.pincode || mirrorAddr.pincode
+          ].filter(Boolean).join(', ');
 
-            lat = Number(rdGeo.latitude ?? rdGeo.lat ?? mirrorGeo.latitude ?? mirrorGeo.lat ?? 0);
-            lng = Number(rdGeo.longitude ?? rdGeo.lng ?? mirrorGeo.longitude ?? mirrorGeo.lng ?? 0);
-          }
-        } catch {
-          // ignore and fall back to mirror
+          lat = Number(rdGeo.latitude ?? rdGeo.lat ?? mirrorGeo.latitude ?? mirrorGeo.lat ?? 0);
+          lng = Number(rdGeo.longitude ?? rdGeo.lng ?? mirrorGeo.longitude ?? mirrorGeo.lng ?? 0);
         }
 
         if (!addressStr) {
@@ -3641,8 +3648,7 @@ export async function fetchManufacturerNetworkStores(manufacturerPhone: string):
           lng,
           storePhone: r.retailerPhone || d.id,
         } as RetailerNetworkStore;
-      })
-    );
+      });
     return profiles;
   } catch (error) {
     console.error("Error in fetchManufacturerNetworkStores:", error);

@@ -223,6 +223,7 @@ says which steps it needs. Brief: `docs/follow-up-seller-admin-performance.md`.
 |---|---|---|---|
 | S1 | "Add product" name search (retailers, manufacturers, admins) reads cards | Every product (~4,222 reads, a few MB) on each typing pause | A name prefix query on `marketplaceCards` plus name tokens on `marketplaceSearch`: at most ~45 small reads (usually 10-20), plus 1 product read when a suggestion is picked |
 | S2 | Admin WhatsApp inbox pages conversations | Live listeners on **all** of `waIncomingMessages` and `waConversations`: every message ever on open, and the whole set again on every new message; full message contents logged to the browser console | The newest 50 conversations (live), 50 more per "Load more"; messages only for the open chat (newest 100, "Load earlier"); no message content in the console |
+| S3 | Manufacturer network map and a retailer's assigned products | One `retailers/{id}` read per retailer (200 retailers = 200 reads, one trip each); one product read per assigned listing | Addresses and locations from the store directory (1–2 reads), the mirror doc filling gaps; assigned products in parallel queries of 30 |
 
 ### S1. Add-product search
 
@@ -275,6 +276,15 @@ says which steps it needs. Brief: `docs/follow-up-seller-admin-performance.md`.
 - **Check:** Admin → WhatsApp: the list shows the newest conversations with
   unread counts; Open/Resolved tabs; "Load more"; open a chat, send a reply,
   it moves to the top; a new incoming message shows up live.
+
+### S3. Network map and assigned products
+
+- **Website (step 4) only.** No index, function or script. Uses the store
+  directory from step 3, so a retailer's new address shows on the map within
+  about 5 minutes (the directory's refresh), as on the store map.
+- **Check:** a manufacturer's Company page and Admin → Companies → a
+  manufacturer: the network map shows the same pins and addresses as before;
+  a retailer's assigned products list shows names, prices and photos.
 
 ## Testing on UAT
 
