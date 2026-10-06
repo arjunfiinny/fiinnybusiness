@@ -227,6 +227,7 @@ says which steps it needs. Brief: `docs/follow-up-seller-admin-performance.md`.
 | S4a | Admin Overview product count; Admin Analytics | Overview read every product (~4,222) to count them. Analytics read every order, subscription, payment attempt and new user in the window ("All time" = whole collections) on each tab open | Overview: 2 count reads on `marketplaceCards`. Analytics: one small `platformDailyStats` doc per day with activity, kept by Cloud Functions |
 | S4b | Admin lists: Messages, Moderation, Payments, Payouts, Sales team, WhatsApp templates | Whole `contactMessages`, `contentReports`, `payoutAccounts`, `dealerVisits`, `dealers`, `uidIndex`, `retailerSeatListings` collections, all users for template audiences, the newest 500 payment attempts | 50 rows at a time, newest first, filters in the query, totals from count/sum queries; template audiences read sellers only and look up their subscriptions, seats and KYC docs by id |
 | S4c | Admin tables: Users, Team, Companies, Reports, Subscriptions, Products, Orders | The shared cache downloaded all users, all products, all subscriptions and all orders (10 min), on every Refresh, and again for any search or filter | 50 rows at a time with filters in the query; searches are a few small queries (name, shop, email prefixes; exact phone, ID, invoice, Razorpay ID); totals from count/sum queries; "Export" downloads everything only when clicked |
+| S5 | Seller dashboard Home and Analytics (website) | Every order the seller ever had (up to 12 overlapping queries), every follower and reel, and the seller's products up to 30 times over (5 owner fields × each id form); Home loaded the products twice | Two small stats docs per seller id plus one doc per day with orders in the chosen window; follower count and reel sums from count/sum queries; Home reuses its product list |
 
 ### S1. Add-product search
 
@@ -385,6 +386,38 @@ says which steps it needs. Brief: `docs/follow-up-seller-admin-performance.md`.
   paste an order ID, invoice, `pay_…` and a phone; Export. Subscriptions:
   filters, search a name and a phone, manual activate and assign pickers.
   Products: categories, search, edit an admin product, assignments.
+
+### S5. Seller dashboard analytics
+
+- **Rules (step 1):** `sellerStats/{sellerKey}` and `sellerDailyStats` are
+  readable by that seller (their Auth UID or phone), admins, and team
+  members with the Users section.
+- **Indexes (step 1):** `sellerDailyStats` (`sellerKey`, `date`); `reels`
+  (`shopOwnerId`, `viewsCount`), (`shopOwnerId`, `likesCount`),
+  (`shopOwnerId`, `commentsCount`) for the reel sums.
+- **Function (step 2):** `sellerStatsOnOrderWrite` (`asia-south1`) keeps
+  `sellerStats/{sellerKey}` (all-time order count, revenue without
+  cancelled/rejected orders, count per status, quantity and revenue per
+  product) and `sellerDailyStats/{sellerKey}_{YYYY-MM-DD}` (orders and
+  revenue per India day). `sellerKey` is the seller's phone as `+91` and 10
+  digits, or the Auth UID for orders without a phone.
+- **Script (step 3, after functions):**
+
+  ```
+  cd functions
+  npx tsx scripts/backfill-seller-stats.ts --project krishidukan-e8315           # preview
+  npx tsx scripts/backfill-seller-stats.ts --project krishidukan-e8315 --write
+  ```
+
+  Safe to re-run; it rewrites every seller's docs from the orders.
+- **Difference:** orders filed under the seller's phone written without
+  `+91` are now counted (the old dashboard's queries for them were refused
+  by the rules, so they were silently missing).
+- **Not changed:** the app's own analytics screen still reads orders (see
+  the audit at the end of the brief).
+- **Check:** a seller's dashboard Home tiles and Analytics (Week, Month,
+  Year, a custom range) show the same order totals, revenue chart, status
+  counts, top products, followers and reel numbers as before the deploy.
 
 ## Testing on UAT
 

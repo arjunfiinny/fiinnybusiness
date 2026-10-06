@@ -1104,6 +1104,28 @@ service cloud.firestore {
       allow read: if isAdmin();
     }
 
+    // A seller's order totals, kept by sellerStatsOnOrderWrite (Admin SDK
+    // only). {sellerKey} is the seller's phone as +91 and 10 digits, or their
+    // Auth UID for orders that carry no phone. The seller, admins and team
+    // members who can open a seller's dashboard may read them.
+    function canReadSellerStats(sellerKey) {
+      return isAdmin() || teamHas('users') || (isAuthed() && (
+        sellerKey == request.auth.uid ||
+        sellerKey == myPhone() ||
+        sellerKey == '+91' + myPhone()
+      ));
+    }
+
+    match /sellerStats/{sellerKey} {
+      allow read: if canReadSellerStats(sellerKey);
+    }
+
+    // sellerDailyStats/{sellerKey}_{YYYY-MM-DD}: list queries must filter on
+    // sellerKey (rules are not filters).
+    match /sellerDailyStats/{docId} {
+      allow read: if canReadSellerStats(resource.data.sellerKey);
+    }
+
     // Per-day platform totals (orders, subscriptions, payments, sign-ups,
     // products added) kept by the platformStatsOn* functions for Admin →
     // Analytics and the Orders page. Written only by the Admin SDK.

@@ -134,7 +134,7 @@ function dayExtra(path: string): Record<string, unknown> {
 
 async function apply(eventId: string, before: Contribution, after: Contribution, what: string): Promise<void> {
   try {
-    await applyOnce(eventId, diffContributions(before, after), dayExtra);
+    await applyOnce("platform", eventId, diffContributions(before, after), dayExtra);
   } catch (err) {
     logger.error("[platformDailyStats] update failed", { what, eventId, err: String(err) });
     throw err; // retried; the event marker keeps it exactly-once

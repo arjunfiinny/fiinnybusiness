@@ -82,16 +82,19 @@ function incrementsOf(fields: Record<string, number>, extra: Record<string, unkn
 }
 
 /**
- * Applies `delta` once per event. `extra(docPath)` adds plain fields to each
+ * Applies `delta` once per event. `scope` names the caller, since several
+ * triggers can receive the same event (one write to orders fires each of
+ * them with the same event id). `extra(docPath)` adds plain fields to each
  * written doc (e.g. its day and owner, so it can be queried).
  */
 export async function applyOnce(
+  scope: string,
   eventId: string,
   delta: Contribution,
   extra: (docPath: string) => Record<string, unknown> = () => ({}),
 ): Promise<boolean> {
   if (delta.size === 0) return false;
-  const marker = db().collection(EVENTS).doc(eventId);
+  const marker = db().collection(EVENTS).doc(`${scope}_${eventId}`.replace(/\//g, "_"));
   return db().runTransaction(async (tx) => {
     if ((await tx.get(marker)).exists) return false;
     for (const [path, fields] of Array.from(delta)) {

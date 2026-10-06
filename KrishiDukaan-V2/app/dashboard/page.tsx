@@ -127,7 +127,8 @@ export default function DashboardPage() {
         // Interactions / Directions all read 0 for every phone-keyed seller.
         // The Analytics page has always passed it (analytics/page.tsx); only
         // this Overview call omitted it, which is why the two pages disagreed.
-        const analytics = await fetchRetailerAnalytics(uid, profile);
+        // Reuses the products just loaded instead of reading them again.
+        const analytics = await fetchRetailerAnalytics(uid, profile, "week", undefined, products as any[]);
 
         const productCount = products.length;
 
