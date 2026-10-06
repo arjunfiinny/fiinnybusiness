@@ -215,9 +215,32 @@ firebase functions:delete ssrkrishidukanadmin --region us-central1 --project pro
 
 ## Seller, manufacturer and admin side (follow-up on this branch)
 
-Same branch, same deploy order: rules and indexes in step 1, functions in
-step 2, scripts in step 3, website in step 4, app in step 5. Each item below
-says which steps it needs. Brief: `docs/follow-up-seller-admin-performance.md`.
+Branch `claude/clever-babbage-0k7r10` (built on `claude/busy-keller-iica2f`,
+which it includes). Same deploy order: rules and indexes in step 1, functions
+in step 2, scripts in step 3, website in step 4, app in step 5. Each item
+below says which steps it needs. Brief and audit:
+`docs/follow-up-seller-admin-performance.md`.
+
+**All of it in one list:**
+
+1. Step 1 (`firebase deploy --only firestore`): the rules and the new
+   indexes below; wait until every index is **Enabled**.
+2. Step 2 (`firebase deploy --only functions`): new functions
+   `platformStatsOnOrderWrite`, `platformStatsOnSubscriptionWrite`,
+   `platformStatsOnPaymentAttemptWrite`, `platformStatsOnUserWrite`,
+   `platformStatsOnProductCreate`, `platformStatsOnProductDelete`,
+   `sellerStatsOnOrderWrite`; changed: the card builder
+   (`syncMarketplaceCardOnProductWrite` and the other card functions, for
+   `nameKeywords`) and `webhookReceiver` (WhatsApp conversation fields).
+3. Step 3, after the functions, each previewed first and then with `--write`
+   (from `functions/`):
+   `backfill-marketplace-cards.ts` (already in step 3; it now also writes
+   `nameKeywords`), `backfill-wa-inbox.ts`, `backfill-platform-daily-stats.ts`,
+   `backfill-seller-stats.ts`. Optional: the `statsEvents` TTL policy (S4a).
+4. Step 4: the website. Step 5: the app.
+
+Nothing here deletes or rewrites existing source data: the scripts only add
+fields to WhatsApp docs and write the new totals collections.
 
 | # | Change | Before | After |
 |---|---|---|---|
@@ -487,8 +510,11 @@ a phone with the UAT flavor from `ENVIRONMENTS.md`
   website reads the raw collections, which this work never changes, so it works
   as before.
 - Functions: the new ones only add `marketplaceCards`, `marketplaceSearch`,
-  `cardMembers`, `storeDirectory`, `storeDirectoryState`, `productStats` and
-  `storeStats`. They can be deleted without affecting the old website or app.
+  `cardMembers`, `storeDirectory`, `storeDirectoryState`, `productStats`,
+  `storeStats`, `platformDailyStats`, `sellerStats`, `sellerDailyStats` and
+  `statsEvents`. They can be deleted without affecting the old website or
+  app. The WhatsApp webhook change only adds fields (`hasIncoming`,
+  `lastMessageAt`) that older code ignores.
 
 ## Not done in this round (follow-ups)
 
