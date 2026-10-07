@@ -1,4 +1,4 @@
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import type { Metadata } from "next";
 import Link from "next/link";
 import {
@@ -11,6 +11,7 @@ import {
   where,
 } from "firebase/firestore/lite";
 import { getClientDb } from "../../lib/firebase-client-server";
+import { sharePhone } from "../../lib/share-links";
 import { buildProductSlug, isListable } from "../../lib/seo/products-server";
 import BrandView from "../../views/BrandView";
 import type {
@@ -34,6 +35,13 @@ interface PageProps {
 
 async function resolveSlugToPhone(slug: string): Promise<string | null> {
   const db = getClientDb();
+  // A shared brand link (app/lib/share-links.ts) carries the phone instead of
+  // the slug: /brand/+919876543210. The page itself redirects it to the slug.
+  const phone = sharePhone(decodeURIComponent(slug));
+  if (phone) {
+    const snap = await getDoc(doc(db, "manufacturers", phone));
+    return snap.exists() ? phone : null;
+  }
   const snap = await getDocs(
     query(collection(db, "manufacturers"), where("slug", "==", slug), limit(1)),
   );
@@ -299,6 +307,11 @@ export default async function BrandPage({ params }: PageProps) {
 
   const data = await fetchPageData(phone);
   if (!data) notFound();
+
+  // Shared link by phone: show the brand at its usual address when it has one.
+  if (sharePhone(decodeURIComponent(slug)) && data.brand.slug && data.brand.slug !== slug) {
+    redirect(`/brand/${encodeURIComponent(data.brand.slug)}`);
+  }
 
   return (
     <main>

@@ -552,6 +552,36 @@ fields to WhatsApp docs and write the new totals collections.
   product to 2+ retailers; remove a retailer and their store disappears
   from the product's sellers.
 
+### S11. Share a shop or brand page (new feature)
+
+- **Links:** `https://krishidukan.com/shop/+91XXXXXXXXXX` (a seller's shop)
+  and `https://krishidukan.com/brand/+91XXXXXXXXXX` (a manufacturer's brand
+  page). Built by `app/lib/share-links.ts` (website) and
+  `WebLinks.shop/brand` (app).
+- **Where to share from:** website: store pages, brand pages, and Dashboard →
+  Profile ("Share shop", and "Share brand page" for manufacturers). App: the
+  shop screen and brand screen (share icon, top right), and Dashboard →
+  Profile ("Share My Shop", "Share Brand Page").
+- **Opening a link:**
+  - Android with the app: opens in the app (the app already handles every
+    krishidukan.com link). iPhone with the app: opens in the app once the
+    new `apple-app-site-association` is live (step 4). iOS can take up to a
+    day or two to pick up the change, through Apple's cache.
+  - Older app versions open them correctly too: `/shop/{phone}` and
+    `/brand/{phone}` are the shop and brand screens in every version.
+  - Without the app: `/shop/{phone}` redirects to the shop's store page
+    (`/stores/{state}/{city}/{shop}`), or to the shop on the store map when
+    it has no city/state yet; `/brand/{phone}` redirects to `/brand/{slug}`
+    (or shows the brand page directly when it has no slug).
+  - The brand page's own address, `/brand/{slug}`, still opens on the
+    website on iPhone. The new app version also opens it on Android, looking
+    up the brand by its slug.
+- **Website (step 4) and app (step 5) only.** No index, function or rule
+  change: the app's slug lookup reads `manufacturers`, which is public.
+- **Check:** share a shop from the app and from the website, then open the
+  link on an Android phone with the app, an iPhone with the app, and a
+  laptop. Each opens that shop. Do the same for a brand page.
+
 ## Testing on UAT
 
 Needs your usual `.env.uat` file and access to `karan-arjun-uat`.

@@ -13,6 +13,8 @@ import {
   type SeoStore,
 } from "../../../../lib/seo/stores-server";
 import StoreProductGrid from "../../../_components/store-product-grid";
+import { ShareLinkButton } from "../../../../components/shared/share-link-button";
+import { shopShareUrl } from "../../../../lib/share-links";
 
 const SITE_URL =
   process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/$/, "") || "https://krishidukan.com";
@@ -249,6 +251,13 @@ export default async function StorePage({ params }: PageProps) {
                 View full brand page
               </Link>
             ) : null}
+            <ShareLinkButton
+              url={shopShareUrl(store.phone ?? store.id)}
+              title={store.name}
+              text={`${store.name}, ${store.city}: see our products and prices on KrishiDukan`}
+              label="Share shop"
+              className="inline-flex items-center justify-center gap-2 rounded-2xl border border-surface-container bg-white px-6 py-3 text-sm font-bold text-on-surface transition-colors hover:border-primary"
+            />
           </div>
         </header>
 

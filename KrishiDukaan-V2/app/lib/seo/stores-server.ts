@@ -467,6 +467,19 @@ export function storeUrlPath(s: SeoStore): string {
   )}`;
 }
 
+/**
+ * The store page of the seller with this phone number (any stored form), or
+ * null when they have none (no city/state yet). For share links (app/shop).
+ */
+export async function storePathForPhone(phone: string): Promise<string | null> {
+  const ten = phone.replace(/\D/g, "").slice(-10);
+  if (ten.length !== 10) return null;
+  const same = (v?: string) =>
+    !!v && /^\+?\d{10,13}$/.test(v) && v.replace(/\D/g, "").slice(-10) === ten;
+  const store = (await getAllStores()).find((s) => same(s.phone) || same(s.id));
+  return store ? storeUrlPath(store) : null;
+}
+
 export interface ResolvedStore {
   store: SeoStore;
   /** Where this store lives now, which may not be where it was asked for. */

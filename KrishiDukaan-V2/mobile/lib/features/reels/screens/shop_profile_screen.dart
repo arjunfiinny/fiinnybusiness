@@ -1,3 +1,5 @@
+import '../../../core/utils/link_share.dart';
+import '../../../core/utils/web_links.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -293,6 +295,19 @@ class _ShopProfileScreenState extends ConsumerState<ShopProfileScreen> {
                   icon: const Icon(Icons.video_call_rounded),
                   tooltip: 'Post a Reel',
                   onPressed: () => context.push('/reels/upload'),
+                ),
+              if (WebLinks.shop(shopPhone) != null)
+                Builder(
+                  builder: (btnContext) => IconButton(
+                    icon: const Icon(Icons.share_rounded),
+                    tooltip: 'Share shop',
+                    onPressed: () {
+                      final user = shopAsync.value;
+                      LinkShare.shop(btnContext,
+                          phone: shopPhone,
+                          name: user?.businessName ?? user?.name ?? 'Shop');
+                    },
+                  ),
                 ),
             ],
           ),
