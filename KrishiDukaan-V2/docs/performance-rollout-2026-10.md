@@ -255,6 +255,7 @@ fields to WhatsApp docs and write the new totals collections.
 | S7 | Product-name lookups (website inventory and subscription pages); app "My listings" | Batches of 10 or 30 read one after another; app: 5 live listeners over the seller's products, most products read 2-3 times | Batches of 30 in parallel; app: one OR query over the products (each read once) plus the legacy `listings` listener |
 | S8 | Seller earnings (website Payouts panel, app Payouts screen) | Every order the seller ever had (website: every id form × 2 fields; app: live listeners), on every visit | The seller stats docs (2) plus the last 9 days' day docs for the "on hold" split; the order-by-order table from the newest 30 orders |
 | S9 | Website seller Enquiries, Reviews and order requests | Every enquiry (newest 200 by array match, unordered), every store review (both lists read in full each visit, the summary computed from them) and every order offer the seller was ever sent, filtered on the device | 50 enquiries per tab and 50 reviews at a time, newest first; tab counts, review count, average and star bars from count/sum queries over all of them; only open offers read |
+| S10 | App manufacturer screens: network, catalog, find retailer, assign and remove | Network list: 2 overlapping live queries; network tiles read the whole network again to count it; catalog: 2 overlapping live queries; "Find retailer" read 100 retailer accounts per search and missed everyone after them; assigning to several retailers and removing a retailer ran one step after another | One OR query for the list and for the catalog (each doc read once); tiles from 6 count queries; search by name, shop, email or phone over all retailers (about 12 small queries); assignments 5 at a time, one failing no longer stops the rest; removal updates the products at once |
 
 ### S1. Add-product search
 
@@ -528,6 +529,28 @@ fields to WhatsApp docs and write the new totals collections.
   counts, newest first, and changing a status moves it between tabs;
   Reviews shows the same average and star bars as before; open order
   requests appear on the dashboard.
+
+### S10. App manufacturer screens
+
+- **Indexes (step 1):** `users` (`role`, `shopName`), (`role`, `email`),
+  (`role`, `phone`) for "Find retailer" (`role`, `name` already existed).
+  The OR and count queries use only equality filters, which Firestore
+  serves without a composite index.
+- **App (step 5) only.** No function, script or rule change; every query
+  filters on the fields the existing rules check (network links on the
+  manufacturer's phone or UID; user search on `role == "retailer"`).
+- **Find retailer** matches names and shop names starting with the typed
+  text (a few capitalizations), an email starting with it, or the phone
+  (full number, or typed from the start). It no longer matches a word in
+  the middle of a name, but finds every retailer, not just the first 100.
+- **Assign product** to several retailers: 5 at a time; if one fails
+  (e.g. already assigned), the others still go through and the message
+  names the ones that didn't.
+- **Check:** manufacturer hub tiles (total, active, invited) match the
+  Network list; My Catalog lists the same products, no duplicates; Find
+  retailer finds a retailer by name, shop, email and phone; assign a
+  product to 2+ retailers; remove a retailer and their store disappears
+  from the product's sellers.
 
 ## Testing on UAT
 

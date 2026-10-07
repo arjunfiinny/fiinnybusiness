@@ -124,17 +124,20 @@ Website seller pages:
   ("paid out", "on hold", "due" need every paid order). Next step: keep
   those totals on the server (extend `sellerStatsOnOrderWrite` with the
   payout states, or a payouts summary doc written by the payout run).
+  **Done (S8).**
 - **Enquiries** (`enquiries-firestore.ts`): `limit(200)` with no order, so
   past 200 enquiries it shows 200 arbitrary ones and can miss the newest.
   The index it needs now exists (S6): switch to `orderBy("createdAt",
-  "desc")`, 50 at a time.
+  "desc")`, 50 at a time. **Done (S9).**
 - **Reviews** (`reviews-firestore.ts`): up to 3 queries × 100 docs, no order,
   so past 100 reviews the newest can be missing. Same fix: newest first with
   a limit (needs `storeReviews` (`storePhone`, `createdAt` ↓) and `reviews`
-  (`ownerId`, `createdAt` ↓) indexes).
+  (`ownerId`, `createdAt` ↓) indexes). **Done (S9)**: the `reviews`
+  queries were dropped instead, since no rule allows reading that collection
+  (they were always refused).
 - **Order requests** (`order-offers.ts` `fetchOpenOffers`): reads every offer
   the seller ever received (`sellerOffers/{phone}/offers`, no filter) and
-  keeps the open ones. Filter `status == "open"` in the query.
+  keeps the open ones. Filter `status == "open"` in the query. **Done (S9).**
 - **Delivery**: one settings doc. Fine.
 
 App manufacturer screens (`mobile/lib/features/manufacturer`):
@@ -142,16 +145,19 @@ App manufacturer screens (`mobile/lib/features/manufacturer`):
 - `watchNetwork` and `fetchNetworkStats`: two overlapping queries
   (`manufacturerPhone`, `manufacturerId`) over the whole network, live, and
   the stats read the whole network again only to count it. Use one OR query
-  for the list and `count()` for the stats.
+  for the list and `count()` for the stats. **Done (S10).**
 - `watchManufacturerCatalog`: the `manufacturerPhone` and `ownerId` branches
   match the same docs (read twice); one OR query, as done for My listings.
+  **Done (S10).**
 - `searchRegisteredRetailers`: reads 100 retailer user docs per search and
   filters on the phone; retailers beyond the first 100 are never found. Use a
   name prefix query (as the admin user search does) or the store directory.
+  **Done (S10).**
 - `assignProductToRetailer` (Assign product): for each selected retailer, one
   after another, 2 subscription queries, a duplicate check, the product and
   the retailer doc; `removeNetworkRetailer` reads and rewrites each product's
   seller list one by one. Rare write actions; worth running in parallel.
+  **Done (S10).**
 
 Also fixed while auditing: the app dashboard home (`fetchStats`) read every
 order to count them; it now uses the seller stats docs (see S7).
@@ -161,9 +167,11 @@ dealers list is small).
 
 ## Still open
 
-- Payout/earnings totals on the server (above).
-- The findings above for web enquiries, reviews, order requests and the app's
-  manufacturer screens.
+- Product reviews (`productReviews`) are not shown on the seller's Reviews
+  page (they never were); showing them there is a feature decision.
+- The app's "Find retailer" search matches names and shop names from their
+  start (and email prefix, phone); the old search also matched a word in the
+  middle of a name, but only among the first 100 retailers.
 - Admin "App update" and "Reel promo" WhatsApp templates send to every user,
   so they still read the user list when opened (by design for now; a
   server-side send that pages through users would remove it).

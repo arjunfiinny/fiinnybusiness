@@ -68,79 +68,61 @@ class ManufacturerRepository {
 
   // ── Retailer network ──────────────────────────────────────────────────────
 
-  Stream<List<NetworkRetailerModel>> watchNetwork(String manufacturerPhone) {
+  /// The manufacturer's network links: filed under their phone or their
+  /// Auth UID. One OR query, so a link carrying both is read once (two
+  /// listeners used to read it twice).
+  Query<Map<String, dynamic>>? _networkQuery(String manufacturerPhone) {
     final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
-    final streams = <Stream<QuerySnapshot>>[
-      _db
-          .collection('manufacturerRetailers')
-          .where('manufacturerPhone', isEqualTo: manufacturerPhone)
-          .snapshots(),
+    final matches = <Filter>[
+      if (manufacturerPhone.isNotEmpty)
+        Filter('manufacturerPhone', isEqualTo: manufacturerPhone),
+      if (uid.isNotEmpty) Filter('manufacturerId', isEqualTo: uid),
     ];
-    if (uid.isNotEmpty) {
-      streams.add(_db
-          .collection('manufacturerRetailers')
-          .where('manufacturerId', isEqualTo: uid)
-          .snapshots());
-    }
-
-    final controller = StreamController<List<NetworkRetailerModel>>();
-    final results = List<List<DocumentSnapshot>>.filled(streams.length, []);
-
-    void emit() {
-      final seen = <String>{};
-      final merged = results
-          .expand((docs) => docs)
-          .where((d) => seen.add(d.id))
-          .map(NetworkRetailerModel.fromFirestore)
-          .where((r) => r.status != 'revoked' && r.onboardingStatus != 'removed')
-          .toList()
-        ..sort((a, b) {
-          // Sort order: active first, then invited, then revoked/inactive/removed
-          const order = {'active': 0, 'invited': 1, 'revoked': 2};
-          return (order[a.status] ?? 3).compareTo(order[b.status] ?? 3);
-        });
-      if (!controller.isClosed) controller.add(merged);
-    }
-
-    final subs = List.generate(streams.length, (i) {
-      return streams[i].listen((s) {
-        results[i] = s.docs;
-        emit();
-      }, onError: controller.addError);
-    });
-
-    controller.onCancel = () {
-      for (final s in subs) {
-        s.cancel();
-      }
-    };
-    return controller.stream;
+    if (matches.isEmpty) return null;
+    return _db.collection('manufacturerRetailers').where(
+        matches.length == 1 ? matches.single : Filter.or(matches[0], matches[1]));
   }
 
+  Stream<List<NetworkRetailerModel>> watchNetwork(String manufacturerPhone) {
+    final q = _networkQuery(manufacturerPhone);
+    if (q == null) return Stream.value(const []);
+    return q.snapshots().map((snap) => snap.docs
+        .map(NetworkRetailerModel.fromFirestore)
+        .where((r) => r.status != 'revoked' && r.onboardingStatus != 'removed')
+        .toList()
+      ..sort((a, b) {
+        // Sort order: active first, then invited, then revoked/inactive/removed
+        const order = {'active': 0, 'invited': 1, 'revoked': 2};
+        return (order[a.status] ?? 3).compareTo(order[b.status] ?? 3);
+      }));
+  }
+
+  /// Network tile numbers from count queries (one read per 1,000 links)
+  /// instead of reading every link. Same definitions as before: total leaves
+  /// out revoked and removed links; active needs both fields active.
   Future<Map<String, int>> fetchNetworkStats(
       String manufacturerPhone) async {
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
-    final queries = <Future<QuerySnapshot>>[
-      _db
-          .collection('manufacturerRetailers')
-          .where('manufacturerPhone', isEqualTo: manufacturerPhone)
-          .get(),
-    ];
-    if (uid.isNotEmpty) {
-      queries.add(_db
-          .collection('manufacturerRetailers')
-          .where('manufacturerId', isEqualTo: uid)
-          .get());
-    }
-    final snaps = await Future.wait(queries);
-    final seen = <String>{};
-    final docs = snaps.expand((s) => s.docs).where((d) => seen.add(d.id)).toList();
-    final retailers = docs.map(NetworkRetailerModel.fromFirestore).toList();
-
+    final q = _networkQuery(manufacturerPhone);
+    if (q == null) return {'total': 0, 'active': 0, 'invited': 0};
+    Future<int> count(Query<Map<String, dynamic>> query) async =>
+        (await query.count().get()).count ?? 0;
+    final n = await Future.wait([
+      count(q),
+      count(q.where('status', isEqualTo: 'revoked')),
+      count(q.where('onboardingStatus', isEqualTo: 'removed')),
+      count(q
+          .where('status', isEqualTo: 'revoked')
+          .where('onboardingStatus', isEqualTo: 'removed')),
+      count(q
+          .where('status', isEqualTo: 'active')
+          .where('onboardingStatus', isEqualTo: 'active')),
+      count(q.where('status', isEqualTo: 'invited')),
+    ]);
     return {
-      'total': retailers.where((r) => r.status != 'revoked' && r.onboardingStatus != 'removed').length,
-      'active': retailers.where((r) => r.status == 'active' && r.onboardingStatus == 'active').length,
-      'invited': retailers.where((r) => r.status == 'invited').length,
+      // all − revoked − removed + (both, subtracted twice)
+      'total': n[0] - n[1] - n[2] + n[3],
+      'active': n[4],
+      'invited': n[5],
     };
   }
 
@@ -518,26 +500,24 @@ class ManufacturerRepository {
 
     await batch.commit();
 
-    // 4. Strip availability entries (fire-and-forget-ish)
-    if (mfrProductIds.isNotEmpty) {
-      for (final mfrProductId in mfrProductIds) {
-        try {
-          final snap = await _db.collection('products').doc(mfrProductId).get();
-          if (snap.exists) {
-            final data = snap.data() as Map<String, dynamic>;
-            final availability = data['availability'] as List<dynamic>?;
-            if (availability != null) {
-              final updated = availability
-                  .where((e) => e is Map && e['storeId'] != retailerDocId)
-                  .toList();
-              await _db.collection('products').doc(mfrProductId).update({
-                'availability': updated,
-              });
-            }
+    // 4. Strip availability entries, every product at once (each is its own
+    // doc; read one after another this took a round trip per product).
+    await Future.wait(mfrProductIds.toSet().map((mfrProductId) async {
+      try {
+        final ref = _db.collection('products').doc(mfrProductId);
+        final snap = await ref.get();
+        if (snap.exists) {
+          final data = snap.data() as Map<String, dynamic>;
+          final availability = data['availability'] as List<dynamic>?;
+          if (availability != null) {
+            final updated = availability
+                .where((e) => e is Map && e['storeId'] != retailerDocId)
+                .toList();
+            await ref.update({'availability': updated});
           }
-        } catch (_) {}
-      }
-    }
+        }
+      } catch (_) {}
+    }));
 
     // 5. Sync mirror
     if (manufacturerPhone.isNotEmpty) {
@@ -623,21 +603,25 @@ class ManufacturerRepository {
     // branch is dropped entirely: it's redundant with the ownerId==uid stream
     // below, since the writer that creates a manufacturer's own product
     // always sets both fields to the same value.
+    final owner = <Filter>[
+      if (manufacturerPhone.isNotEmpty)
+        Filter('manufacturerPhone', isEqualTo: manufacturerPhone),
+      if (uid.isNotEmpty) Filter('ownerId', isEqualTo: uid),
+    ];
+    // Both product branches in one OR query: the manufacturer's own docs
+    // carry both fields, so two listeners read each of them twice.
     final streams = <Stream<QuerySnapshot>>[
       _db.collection('catalog')
           .where('createdByPhone', isEqualTo: manufacturerPhone)
           .snapshots(),
-      _db.collection('products')
-          .where('manufacturerPhone', isEqualTo: manufacturerPhone)
-          .where('ownerType', isEqualTo: 'manufacturer')
-          .snapshots(),
+      if (owner.isNotEmpty)
+        _db.collection('products')
+            .where(Filter.and(
+              Filter('ownerType', isEqualTo: 'manufacturer'),
+              owner.length == 1 ? owner.single : Filter.or(owner[0], owner[1]),
+            ))
+            .snapshots(),
     ];
-    if (uid.isNotEmpty) {
-      streams.add(_db.collection('products')
-          .where('ownerId', isEqualTo: uid)
-          .where('ownerType', isEqualTo: 'manufacturer')
-          .snapshots());
-    }
 
     final controller = StreamController<List<CatalogModel>>();
     final results = List<List<DocumentSnapshot>>.filled(streams.length, []);
@@ -1190,30 +1174,69 @@ class ManufacturerRepository {
     };
   }
 
-  /// Searches registered KrishiDukan users with role='retailer'.
-  /// Results are filtered client-side against [query] (name, shopName, email, phone).
+  /// Searches registered KrishiDukan users with role='retailer' by name or
+  /// shop name (starting with the typed text, a few capitalizations), email
+  /// prefix, or phone. Small queries over every retailer: this used to read
+  /// the first 100 retailers and filter them on the phone, so anyone past
+  /// those 100 could not be found.
   Future<List<Map<String, dynamic>>> searchRegisteredRetailers(
       String query) async {
-    final q = query.toLowerCase().trim();
-    if (q.isEmpty) return [];
-    final snap = await _db
-        .collection('users')
-        .where('role', isEqualTo: 'retailer')
-        .limit(100)
-        .get();
-    return snap.docs
-        .map((d) => <String, dynamic>{...d.data(), 'id': d.id})
-        .where((u) {
-          final name = (u['name'] as String? ?? '').toLowerCase();
-          final shop = (u['shopName'] as String? ?? '').toLowerCase();
-          final email = (u['email'] as String? ?? '').toLowerCase();
-          final phone = (u['phone'] as String? ?? '').toLowerCase();
-          return name.contains(q) ||
-              shop.contains(q) ||
-              email.contains(q) ||
-              phone.contains(q);
-        })
-        .toList();
+    final t = query.trim();
+    if (t.isEmpty) return [];
+    final users = _db.collection('users').where('role', isEqualTo: 'retailer');
+
+    Future<List<QueryDocumentSnapshot<Map<String, dynamic>>>> run(
+        Query<Map<String, dynamic>> q) async {
+      try {
+        return (await q.limit(10).get()).docs;
+      } catch (_) {
+        return const [];
+      }
+    }
+
+    Query<Map<String, dynamic>> prefix(String field, String p) => users
+        .where(field, isGreaterThanOrEqualTo: p)
+        .where(field, isLessThanOrEqualTo: '$p\uf8ff');
+
+    final reads = <Future<List<QueryDocumentSnapshot<Map<String, dynamic>>>>>[];
+    final lower = t.toLowerCase();
+    final variants = <String>{
+      t,
+      lower,
+      lower[0].toUpperCase() + lower.substring(1),
+      lower.replaceAllMapped(RegExp(r'(^|\s)\S'), (m) => m[0]!.toUpperCase()),
+      t.toUpperCase(),
+    };
+    for (final v in variants) {
+      reads.add(run(prefix('name', v)));
+      reads.add(run(prefix('shopName', v)));
+    }
+    if (RegExp(r'^[a-z0-9._@+-]+$').hasMatch(lower) &&
+        RegExp(r'[a-z]').hasMatch(lower)) {
+      reads.add(run(prefix('email', lower)));
+    }
+    final digits = t.replaceAll(RegExp(r'\D'), '');
+    if (digits.length >= 4 &&
+        digits.length >= t.replaceAll(RegExp(r'[\s+-]'), '').length) {
+      if (digits.length >= 10) {
+        final ten = digits.substring(digits.length - 10);
+        reads.add(run(users.where('phone', whereIn: ['+91$ten', ten, '91$ten'])));
+      } else {
+        // Typed from the start of the number, with or without 91.
+        final local = digits.startsWith('91') && digits.length > 5
+            ? digits.substring(2)
+            : digits;
+        reads.add(run(prefix('phone', '+91$local')));
+      }
+    }
+
+    final byId = <String, Map<String, dynamic>>{};
+    for (final docs in await Future.wait(reads)) {
+      for (final d in docs) {
+        byId[d.id] = <String, dynamic>{...d.data(), 'id': d.id};
+      }
+    }
+    return byId.values.toList();
   }
 
   /// Links an existing KrishiDukan retailer to the manufacturer's network.
