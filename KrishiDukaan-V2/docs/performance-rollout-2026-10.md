@@ -630,5 +630,11 @@ production):
 - Web and functions typecheck: no new errors. `next build` compiles every page
   and route; its later page-data step needs the production Razorpay keys, which
   the test environment doesn't have, so run the full build where they are set.
+- Seller, manufacturer and admin side (S1–S10), on the Firestore emulator
+  as the real roles (seller, manufacturer, admin, team member, another
+  seller): every new query passes the rules and others are refused; the new
+  totals (platform day docs, seller stats, earnings, counts) equal what the
+  old code computed from the raw collections; paging returns every row once,
+  newest first. `flutter test` 141 passing.
 - Not tested here: the storefront and app UI against real data (no access to
   production). That is what the UAT pass in "Deploy order" is for.
