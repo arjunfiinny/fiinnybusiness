@@ -75,6 +75,9 @@ class SellerEarnings {
 
   final List<SellerEarningsRow> rows;
 
+  /// Payable orders in the totals (all time); [rows] may hold only recent ones.
+  final int counted;
+
   const SellerEarnings({
     this.due = 0,
     this.onHold = 0,
@@ -83,9 +86,52 @@ class SellerEarnings {
     this.gatewayFees = 0,
     this.nextReleaseOn,
     this.rows = const [],
+    this.counted = 0,
   });
 
-  bool get isEmpty => rows.isEmpty;
+  bool get isEmpty => rows.isEmpty && counted == 0;
+}
+
+/// A delivered, not yet transferred order, from a sellerDailyStats hold entry.
+class EarningsHold {
+  final double net;
+  final DateTime deliveredAt;
+  const EarningsHold({required this.net, required this.deliveredAt});
+}
+
+/// The seller's earnings from the server-kept totals (sellerStats.earnings,
+/// kept by the sellerStatsOnOrderWrite Cloud Function with the same rules as
+/// [computeSellerEarnings]) instead of every order: lifetime totals per
+/// state, and the holds of the last few days, since anything delivered
+/// earlier is past its hold and due. [rows] come from the newest orders.
+SellerEarnings earningsFromStats(
+  Map<String, double> totals,
+  List<EarningsHold> holds, {
+  List<SellerEarningsRow> rows = const [],
+  DateTime? now,
+}) {
+  final at = now ?? DateTime.now();
+  double onHold = 0;
+  DateTime? nextRelease;
+  for (final h in holds) {
+    if (h.net <= 0) continue;
+    final release = h.deliveredAt.add(const Duration(days: kPayoutHoldDays));
+    if (release.isAfter(at)) {
+      onHold += h.net;
+      if (nextRelease == null || release.isBefore(nextRelease)) nextRelease = release;
+    }
+  }
+  final delivered = totals['delivered'] ?? 0;
+  return SellerEarnings(
+    due: delivered - onHold > 0 ? delivered - onHold : 0,
+    onHold: onHold,
+    awaitingDelivery: totals['awaiting'] ?? 0,
+    paidOut: totals['transferred'] ?? 0,
+    gatewayFees: totals['gatewayFees'] ?? 0,
+    nextReleaseOn: nextRelease,
+    rows: rows,
+    counted: (totals['orders'] ?? 0).round(),
+  );
 }
 
 /// The seller's share of an order, BEFORE refunds.

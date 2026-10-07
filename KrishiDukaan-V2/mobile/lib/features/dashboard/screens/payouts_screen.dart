@@ -34,6 +34,7 @@ class PayoutsScreen extends ConsumerWidget {
       appBar: const AppTopBar(title: 'Payouts'),
       body: RefreshIndicator(
         onRefresh: () async {
+          ref.invalidate(sellerEarningsStatsProvider);
           ref.invalidate(payoutAccountProvider);
           await ref.read(payoutAccountProvider.future);
         },

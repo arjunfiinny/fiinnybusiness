@@ -252,3 +252,54 @@ export function computeSellerEarnings(
 
   return { due, onHold, awaitingDelivery, paidOut, gatewayFees, platformFees, nextReleaseOn, rows };
 }
+
+/** One state's totals in sellerStats.earnings (functions/src/stats/seller-stats.ts). */
+type EarningsBucket = { net?: number; webNet?: number; platformFee?: number };
+
+/** sellerStats/{key}.earnings, summed over the seller's keys. */
+export type EarningsStats = {
+  orders?: number;
+  gatewayFees?: number;
+  platformFees?: number;
+  awaiting?: EarningsBucket;
+  delivered?: EarningsBucket;
+  transferred?: EarningsBucket;
+};
+
+/** A delivered, not yet transferred order from a sellerDailyStats hold entry. */
+export type EarningsHold = { net: number; webNet: number; deliveredAtMs: number };
+
+/**
+ * The summary computeSellerEarnings gives, from the server-kept totals
+ * instead of every order: lifetime totals per state, and the holds of the
+ * last few days (anything delivered earlier is past its hold and due). Rows
+ * are not included; take them from the newest orders.
+ */
+export function summaryFromStats(
+  stats: EarningsStats,
+  holds: EarningsHold[],
+  now = new Date(),
+): Omit<SellerEarningsSummary, "rows"> & { counted: number } {
+  const webNet = (b?: EarningsBucket) => Number(b?.webNet ?? 0) || 0;
+  let onHold = 0;
+  let nextReleaseOn: Date | null = null;
+  for (const h of holds) {
+    if (!(h.webNet > 0) || !(h.deliveredAtMs > 0)) continue;
+    const releaseOn = new Date(h.deliveredAtMs + PAYOUT_HOLD_DAYS * 24 * 60 * 60 * 1000);
+    if (releaseOn > now) {
+      onHold += h.webNet;
+      if (!nextReleaseOn || releaseOn < nextReleaseOn) nextReleaseOn = releaseOn;
+    }
+  }
+  const round = (n: number) => Math.round(n * 100) / 100;
+  return {
+    due: round(Math.max(0, webNet(stats.delivered) - onHold)),
+    onHold: round(onHold),
+    awaitingDelivery: round(webNet(stats.awaiting)),
+    paidOut: round(webNet(stats.transferred)),
+    gatewayFees: round(Number(stats.gatewayFees ?? 0) || 0),
+    platformFees: round(Number(stats.platformFees ?? 0) || 0),
+    nextReleaseOn,
+    counted: Number(stats.orders ?? 0) || 0,
+  };
+}

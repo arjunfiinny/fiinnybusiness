@@ -307,4 +307,62 @@ void main() {
       expect(o.total, 1234);
     });
   });
+
+  group('earningsFromStats (server-kept totals)', () {
+    // Totals as sellerStatsOnOrderWrite keeps them: per time-independent
+    // state, plus a hold entry per delivered order with a delivery time.
+    (Map<String, double>, List<EarningsHold>) statsOf(List<OrderModel> orders) {
+      final totals = <String, double>{};
+      final holds = <EarningsHold>[];
+      void add(String k, double v) => totals[k] = (totals[k] ?? 0) + v;
+      for (final o in orders) {
+        final r = payoutStateFor(o, now: DateTime.parse(_now));
+        if (r.state == PayoutState.notPayable) continue;
+        final fee = (o.payment?.gatewayFee ?? 0) + (o.payment?.gatewayTax ?? 0);
+        final net = payableGrossFor(o) - fee > 0 ? payableGrossFor(o) - fee : 0.0;
+        final phase = switch (r.state) {
+          PayoutState.transferred => 'transferred',
+          PayoutState.awaitingDelivery => 'awaiting',
+          _ => 'delivered',
+        };
+        add(phase, net);
+        add('orders', 1);
+        add('gatewayFees', fee);
+        final at = deliveredAtFor(o);
+        if (phase == 'delivered' && at != null) {
+          holds.add(EarningsHold(net: net, deliveredAt: at));
+        }
+      }
+      return (totals, holds);
+    }
+
+    final orders = [
+      _order(id: 'a', status: 'accepted', total: 500, gatewayFee: 10, gatewayTax: 1.8),
+      _order(id: 'h', status: 'delivered', total: 300, deliveredAt: '2026-08-27T09:00:00.000Z'),
+      _order(id: 'd', status: 'delivered', total: 400, deliveredAt: '2026-08-10T09:00:00.000Z', refundedAmount: 100),
+      _order(id: 'n', status: 'delivered', total: 90),
+      _order(id: 't', status: 'delivered', total: 1000, deliveredAt: '2026-07-01T00:00:00.000Z', transferId: 'tr_1', gatewayFee: 20),
+      _order(id: 'c', status: 'cancelled', total: 999),
+    ];
+
+    for (final when in ['2026-08-29T12:00:00.000Z', '2026-09-04T00:00:00.000Z', '2026-09-10T00:00:00.000Z']) {
+      test('matches computeSellerEarnings at $when', () {
+        final now = DateTime.parse(when);
+        final expected = computeSellerEarnings(orders, now: now);
+        final (totals, holds) = statsOf(orders);
+        final got = earningsFromStats(totals, holds, now: now);
+        expect(got.due, closeTo(expected.due, 0.001));
+        expect(got.onHold, closeTo(expected.onHold, 0.001));
+        expect(got.awaitingDelivery, closeTo(expected.awaitingDelivery, 0.001));
+        expect(got.paidOut, closeTo(expected.paidOut, 0.001));
+        expect(got.gatewayFees, closeTo(expected.gatewayFees, 0.001));
+        expect(got.nextReleaseOn, expected.nextReleaseOn);
+        expect(got.counted, expected.rows.length);
+      });
+    }
+
+    test('no orders is empty', () {
+      expect(earningsFromStats(const {}, const []).isEmpty, isTrue);
+    });
+  });
 }

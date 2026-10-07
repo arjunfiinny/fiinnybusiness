@@ -46,7 +46,7 @@ async function main(): Promise<void> {
     const snap = await q.get();
     for (const d of snap.docs) {
       const data = d.data();
-      for (const [path, fields] of Array.from(seller.sellerContribution(data))) {
+      for (const [path, fields] of Array.from(seller.sellerContribution(data, d.id))) {
         for (const [f, v] of Object.entries(fields)) addTo(totals, path, f, v);
         const list = ordersByPath.get(path) ?? [];
         list.push(data);

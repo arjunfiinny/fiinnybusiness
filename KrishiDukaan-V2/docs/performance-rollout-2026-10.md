@@ -253,6 +253,7 @@ fields to WhatsApp docs and write the new totals collections.
 | S5 | Seller dashboard Home and Analytics (website) | Every order the seller ever had (up to 12 overlapping queries), every follower and reel, and the seller's products up to 30 times over (5 owner fields × each id form); Home loaded the products twice | Two small stats docs per seller id plus one doc per day with orders in the chosen window; follower count and reel sums from count/sum queries; Home reuses its product list |
 | S6 | Order and enquiry lists (website seller Orders; app seller Orders, manufacturer hub, my Orders, Enquiries, Analytics) | Every order (website: every id form × 2 fields; app: 3 live listeners each, one always refused by the rules) and every enquiry, live, no limit | Newest 30 per query, merged in date order; app: live listener on the first page only, "Load more" reads older pages once; tab counts and paid totals from the seller stats docs; app Analytics reads only the chosen window |
 | S7 | Product-name lookups (website inventory and subscription pages); app "My listings" | Batches of 10 or 30 read one after another; app: 5 live listeners over the seller's products, most products read 2-3 times | Batches of 30 in parallel; app: one OR query over the products (each read once) plus the legacy `listings` listener |
+| S8 | Seller earnings (website Payouts panel, app Payouts screen) | Every order the seller ever had (website: every id form × 2 fields; app: live listeners), on every visit | The seller stats docs (2) plus the last 9 days' day docs for the "on hold" split; the order-by-order table from the newest 30 orders |
 
 ### S1. Add-product search
 
@@ -485,6 +486,26 @@ fields to WhatsApp docs and write the new totals collections.
   app Profile → My listings shows the same products as before (retailer and
   manufacturer); the app dashboard tiles show the same listing, in-stock,
   pending and total order numbers.
+
+### S8. Seller earnings
+
+- **Function (step 2):** `sellerStatsOnOrderWrite` (S5) also keeps
+  `earnings` on `sellerStats` (payable orders, gateway and platform fees, and
+  the net amount per state: awaiting delivery, delivered but not yet
+  transferred, transferred) and, for each delivered order not yet
+  transferred, a hold entry (`holds.{orderId}`: net and delivery time) on the
+  day doc of its delivery day. Same rules as `seller-earnings.ts` and
+  `seller_earnings.dart`.
+- **Script (step 3):** `backfill-seller-stats.ts` (already in the list)
+  builds these too.
+- **Website (step 4) and app (step 5):** "Ready to transfer", "On hold",
+  "Awaiting delivery", "Paid out" and the next release date come from those
+  docs; "on hold" vs "ready" is still worked out to the minute (7 days after
+  delivery) from the hold entries, so money moves from one to the other on
+  time without any write. The order-by-order table shows the newest orders.
+- **Check:** a seller's Payouts page (website and app) shows the same four
+  amounts and next release date as before the deploy; mark an order
+  delivered and it appears under "On hold" within seconds.
 
 ## Testing on UAT
 

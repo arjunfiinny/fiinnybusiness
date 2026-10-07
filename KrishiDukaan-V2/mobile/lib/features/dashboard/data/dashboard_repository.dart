@@ -11,6 +11,7 @@ import '../../../core/data/paged_feed.dart';
 import '../../../core/models/listing_model.dart';
 import '../../../core/models/order_model.dart';
 import '../../../core/models/subscription_model.dart';
+import 'seller_earnings.dart';
 
 class SeatStats {
   final int totalPurchased;
@@ -1235,17 +1236,101 @@ class DashboardRepository {
       ..sort((a, b) => (b.createdAt ?? DateTime(0)).compareTo(a.createdAt ?? DateTime(0)));
   }
 
+  /// The seller's earnings totals and recent holds, live: sellerStats/{key}
+  /// (2 docs) and the last [kPayoutHoldDays] + 2 days of sellerDailyStats per
+  /// key the seller's orders are filed under. Feed to earningsFromStats.
+  Stream<({Map<String, double> totals, List<EarningsHold> holds})>
+      watchSellerEarningsStats(String sellerPhone) {
+    final keys = _sellerKeys(sellerPhone);
+    if (keys.isEmpty) {
+      return Stream.value((totals: <String, double>{}, holds: <EarningsHold>[]));
+    }
+    final from = DateTime.now().subtract(const Duration(days: kPayoutHoldDays + 2));
+    final fromKey = '${from.year}-${from.month.toString().padLeft(2, '0')}-${from.day.toString().padLeft(2, '0')}';
+
+    final controller =
+        StreamController<({Map<String, double> totals, List<EarningsHold> holds})>();
+    final totalsByKey = <String, Map<String, dynamic>>{};
+    final daysByKey = <String, List<Map<String, dynamic>>>{};
+    var pending = keys.length * 2;
+    final started = <String>{};
+
+    void emit() {
+      if (pending > 0 || controller.isClosed) return;
+      final totals = <String, double>{};
+      void add(String k, Object? v) => totals[k] = (totals[k] ?? 0) + ((v as num?)?.toDouble() ?? 0);
+      for (final e in totalsByKey.values) {
+        add('orders', e['orders']);
+        add('gatewayFees', e['gatewayFees']);
+        for (final phase in ['awaiting', 'delivered', 'transferred']) {
+          final b = e[phase];
+          add(phase, b is Map ? b['net'] : null);
+        }
+      }
+      final holds = <EarningsHold>[];
+      for (final days in daysByKey.values) {
+        for (final day in days) {
+          final h = day['holds'];
+          if (h is! Map) continue;
+          for (final entry in h.values) {
+            if (entry is! Map) continue;
+            final net = (entry['net'] as num?)?.toDouble() ?? 0;
+            final atMs = (entry['at'] as num?)?.toInt() ?? 0;
+            if (net > 0 && atMs > 0) {
+              holds.add(EarningsHold(net: net, deliveredAt: DateTime.fromMillisecondsSinceEpoch(atMs)));
+            }
+          }
+        }
+      }
+      controller.add((totals: totals, holds: holds));
+    }
+
+    void ready(String id) {
+      if (started.add(id)) pending--;
+      emit();
+    }
+
+    final subs = <StreamSubscription>[];
+    for (final key in keys) {
+      subs.add(_db.collection('sellerStats').doc(key).snapshots().listen((d) {
+        final e = d.data()?['earnings'];
+        totalsByKey[key] = e is Map ? Map<String, dynamic>.from(e) : {};
+        ready('t$key');
+      }, onError: (_) => ready('t$key')));
+      subs.add(_db
+          .collection('sellerDailyStats')
+          .where('sellerKey', isEqualTo: key)
+          .where('date', isGreaterThanOrEqualTo: fromKey)
+          .snapshots()
+          .listen((s) {
+        daysByKey[key] = s.docs.map((d) => d.data()).toList();
+        ready('d$key');
+      }, onError: (_) => ready('d$key')));
+    }
+    controller.onCancel = () {
+      for (final s in subs) {
+        s.cancel();
+      }
+    };
+    return controller.stream;
+  }
+
+  /// The keys a seller's orders are filed under in sellerStats: the phone as
+  /// +91 and 10 digits, and the Auth UID.
+  List<String> _sellerKeys(String sellerPhone) {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final digits = sellerPhone.replaceAll(RegExp(r'\D'), '');
+    return <String>{
+      if (digits.length >= 10) '+91${digits.substring(digits.length - 10)}',
+      if (uid.isNotEmpty) uid,
+    }.toList();
+  }
+
   /// All-time order totals from sellerStats/{key}, kept by the
   /// sellerStatsOnOrderWrite Cloud Function: one doc per key the seller's
   /// orders are filed under (+91 phone, Auth UID), each order under one key.
   Future<SellerOrderTotals> fetchSellerOrderTotals(String sellerPhone) async {
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
-    final digits = sellerPhone.replaceAll(RegExp(r'\D'), '');
-    final keys = <String>{
-      if (digits.length >= 10) '+91${digits.substring(digits.length - 10)}',
-      if (uid.isNotEmpty) uid,
-    };
-    final docs = await Future.wait(keys.map((k) => _db
+    final docs = await Future.wait(_sellerKeys(sellerPhone).map((k) => _db
         .collection('sellerStats')
         .doc(k)
         .get()

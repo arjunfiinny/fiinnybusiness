@@ -11,6 +11,7 @@ import {
 } from "firebase/firestore";
 import { db } from "../../firebase";
 import { getDocsByIds } from "../../lib/firestore-by-ids";
+import { PAYOUT_HOLD_DAYS, type EarningsHold, type EarningsStats } from "./seller-earnings";
 
 export type SearchAppearanceStats = {
   impressions: string;
@@ -161,6 +162,7 @@ function sellerKeyOf(value: unknown): string {
 }
 
 type SellerTotals = {
+  earnings?: EarningsStats;
   orders?: { count?: number; revenue?: number; paid?: number; paidAmount?: number; status?: Record<string, number> };
   items?: Record<string, { name?: string; qty?: number; revenue?: number }>;
 };
@@ -214,6 +216,44 @@ export async function fetchSellerOrderTotals(uid: string | null, profile?: any):
     for (const [k, n] of Object.entries(totals.orders?.status ?? {})) out.status[k] = (out.status[k] ?? 0) + (Number(n) || 0);
   }
   return out;
+}
+
+/**
+ * The seller's earnings totals (sellerStats.earnings, summed over their keys)
+ * and the hold entries of the last PAYOUT_HOLD_DAYS + 2 days — a few doc
+ * reads instead of every order. Feed them to summaryFromStats.
+ */
+export async function fetchSellerEarningsStats(
+  uid: string | null,
+  profile?: any,
+): Promise<{ stats: EarningsStats; holds: EarningsHold[] }> {
+  const from = new Date();
+  from.setDate(from.getDate() - (PAYOUT_HOLD_DAYS + 2));
+  const { results, errors } = await readSellerOrderStats(sellerKeysFor(uid, profile), getLocalDayKey(from), getLocalDayKey(new Date()));
+  if (results.length === 0 && errors.length > 0) throw errors[0];
+  const stats: EarningsStats = {};
+  const add = (a: number | undefined, b: unknown) => (a ?? 0) + (Number(b ?? 0) || 0);
+  const holds: EarningsHold[] = [];
+  for (const { totals, days } of results) {
+    const e = totals.earnings ?? {};
+    stats.orders = add(stats.orders, e.orders);
+    stats.gatewayFees = add(stats.gatewayFees, e.gatewayFees);
+    stats.platformFees = add(stats.platformFees, e.platformFees);
+    for (const phase of ["awaiting", "delivered", "transferred"] as const) {
+      const cur = stats[phase] ?? {};
+      stats[phase] = {
+        net: add(cur.net, e[phase]?.net),
+        webNet: add(cur.webNet, e[phase]?.webNet),
+        platformFee: add(cur.platformFee, e[phase]?.platformFee),
+      };
+    }
+    for (const day of days) {
+      for (const h of Object.values((day.holds ?? {}) as Record<string, any>)) {
+        holds.push({ net: Number(h?.net ?? 0) || 0, webNet: Number(h?.webNet ?? 0) || 0, deliveredAtMs: Number(h?.at ?? 0) || 0 });
+      }
+    }
+  }
+  return { stats, holds };
 }
 
 /** Products the dashboard already loaded, so analytics doesn't read them again. */

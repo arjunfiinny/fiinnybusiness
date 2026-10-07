@@ -2,13 +2,15 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Loader2, RefreshCw } from "lucide-react";
-import { fetchIncomingOrdersForSeller } from "../../firebase";
+import { createSellerOrdersPager } from "../../firebase";
 import {
   computeSellerEarnings,
   PAYOUT_HOLD_DAYS,
+  summaryFromStats,
   type PayoutState,
   type SellerEarningsSummary,
 } from "../_lib/seller-earnings";
+import { fetchSellerEarningsStats } from "../_lib/analytics-firestore";
 
 /**
  * "What am I owed?" for a seller.
@@ -50,7 +52,7 @@ export function SellerEarningsPanel({
   uid: string | null;
   profile?: unknown;
 }) {
-  const [summary, setSummary] = useState<SellerEarningsSummary | null>(null);
+  const [summary, setSummary] = useState<(SellerEarningsSummary & { counted: number }) | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
 
@@ -62,12 +64,16 @@ export function SellerEarningsPanel({
     setLoading(true);
     setError(false);
     try {
-      // Reuses the dashboard's own order fetch, which already resolves the
-      // seller's several identity forms (uid, phone variants) — orders are
-      // keyed inconsistently across platforms and a narrower query silently
-      // returns nothing for phone-keyed sellers.
-      const orders = await fetchIncomingOrdersForSeller(uid, "retailer", profile);
-      setSummary(computeSellerEarnings(orders as never[]));
+      // Totals from the seller's stats docs (kept by sellerStatsOnOrderWrite
+      // with the same rules as computeSellerEarnings), the table from the
+      // newest orders — instead of reading every order the seller ever had.
+      const [{ stats, holds }, pager] = await Promise.all([
+        fetchSellerEarningsStats(uid, profile),
+        createSellerOrdersPager(uid, profile, { pageSize: 30 }),
+      ]);
+      const recent = await pager.next();
+      const { rows } = computeSellerEarnings(recent.map((d) => ({ id: d.id, ...d.data() })) as never[]);
+      setSummary({ ...summaryFromStats(stats, holds), rows });
     } catch {
       setError(true);
     } finally {
@@ -103,7 +109,7 @@ export function SellerEarningsPanel({
     );
   }
 
-  const { due, onHold, awaitingDelivery, paidOut, gatewayFees, nextReleaseOn, rows } = summary;
+  const { due, onHold, awaitingDelivery, paidOut, gatewayFees, nextReleaseOn, rows, counted } = summary;
 
   return (
     <section className="rounded-2xl border border-outline-variant/40 bg-surface-container-lowest p-4 md:p-5">
@@ -183,15 +189,15 @@ export function SellerEarningsPanel({
               ))}
             </tbody>
           </table>
-          {rows.length > 25 && (
+          {Math.max(rows.length, counted) > 25 && (
             <p className="mt-2 text-xs text-on-surface-variant">
-              Showing the 25 most recent of {rows.length} orders.
+              Showing the 25 most recent of {Math.max(rows.length, counted)} orders.
             </p>
           )}
         </div>
       )}
 
-      {rows.length === 0 && (
+      {rows.length === 0 && counted === 0 && (
         <p className="mt-4 text-sm text-on-surface-variant">
           No orders yet. Earnings appear here as soon as you receive one.
         </p>
