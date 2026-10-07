@@ -12,7 +12,7 @@ import { OpenBillingCard } from "./_components/open-billing-card";
 import { RecentReviews } from "./_components/recent-reviews";
 import { DashboardInventoryHealth } from "./_components/dashboard-inventory-health";
 import { fetchRetailerAnalytics } from "./_lib/analytics-firestore";
-import { fetchOwnerReviews } from "./_lib/reviews-firestore";
+import { fetchRecentOwnerReviews } from "./_lib/reviews-firestore";
 import type { StatMetric, ReviewItem, InventoryProduct } from "./_data/mock";
 import { useI18n } from "../i18n/I18nContext";
 
@@ -187,14 +187,10 @@ export default function DashboardPage() {
             : t('noDataLabel'),
         });
 
-        // Was literally `setReviews([])` — the fetch was never issued, so the
-        // Recent Reviews card rendered its empty state permanently even for
-        // sellers who had reviews. fetchOwnerReviews already merges storeReviews
-        // + both legacy `reviews` shapes and sorts newest-first, which is what
-        // the mobile app shows.
-        const ownerReviews = await fetchOwnerReviews(uid);
+        // The 5 newest store reviews (not every review the seller has).
+        const ownerReviews = await fetchRecentOwnerReviews(uid, 5);
         setReviews(
-          ownerReviews.slice(0, 5).map<ReviewItem>((r) => ({
+          ownerReviews.map<ReviewItem>((r) => ({
             id: r.id,
             author: r.authorName,
             rating: r.rating,

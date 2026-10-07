@@ -254,6 +254,7 @@ fields to WhatsApp docs and write the new totals collections.
 | S6 | Order and enquiry lists (website seller Orders; app seller Orders, manufacturer hub, my Orders, Enquiries, Analytics) | Every order (website: every id form × 2 fields; app: 3 live listeners each, one always refused by the rules) and every enquiry, live, no limit | Newest 30 per query, merged in date order; app: live listener on the first page only, "Load more" reads older pages once; tab counts and paid totals from the seller stats docs; app Analytics reads only the chosen window |
 | S7 | Product-name lookups (website inventory and subscription pages); app "My listings" | Batches of 10 or 30 read one after another; app: 5 live listeners over the seller's products, most products read 2-3 times | Batches of 30 in parallel; app: one OR query over the products (each read once) plus the legacy `listings` listener |
 | S8 | Seller earnings (website Payouts panel, app Payouts screen) | Every order the seller ever had (website: every id form × 2 fields; app: live listeners), on every visit | The seller stats docs (2) plus the last 9 days' day docs for the "on hold" split; the order-by-order table from the newest 30 orders |
+| S9 | Website seller Enquiries, Reviews and order requests | Every enquiry (newest 200 by array match, unordered), every store review (both lists read in full each visit, the summary computed from them) and every order offer the seller was ever sent, filtered on the device | 50 enquiries per tab and 50 reviews at a time, newest first; tab counts, review count, average and star bars from count/sum queries over all of them; only open offers read |
 
 ### S1. Add-product search
 
@@ -462,10 +463,7 @@ fields to WhatsApp docs and write the new totals collections.
   as rejected ones, as the website always did). Analytics reads only the
   orders in the selected window. Older app versions keep their unlimited
   listeners until they update; nothing they read changed.
-- **Not paged:** the app's Payouts screen (earnings) still reads every
-  order the seller has, because its "paid out", "on hold" and "due" totals
-  need each paid order; it lost its always-refused third listener. Keeping
-  those totals on the server is a follow-up.
+- **Payouts:** the earnings totals moved to the server in S8.
 - **Check:** website and app seller Orders: newest first, each tab, "Load
   older orders", accept an order and see it move; a new order appears at
   the top live in the app; my Orders and Enquiries load more; hub tiles
@@ -506,6 +504,30 @@ fields to WhatsApp docs and write the new totals collections.
 - **Check:** a seller's Payouts page (website and app) shows the same four
   amounts and next release date as before the deploy; mark an order
   delivered and it appears under "On hold" within seconds.
+
+### S9. Website seller Enquiries, Reviews and order requests
+
+- **Indexes (step 1):** `enquiries` (`sellerPhones` array-contains,
+  `status`, `createdAt` ↓); `storeReviews` (`storePhone`, `createdAt` ↓),
+  (`storePhone`, `rating`).
+- **Website (step 4) only.** No function, script or rule change; every
+  query filters on the fields the existing rules check.
+- **Enquiries:** each tab (All, Open, Contacted, Closed) loads its newest 50,
+  "Load older enquiries" for more; the tab counts are count queries over
+  all of the seller's enquiries (before: the newest 200, read every visit,
+  in no particular order).
+- **Reviews:** the list loads 50 at a time, newest first; the count,
+  average and star bars cover every review (count and sum queries). The
+  dashboard Home card reads only the newest 5. The page no longer queries
+  the old `reviews` collection: no rule allows reading it, so those
+  queries were always refused and showed nothing. Product reviews
+  (`productReviews`) were never shown here and still aren't.
+- **Order requests (re-routed orders):** only offers with status `open` are
+  read (the app already did this); expired ones are still hidden.
+- **Check:** a seller's Enquiries page shows the same enquiries and tab
+  counts, newest first, and changing a status moves it between tabs;
+  Reviews shows the same average and star bars as before; open order
+  requests appear on the dashboard.
 
 ## Testing on UAT
 
