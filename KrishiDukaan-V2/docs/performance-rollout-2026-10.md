@@ -582,6 +582,32 @@ fields to WhatsApp docs and write the new totals collections.
   link on an Android phone with the app, an iPhone with the app, and a
   laptop. Each opens that shop. Do the same for a brand page.
 
+### S12. Share my stats as an image (new feature)
+
+- **Where:** website Dashboard → Analytics ("Share my stats", next to the
+  period picker); app Dashboard → Analytics ("Share my stats on Instagram /
+  WhatsApp", top of the page).
+- **What it makes:** a 1080×1920 story-size image for the period picked on
+  the page: shop name and logo, orders, product views, calls, followers, reel
+  views, best seller, an orders chart and the shop link
+  (`krishidukan.com/shop/+91…`, S11). The seller turns each item on or off
+  with a live preview, and the choice is remembered. **Sales (₹) stay off
+  until the seller turns them on.** Items at zero are left out.
+- **Sharing:** phones (app, and the website in a phone browser) open the share
+  sheet with the image: Instagram story, WhatsApp status or chat, Save image.
+  On a computer the website downloads the PNG.
+- **Same card on both:** `app/dashboard/_lib/stats-share-card.ts` (canvas)
+  and `mobile/lib/features/dashboard/widgets/stats_share_card.dart` (widget)
+  draw the same layout. Change them together.
+- **Numbers:** for the selected window (the website's order tiles are
+  all-time, but the card uses the window's daily series, like the app).
+  Followers and reel views are lifetime totals, as on the page.
+- **Website (step 4) and app (step 5) only.** It reads nothing new: the image
+  is made on the device from the numbers already on the page.
+- **Check:** on a phone, open Analytics → Share my stats, turn Sales on and
+  off and see the preview change, then share to Instagram story and WhatsApp.
+  On a laptop, the website downloads the image.
+
 ## Testing on UAT
 
 Needs your usual `.env.uat` file and access to `karan-arjun-uat`.
