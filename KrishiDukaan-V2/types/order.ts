@@ -334,6 +334,12 @@ export type PayoutInfo = {
   settlementId?: string | null;
   state?: "on_hold" | "scheduled" | "processing" | "settled" | "failed" | "reversed" | "not_routed";
   settledAt?: unknown;
+  /** When Razorpay processed the transfer (ms). */
+  processedAt?: number | null;
+  /** When it settled to the seller's bank, Razorpay's time (ms). */
+  settlementAt?: number | null;
+  /** Bank reference (UTR) of that settlement. */
+  utr?: string | null;
   checkedAt?: unknown;
   nextCheckAt?: number;
   error?: string | null;

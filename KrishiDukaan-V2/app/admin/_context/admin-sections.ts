@@ -26,3 +26,25 @@ export type AdminIdentity = {
 export function hasSection(identity: AdminIdentity, section: AdminSection): boolean {
   return identity.role === "admin" || identity.adminSections.includes(section);
 }
+
+/**
+ * The sections that may open an admin page (any one is enough). Page paths
+ * and section names differ for a few ("sales-team" is salesTeam), and Seller
+ * payments serves both payout sections.
+ */
+export function sectionsForPath(pathname: string): AdminSection[] {
+  const seg = pathname.split("/")[2] ?? "";
+  if (!seg) return ["overview"];
+  if (seg === "sales-team") return ["salesTeam"];
+  if (seg === "route-payouts") return ["routePayouts"];
+  if (seg === "payouts") return ["payouts", "routePayouts"];
+  return (ADMIN_SECTIONS as readonly string[]).includes(seg) ? [seg as AdminSection] : ["overview"];
+}
+
+/** The page a section lives on. */
+export function pathForSection(section: AdminSection): string {
+  if (section === "overview") return "/admin";
+  if (section === "salesTeam") return "/admin/sales-team";
+  if (section === "routePayouts") return "/admin/payouts?tab=overview";
+  return `/admin/${section}`;
+}

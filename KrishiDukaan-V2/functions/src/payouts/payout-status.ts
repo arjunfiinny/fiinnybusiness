@@ -11,6 +11,9 @@
  *     onHoldUntil,                   when a held transfer is set to release
  *     settlementId,                  setl_… once settled to the seller's bank
  *     state,                         one value for screens, see PayoutState
+ *     processedAt,                   when Razorpay processed the transfer (ms)
+ *     settlementAt, utr,             when it settled to the seller's bank (ms) and
+ *                                    the bank reference (UTR), from the settlement
  *     settledAt,                     first time we saw it settled
  *     checkedAt, nextCheckAt         when we last / next ask Razorpay (ms)
  *   }
@@ -187,12 +190,30 @@ export function payoutFromTransfer(
     settlementStatus: t.settlement_status ?? null,
     onHoldUntil: t.on_hold && t.on_hold_until ? t.on_hold_until * 1000 : null,
     settlementId: t.recipient_settlement_id ?? null,
+    processedAt: t.processed_at ? t.processed_at * 1000 : null,
     state,
     error: t.error?.description || t.error?.reason || null,
   };
 }
 
-const SAME_KEYS = ["via", "transferId", "account", "amount", "reversed", "transferStatus", "settlementStatus", "onHoldUntil", "settlementId", "state", "error"];
+const SAME_KEYS = ["via", "transferId", "account", "amount", "reversed", "transferStatus", "settlementStatus", "onHoldUntil", "settlementId", "processedAt", "settlementAt", "utr", "state", "error"];
+
+/** A Linked Account settlement, as `expand[]=recipient_settlement` returns it. */
+type RecipientSettlement = { id?: string; utr?: string | null; created_at?: number | null; status?: string };
+
+/**
+ * The bank reference (UTR) and time of a settlement to a seller. Read with
+ * Razorpay's documented "Fetch Settlement Details" call: the transfers of
+ * that settlement, expanded with the settlement itself. Null when Razorpay
+ * has no UTR yet.
+ */
+async function settlementDetails(settlementId: string): Promise<{ utr: string | null; at: number | null }> {
+  const body = await razorpayGet<{ items?: (RazorpayTransfer & { recipient_settlement?: RecipientSettlement })[] }>(
+    `/transfers?recipient_settlement_id=${encodeURIComponent(settlementId)}&expand[]=recipient_settlement&count=1`,
+  );
+  const s = body.items?.[0]?.recipient_settlement;
+  return { utr: s?.utr || null, at: s?.created_at ? s.created_at * 1000 : null };
+}
 
 function samePayout(a: Record<string, unknown> | undefined, b: Record<string, unknown>): boolean {
   if (!a) return false;
@@ -220,6 +241,11 @@ export async function syncOrders(
     if (!byTransfer.has(id)) byTransfer.set(id, razorpayGet<RazorpayTransfer>(`/transfers/${encodeURIComponent(id)}`));
     return byTransfer.get(id)!;
   };
+  const bySettlement = new Map<string, Promise<{ utr: string | null; at: number | null }>>();
+  const settlement = (id: string) => {
+    if (!bySettlement.has(id)) bySettlement.set(id, settlementDetails(id));
+    return bySettlement.get(id)!;
+  };
 
   let changed = 0;
   let errors = 0;
@@ -246,6 +272,24 @@ export async function syncOrders(
           state = "not_routed";
         }
       }
+      // Settled: add the bank reference (UTR) and settlement time, once.
+      if (fields && state === "settled" && fields.settlementId) {
+        if (old?.utr && old?.settlementId === fields.settlementId) {
+          fields.utr = old.utr;
+          fields.settlementAt = old.settlementAt ?? null;
+        } else {
+          try {
+            const d = await settlement(String(fields.settlementId));
+            fields.utr = d.utr;
+            fields.settlementAt = d.at;
+          } catch (err) {
+            // The settled state still counts; the UTR is filled in on a later check.
+            logger.warn("[payout-status] settlement read failed", { orderId: doc.id, error: String(err).slice(0, 200) });
+            fields.utr = null;
+            fields.settlementAt = null;
+          }
+        }
+      }
     } catch (err) {
       errors++;
       logger.warn("[payout-status] Razorpay read failed", { orderId: doc.id, error: String(err).slice(0, 300) });
@@ -262,7 +306,13 @@ export async function syncOrders(
       return;
     }
 
-    const next = fields ? nextCheck(state, order, fields as { onHoldUntil?: number | null }, now) : null;
+    let next = fields ? nextCheck(state, order, fields as { onHoldUntil?: number | null }, now) : null;
+    // Settled but no UTR yet (Razorpay adds it when the bank confirms): look
+    // again every 6 hours for 3 days after it settled.
+    if (state === "settled" && fields && !fields.utr) {
+      const seen = millis(old?.settledAt) || now;
+      if (now - seen < 3 * DAY) next = now + 6 * HOUR;
+    }
     const update: Record<string, unknown> = {
       "payout.checkedAt": admin.firestore.Timestamp.fromMillis(now),
       "payout.failures": admin.firestore.FieldValue.delete(),

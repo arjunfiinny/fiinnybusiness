@@ -1,17 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { Loader2, RefreshCw } from "lucide-react";
+import { Fragment, useCallback, useEffect, useState } from "react";
+import { ChevronRight, Loader2, RefreshCw } from "lucide-react";
 import { createSellerOrdersPager } from "../../firebase";
 import {
   computeSellerEarnings,
-  PAYOUT_STATE_LABEL,
   summaryFromStats,
-  type PayoutState,
-  type SellerEarningsRow,
   type SellerEarningsSummary,
 } from "../_lib/seller-earnings";
 import { fetchSellerEarningsStats } from "../_lib/analytics-firestore";
+import { PayoutHeadline, PayoutTimelineView } from "../../components/shared/payout-timeline-view";
 
 /**
  * "What am I owed?" for a seller.
@@ -30,39 +28,13 @@ const fmtDate = (d: Date | null) =>
     ? d.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })
     : "—";
 
-const STATE_LABEL: Record<PayoutState, string> = {
-  awaiting_delivery: "Awaiting delivery",
-  on_hold: "On hold",
-  due: "Ready to transfer",
-  transferred: "Paid out",
-  not_payable: "Not payable",
-};
-
-const STATE_CLASS: Record<PayoutState, string> = {
-  awaiting_delivery: "bg-surface-container text-on-surface-variant",
-  on_hold: "bg-amber-50 text-amber-800",
-  due: "bg-green-50 text-green-700",
-  transferred: "bg-blue-50 text-blue-700",
-  not_payable: "bg-surface-container text-on-surface-variant",
-};
-
-/** A row's badge: Razorpay's transfer state when there is one, else ours. */
-function badgeFor(r: SellerEarningsRow): { label: string; cls: string } {
-  const p = r.payout?.state;
-  if (p === "settled") return { label: PAYOUT_STATE_LABEL.settled, cls: "bg-green-50 text-green-700" };
-  if (p === "processing") return { label: PAYOUT_STATE_LABEL.processing, cls: "bg-blue-50 text-blue-700" };
-  if (p === "failed") return { label: PAYOUT_STATE_LABEL.failed, cls: "bg-red-50 text-red-700" };
-  if (r.state === "on_hold" && p === "scheduled" && r.releaseOn) {
-    return { label: `Releases ${fmtDateTime(r.releaseOn)}`, cls: STATE_CLASS.on_hold };
-  }
-  return {
-    label: STATE_LABEL[r.state] + (r.state === "on_hold" && r.releaseOn ? ` · ${fmtDate(r.releaseOn)}` : ""),
-    cls: STATE_CLASS[r.state],
-  };
+/** When the money reached the bank: Razorpay's time, else when we saw it. */
+function settledOn(p: { settlementAt?: number | null; settledAt?: unknown }): Date | null {
+  if (p.settlementAt) return new Date(p.settlementAt);
+  const t = p.settledAt as { toDate?: () => Date; seconds?: number } | undefined;
+  if (t?.toDate) return t.toDate();
+  return typeof t?.seconds === "number" ? new Date(t.seconds * 1000) : null;
 }
-
-const fmtDateTime = (d: Date) =>
-  d.toLocaleString("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
 
 export function SellerEarningsPanel({
   uid,
@@ -74,6 +46,7 @@ export function SellerEarningsPanel({
   const [summary, setSummary] = useState<(SellerEarningsSummary & { counted: number }) | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
+  const [openRow, setOpenRow] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!uid) {
@@ -175,45 +148,65 @@ export function SellerEarningsPanel({
 
       {rows.length > 0 && (
         <div className="mt-5 overflow-x-auto">
-          <table className="w-full min-w-[520px] text-sm">
+          <table className="w-full min-w-[640px] text-sm">
             <thead>
               <tr className="border-b border-outline-variant/40 text-left text-xs uppercase tracking-wide text-on-surface-variant">
                 <th className="pb-2 pr-3 font-semibold">Order</th>
                 <th className="pb-2 pr-3 font-semibold">Delivered</th>
-                <th className="pb-2 pr-3 font-semibold">Status</th>
+                <th className="pb-2 pr-3 font-semibold">Where is the money</th>
+                <th className="pb-2 pr-3 font-semibold">Settled · UTR</th>
                 <th className="pb-2 pr-3 text-right font-semibold">Gateway fee</th>
                 <th className="pb-2 text-right font-semibold">You receive</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-outline-variant/25">
-              {rows.slice(0, 25).map((r) => (
-                <tr key={r.orderId}>
-                  <td className="py-2 pr-3 font-mono text-xs text-on-surface-variant">
-                    {r.orderId.slice(0, 8)}
-                  </td>
-                  <td className="py-2 pr-3 text-on-surface-variant">
-                    {fmtDate(r.deliveredAt)}
-                  </td>
-                  <td className="py-2 pr-3">
-                    <span className={`inline-block rounded-md px-2 py-0.5 text-xs font-semibold ${badgeFor(r).cls}`}>
-                      {badgeFor(r).label}
-                    </span>
-                    {r.payout?.transferId && (
-                      <span className="mt-0.5 block font-mono text-[10px] text-on-surface-variant" title="Razorpay transfer id">
-                        {r.payout.transferId}
-                      </span>
+              {rows.slice(0, 25).map((r) => {
+                const open = openRow === r.orderId;
+                return (
+                  <Fragment key={r.orderId}>
+                    <tr
+                      className="cursor-pointer hover:bg-surface-container-low/50"
+                      onClick={() => setOpenRow(open ? null : r.orderId)}
+                      aria-expanded={open}
+                    >
+                      <td className="py-2 pr-3 font-mono text-xs text-on-surface-variant">
+                        <ChevronRight className={`mr-1 inline h-3.5 w-3.5 transition-transform ${open ? "rotate-90" : ""}`} />
+                        {r.orderId.slice(0, 8)}
+                      </td>
+                      <td className="py-2 pr-3 text-on-surface-variant">{fmtDate(r.deliveredAt)}</td>
+                      <td className="py-2 pr-3">
+                        <PayoutHeadline order={r.order as never} />
+                      </td>
+                      <td className="py-2 pr-3 text-xs text-on-surface-variant">
+                        {r.payout?.state === "settled" ? (
+                          <>
+                            {fmtDate(settledOn(r.payout))}
+                            {r.payout.utr && <span className="block font-mono text-[10px]">{r.payout.utr}</span>}
+                          </>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                      <td className="py-2 pr-3 text-right text-on-surface-variant">
+                        {r.gatewayFee > 0 ? `−${inr(r.gatewayFee)}` : "—"}
+                      </td>
+                      <td className="py-2 text-right font-semibold text-on-surface">
+                        {inr(r.payout?.transferId && typeof r.payout.amount === "number" ? r.payout.amount : r.net)}
+                      </td>
+                    </tr>
+                    {open && (
+                      <tr>
+                        <td colSpan={6} className="bg-surface-container-low/40 px-4 py-4">
+                          <PayoutTimelineView order={r.order as never} />
+                        </td>
+                      </tr>
                     )}
-                  </td>
-                  <td className="py-2 pr-3 text-right text-on-surface-variant">
-                    {r.gatewayFee > 0 ? `−${inr(r.gatewayFee)}` : "—"}
-                  </td>
-                  <td className="py-2 text-right font-semibold text-on-surface">
-                    {inr(r.payout?.transferId && typeof r.payout.amount === "number" ? r.payout.amount : r.net)}
-                  </td>
-                </tr>
-              ))}
+                  </Fragment>
+                );
+              })}
             </tbody>
           </table>
+          <p className="mt-2 text-xs text-on-surface-variant">Tap an order to see each step: paid, held, delivered, released, in your bank.</p>
           {Math.max(rows.length, counted) > 25 && (
             <p className="mt-2 text-xs text-on-surface-variant">
               Showing the 25 most recent of {Math.max(rows.length, counted)} orders.

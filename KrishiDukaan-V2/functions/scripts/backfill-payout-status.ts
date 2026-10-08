@@ -10,6 +10,8 @@
  *   npx tsx scripts/backfill-payout-status.ts --project krishidukan-e8315             # preview
  *   npx tsx scripts/backfill-payout-status.ts --project krishidukan-e8315 --write     # apply
  *   ... --days 365   (default 120: how far back to look)
+ *   ... --refresh-settled   instead: re-check settled orders that have no UTR /
+ *                           settlement date yet (fills in the bank reference)
  */
 import type * as admin from "firebase-admin";
 
@@ -21,6 +23,7 @@ const arg = (name: string) => {
 const project = arg("--project");
 const write = args.includes("--write");
 const days = Number(arg("--days") ?? 120);
+const refreshSettled = args.includes("--refresh-settled");
 
 if (!project || !Number.isFinite(days) || days <= 0) {
   console.error("Usage: npx tsx scripts/backfill-payout-status.ts --project <project-id> [--days 120] [--write]");
@@ -40,7 +43,16 @@ async function main(): Promise<void> {
   let scanned = 0;
   let alreadyFollowed = 0;
   let last: admin.firestore.QueryDocumentSnapshot | undefined;
-  for (;;) {
+  if (refreshSettled) {
+    const snap = await db.collection("orders").where("payout.state", "==", "settled").get();
+    for (const d of snap.docs) {
+      const p = d.get("payout") ?? {};
+      if (p.utr && p.settlementAt) alreadyFollowed++;
+      else todo.push(d.ref);
+    }
+    scanned = snap.size;
+  }
+  for (; !refreshSettled; ) {
     let q = db.collection("orders").where("createdAt", ">=", since).orderBy("createdAt").limit(PAGE);
     if (last) q = q.startAfter(last);
     const snap = await q.get();
@@ -57,7 +69,11 @@ async function main(): Promise<void> {
   }
 
   console.log(`${write ? "Writing" : "Preview (dry run)"} for project ${project}, orders since ${since.toDate().toISOString().slice(0, 10)}:`);
-  console.table({ ordersScanned: scanned, paidOnlineToFollow: todo.length, alreadyFollowed });
+  console.table(
+    refreshSettled
+      ? { settledOrders: scanned, missingUtrToRecheck: todo.length, alreadyHaveUtr: alreadyFollowed }
+      : { ordersScanned: scanned, paidOnlineToFollow: todo.length, alreadyFollowed },
+  );
   if (!write) {
     console.log("Re-run with --write to apply.");
     return;

@@ -705,6 +705,105 @@ Razorpay Route transfer as Razorpay reports it.
    scheduled" with a time, then "On the way", then "Settled".
 3. The seller's Payouts page shows the same.
 
+### S13b. Dates and bank reference (UTR) for each transfer
+
+- **Stored on `orders/{id}.payout`** by `syncPayoutStatus`:
+  - `processedAt`: when Razorpay processed the transfer.
+  - `settlementAt` and `utr`: when it settled to the seller's bank, and the
+    bank reference.
+- **Where the UTR comes from:** Razorpay's documented Fetch Settlement
+  Details call (`GET /transfers?recipient_settlement_id=…&expand[]=recipient_settlement`).
+  - It is made once per settlement and reused for every order in it.
+  - If Razorpay has no UTR yet, the order is checked again every 6 hours for
+    3 days.
+- **Shown to admins** in Seller payments → Transfers:
+  - Columns: Order Date, Delivery Date, Transfer Id, Amount, Transfer Status /
+    Processed, Settlement Status / Settled, UTR.
+  - The order panel shows all of them.
+  - **Download CSV** exports the current filter or search, up to 5,000 rows,
+    with order, delivery, processed and settled dates, settlement id and UTR,
+    for reconciling with the bank statement.
+- **Shown to sellers:**
+  - Website Payouts: a "Settled · UTR" column.
+  - App Payouts rows: "Settled 9 Oct 2026 · UTR …".
+  - The "In your bank" step of the timeline shows the UTR, so sellers can
+    find the money in their bank statement.
+- **Deploy:** functions (step 2), website (4) and app (5).
+- **After deploying**, fill in the UTR for transfers that had already
+  settled:
+
+  ```
+  cd functions
+  npx tsx scripts/backfill-payout-status.ts --project krishidukan-e8315 --refresh-settled           # preview
+  npx tsx scripts/backfill-payout-status.ts --project krishidukan-e8315 --refresh-settled --write
+  ```
+
+### S14. Payment timeline and a reorganised admin
+
+**Payment timeline (sellers and admins).** Every order now tells its money
+story step by step:
+
+  Order placed → Customer paid online → Held safely by KrishiDukan →
+  Marked delivered → Released → In the bank
+
+Each step done shows its date. The current step says what it is waiting for
+("Mark the order delivered to release your money", "Releases 9 Oct, 3:44
+pm", "Razorpay is sending it to your bank, usually by the next working
+day"). Refunds and rejections, failed transfers, payout-run payments and cash
+orders each have their own wording.
+- Logic: `app/lib/payout-timeline.ts` (website) and
+  `mobile/lib/features/dashboard/data/payout_timeline.dart` (app). Same
+  rules; change them together.
+- **Seller website:** "Where is my money?" on each order's details. Payouts
+  rows show where the money is; click a row for the timeline.
+- **Seller app:**
+  - Each order card shows where the money is; tap it for the timeline.
+  - Orders → Payments cards show the timeline.
+  - Payouts rows open it.
+
+**Admin reorganised.**
+- **Sidebar:** grouped into Orders & money, People, Catalogue, Content and
+  Insights. Groups fold away (remembered per browser), and a "Find a page…"
+  box searches names and keywords. "Payments" is now **Customer payments**,
+  to tell it apart from seller payments.
+- **Seller payments** (`/admin/payouts`) replaces the two pages "Seller
+  Payouts" and "Route Payouts" with four tabs:
+  - **Overview:**
+    - How a seller gets paid, in five steps.
+    - The **automatic release** switch (`settings/route.releaseEnabled`).
+      Admins can turn it on or off here; a warning shows while it is off.
+    - Delivered orders still on hold, with a link to release them.
+    - Totals for every state, and the sellers on Route.
+  - **Transfers:**
+    - Every transfer with Razorpay's columns, filters, and search by order
+      id, `trf_…`, `pay_…`, `order_…` or seller phone.
+    - Clicking an order opens a panel with its timeline, every id (payment,
+      order, transfer, seller account, settlement) and actions: **Release to
+      seller** (delivered and still held) and **Check this order with
+      Razorpay**.
+  - **Payout run:** the bank-transfer run for sellers not on Route (moved
+    unchanged).
+  - **Bank & KYC:** bank details and documents to verify (moved unchanged).
+  - The old `/admin/route-payouts` address opens the Transfers tab.
+- **Team access:**
+  - "Route Payouts" permission: Overview and Transfers, read only.
+  - "Seller Payouts" permission: Payout run, and Bank & KYC.
+  - Releasing money and the switch are admin only.
+  - Fixed: team members given Route Payouts or Sales Team were redirected
+    away from those pages, because the page address did not match the
+    permission name.
+
+**Deploy:** website (step 4) and app (step 5) only. No rule, index or
+function change.
+
+**Check:**
+1. Open a seller's delivered order (website and app) and see each step with
+   its date.
+2. In Admin → Seller payments: turn automatic release on, search an order by
+   its `trf_…` id, open it, and release a "Delivered, still held" order.
+3. As a team member with only Route Payouts, open Seller payments: you see
+   Overview and Transfers, with no Release button.
+
 ## Testing on UAT
 
 Needs your usual `.env.uat` file and access to `karan-arjun-uat`.

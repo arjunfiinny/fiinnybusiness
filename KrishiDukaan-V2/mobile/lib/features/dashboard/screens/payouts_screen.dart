@@ -1,3 +1,6 @@
+import '../../../core/models/order_model.dart';
+import '../data/payout_timeline.dart';
+import '../widgets/payout_timeline_view.dart';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -130,7 +133,8 @@ class _EarningsSection extends StatelessWidget {
           _InlineNotice(
             icon: Icons.account_balance_outlined,
             color: Colors.green.shade700,
-            text: '${CurrencyUtils.format(earnings.settled)} is in your bank. '
+            text:
+                '${CurrencyUtils.format(earnings.settled)} is in your bank. '
                 '${CurrencyUtils.format((earnings.paidOut - earnings.settled).clamp(0, double.infinity).toDouble())} '
                 'is on the way (Razorpay settles it, usually by the next working day).',
           ),
@@ -140,12 +144,20 @@ class _EarningsSection extends StatelessWidget {
           _InlineNotice(
             icon: Icons.schedule,
             color: Colors.blue.shade700,
-            text: 'Next release on '
+            text:
+                'Next release on '
                 '${DateFormat('d MMM yyyy').format(earnings.nextReleaseOn!)}.',
           ),
         ],
         const SizedBox(height: 20),
         Text('Order by order', style: AppTextStyles.heading3),
+        const SizedBox(height: 2),
+        Text(
+          'Tap an order to see each step: paid, held, delivered, released, in your bank.',
+          style: AppTextStyles.bodySmall.copyWith(
+            color: AppColors.onSurfaceVariant,
+          ),
+        ),
         const SizedBox(height: 8),
         ...earnings.rows.take(50).map((r) => _EarningRow(row: r)),
       ],
@@ -158,92 +170,146 @@ class _EarningRow extends StatelessWidget {
   const _EarningRow({required this.row});
 
   ({String label, Color color}) get _badge => switch (row.payout?.state) {
-        // Razorpay's own word on the transfer, when there is one.
-        'settled' => (label: 'In your bank', color: Colors.green.shade700),
-        'processing' => (label: 'On the way', color: Colors.blue.shade700),
-        'failed' => (label: 'Transfer failed', color: AppColors.error),
-        _ => _stateBadge,
-      };
+    // Razorpay's own word on the transfer, when there is one.
+    'settled' => (label: 'In your bank', color: Colors.green.shade700),
+    'processing' => (label: 'On the way', color: Colors.blue.shade700),
+    'failed' => (label: 'Transfer failed', color: AppColors.error),
+    _ => _stateBadge,
+  };
 
   ({String label, Color color}) get _stateBadge => switch (row.state) {
-        PayoutState.due => (label: 'Ready', color: AppColors.primary),
-        PayoutState.onHold => (label: 'On hold', color: Colors.orange.shade800),
-        PayoutState.awaitingDelivery =>
-          (label: 'Not delivered', color: AppColors.onSurfaceVariant),
-        PayoutState.transferred => (label: 'Paid', color: Colors.green.shade700),
-        PayoutState.notPayable =>
-          (label: 'Not payable', color: AppColors.onSurfaceVariant),
-      };
+    PayoutState.due => (label: 'Ready', color: AppColors.primary),
+    PayoutState.onHold => (label: 'On hold', color: Colors.orange.shade800),
+    PayoutState.awaitingDelivery => (
+      label: 'Not delivered',
+      color: AppColors.onSurfaceVariant,
+    ),
+    PayoutState.transferred => (label: 'Paid', color: Colors.green.shade700),
+    PayoutState.notPayable => (
+      label: 'Not payable',
+      color: AppColors.onSurfaceVariant,
+    ),
+  };
 
   @override
   Widget build(BuildContext context) {
-    final badge = _badge;
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.divider),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('#${row.orderId}',
-                    style: AppTextStyles.bodySmall
-                        .copyWith(color: AppColors.onSurfaceVariant),
-                    overflow: TextOverflow.ellipsis),
-                const SizedBox(height: 2),
-                Text(
-                  CurrencyUtils.format(row.net),
-                  style: AppTextStyles.bodyMedium
-                      .copyWith(fontWeight: FontWeight.w600),
-                ),
-                // Only shown when a real fee is known — never an invented one.
-                if (row.gatewayFee > 0)
+    final order = row.order;
+    // Razorpay's word on the money, the same headline as the timeline.
+    final badge = order != null ? _timelineBadge(order) : _badge;
+    return InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: order == null
+          ? null
+          : () => showPayoutTimelineSheet(context, order),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: AppColors.divider),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
                   Text(
-                    '${CurrencyUtils.format(row.gross)} less '
-                    '${CurrencyUtils.format(row.gatewayFee)} gateway fee',
-                    style: AppTextStyles.bodySmall
-                        .copyWith(color: AppColors.onSurfaceVariant),
+                    '#${row.orderId}',
+                    style: AppTextStyles.bodySmall.copyWith(
+                      color: AppColors.onSurfaceVariant,
+                    ),
+                    overflow: TextOverflow.ellipsis,
                   ),
-                if (row.state == PayoutState.onHold && row.releaseOn != null)
+                  const SizedBox(height: 2),
                   Text(
-                    row.payout?.state == 'scheduled'
-                        ? 'Releases ${DateFormat('d MMM, h:mm a').format(row.releaseOn!)}'
-                        : 'Releases ${DateFormat('d MMM').format(row.releaseOn!)}',
-                    style: AppTextStyles.bodySmall
-                        .copyWith(color: AppColors.onSurfaceVariant),
+                    CurrencyUtils.format(row.net),
+                    style: AppTextStyles.bodyMedium.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
-                if ((row.payout?.transferId ?? '').isNotEmpty)
-                  Text(
-                    'Razorpay ${row.payout!.transferId}',
-                    style: AppTextStyles.bodySmall
-                        .copyWith(color: AppColors.onSurfaceVariant, fontSize: 10.5),
-                  ),
-              ],
-            ),
-          ),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            decoration: BoxDecoration(
-              color: badge.color.withValues(alpha: 0.12),
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Text(
-              badge.label,
-              style: AppTextStyles.bodySmall.copyWith(
-                color: badge.color,
-                fontWeight: FontWeight.w600,
+                  // Only shown when a real fee is known — never an invented one.
+                  if (row.gatewayFee > 0)
+                    Text(
+                      '${CurrencyUtils.format(row.gross)} less '
+                      '${CurrencyUtils.format(row.gatewayFee)} gateway fee',
+                      style: AppTextStyles.bodySmall.copyWith(
+                        color: AppColors.onSurfaceVariant,
+                      ),
+                    ),
+                  if (row.state == PayoutState.onHold && row.releaseOn != null)
+                    Text(
+                      row.payout?.state == 'scheduled'
+                          ? 'Releases ${DateFormat('d MMM, h:mm a').format(row.releaseOn!)}'
+                          : 'Releases ${DateFormat('d MMM').format(row.releaseOn!)}',
+                      style: AppTextStyles.bodySmall.copyWith(
+                        color: AppColors.onSurfaceVariant,
+                      ),
+                    ),
+                  if (row.payout?.state == 'settled' &&
+                      (row.payout?.settlementAt ?? row.payout?.settledAt) !=
+                          null)
+                    Text(
+                      'Settled ${DateFormat('d MMM yyyy').format((row.payout!.settlementAt ?? row.payout!.settledAt)!.toLocal())}'
+                      '${(row.payout!.utr ?? '').isNotEmpty ? ' · UTR ${row.payout!.utr}' : ''}',
+                      style: AppTextStyles.bodySmall.copyWith(
+                        color: Colors.green.shade800,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  if ((row.payout?.transferId ?? '').isNotEmpty)
+                    Text(
+                      'Razorpay ${row.payout!.transferId}',
+                      style: AppTextStyles.bodySmall.copyWith(
+                        color: AppColors.onSurfaceVariant,
+                        fontSize: 10.5,
+                      ),
+                    ),
+                ],
               ),
             ),
-          ),
-        ],
+            Container(
+              constraints: const BoxConstraints(maxWidth: 150),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: badge.color.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(
+                badge.label,
+                maxLines: 2,
+                textAlign: TextAlign.center,
+                overflow: TextOverflow.ellipsis,
+                style: AppTextStyles.bodySmall.copyWith(
+                  color: badge.color,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            if (row.order != null)
+              const Icon(
+                Icons.chevron_right,
+                size: 18,
+                color: AppColors.onSurfaceVariant,
+              ),
+          ],
+        ),
       ),
     );
+  }
+
+  static ({String label, Color color}) _timelineBadge(OrderModel order) {
+    final t = payoutTimeline(order);
+    final color = switch (t.tone) {
+      TimelineTone.good => Colors.green.shade700,
+      TimelineTone.info => Colors.blue.shade700,
+      TimelineTone.wait => Colors.orange.shade800,
+      TimelineTone.warn => Colors.deepOrange.shade800,
+      TimelineTone.bad => AppColors.error,
+      TimelineTone.muted => AppColors.onSurfaceVariant,
+    };
+    return (label: t.headline, color: color);
   }
 }
 
@@ -262,22 +328,33 @@ class _HowItWorks extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(children: [
-            Icon(Icons.info_outline, size: 18, color: Colors.blue.shade700),
-            const SizedBox(width: 8),
-            Text('How you get paid',
+          Row(
+            children: [
+              Icon(Icons.info_outline, size: 18, color: Colors.blue.shade700),
+              const SizedBox(width: 8),
+              Text(
+                'How you get paid',
                 style: AppTextStyles.bodyMedium.copyWith(
-                    fontWeight: FontWeight.w700, color: Colors.blue.shade900)),
-          ]),
+                  fontWeight: FontWeight.w700,
+                  color: Colors.blue.shade900,
+                ),
+              ),
+            ],
+          ),
           const SizedBox(height: 8),
           // Wording deliberately matches the web page and the /sell promise —
           // a seller must not read two different commission claims.
-          ..._points.map((t) => Padding(
-                padding: const EdgeInsets.only(bottom: 4),
-                child: Text('•  $t',
-                    style: AppTextStyles.bodySmall
-                        .copyWith(color: Colors.blue.shade900)),
-              )),
+          ..._points.map(
+            (t) => Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Text(
+                '•  $t',
+                style: AppTextStyles.bodySmall.copyWith(
+                  color: Colors.blue.shade900,
+                ),
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -310,15 +387,17 @@ class _BankSection extends ConsumerWidget {
         const SizedBox(height: 4),
         Text(
           'Where your order money is sent.',
-          style: AppTextStyles.bodySmall
-              .copyWith(color: AppColors.onSurfaceVariant),
+          style: AppTextStyles.bodySmall.copyWith(
+            color: AppColors.onSurfaceVariant,
+          ),
         ),
         const SizedBox(height: 12),
         if (a == null)
           _InlineNotice(
             icon: Icons.account_balance_outlined,
             color: Colors.orange.shade800,
-            text: 'No bank account added yet. We cannot send you money until '
+            text:
+                'No bank account added yet. We cannot send you money until '
                 'you add one.',
           )
         else
@@ -374,38 +453,53 @@ class _SavedAccountCard extends StatelessWidget {
           Row(
             children: [
               Expanded(
-                child: Text(account.accountHolderName,
-                    style: AppTextStyles.bodyMedium
-                        .copyWith(fontWeight: FontWeight.w600)),
+                child: Text(
+                  account.accountHolderName,
+                  style: AppTextStyles.bodyMedium.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
               ),
               Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
                   color: color.withValues(alpha: 0.12),
                   borderRadius: BorderRadius.circular(20),
                 ),
-                child: Text(label,
-                    style: AppTextStyles.bodySmall.copyWith(
-                        color: color, fontWeight: FontWeight.w600)),
+                child: Text(
+                  label,
+                  style: AppTextStyles.bodySmall.copyWith(
+                    color: color,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
               ),
             ],
           ),
           const SizedBox(height: 6),
           // Never the full number: a shared or shoulder-surfed screen must not
           // expose a complete bank account.
-          Text('••••${account.accountLast4}  ·  ${account.ifsc}',
-              style: AppTextStyles.bodySmall
-                  .copyWith(color: AppColors.onSurfaceVariant)),
+          Text(
+            '••••${account.accountLast4}  ·  ${account.ifsc}',
+            style: AppTextStyles.bodySmall.copyWith(
+              color: AppColors.onSurfaceVariant,
+            ),
+          ),
           if (account.bankName != null)
-            Text(account.bankName!,
-                style: AppTextStyles.bodySmall
-                    .copyWith(color: AppColors.onSurfaceVariant)),
+            Text(
+              account.bankName!,
+              style: AppTextStyles.bodySmall.copyWith(
+                color: AppColors.onSurfaceVariant,
+              ),
+            ),
           if (account.isRejected && account.rejectionReason != null) ...[
             const SizedBox(height: 8),
-            Text(account.rejectionReason!,
-                style: AppTextStyles.bodySmall
-                    .copyWith(color: Colors.red.shade700)),
+            Text(
+              account.rejectionReason!,
+              style: AppTextStyles.bodySmall.copyWith(
+                color: Colors.red.shade700,
+              ),
+            ),
           ],
         ],
       ),
@@ -458,7 +552,9 @@ class _BankAccountFormState extends ConsumerState<_BankAccountForm> {
       _error = null;
     });
     try {
-      await ref.read(payoutRepoProvider).save(
+      await ref
+          .read(payoutRepoProvider)
+          .save(
             accountHolderName: _name.text,
             accountNumber: _number.text,
             ifsc: _ifsc.text,
@@ -482,7 +578,8 @@ class _BankAccountFormState extends ConsumerState<_BankAccountForm> {
   Widget build(BuildContext context) {
     return Padding(
       padding: EdgeInsets.only(
-          bottom: MediaQuery.of(context).viewInsets.bottom),
+        bottom: MediaQuery.of(context).viewInsets.bottom,
+      ),
       child: Container(
         decoration: const BoxDecoration(
           color: AppColors.background,
@@ -502,8 +599,9 @@ class _BankAccountFormState extends ConsumerState<_BankAccountForm> {
                   'Enter the details exactly as they appear on your bank '
                   'account. Anything you change here has to be verified again '
                   'before your next payout.',
-                  style: AppTextStyles.bodySmall
-                      .copyWith(color: AppColors.onSurfaceVariant),
+                  style: AppTextStyles.bodySmall.copyWith(
+                    color: AppColors.onSurfaceVariant,
+                  ),
                 ),
                 const SizedBox(height: 16),
                 _field(
@@ -542,8 +640,8 @@ class _BankAccountFormState extends ConsumerState<_BankAccountForm> {
                   maxLength: 11,
                   validator: (v) =>
                       _ifscRe.hasMatch((v ?? '').trim().toUpperCase())
-                          ? null
-                          : 'IFSC looks wrong — it should be like SBIN0001234.',
+                      ? null
+                      : 'IFSC looks wrong — it should be like SBIN0001234.',
                 ),
                 _field(_bank, 'Bank name (optional)'),
                 const SizedBox(height: 4),
@@ -582,9 +680,12 @@ class _BankAccountFormState extends ConsumerState<_BankAccountForm> {
                 ),
                 if (_error != null) ...[
                   const SizedBox(height: 8),
-                  Text(_error!,
-                      style: AppTextStyles.bodySmall
-                          .copyWith(color: Colors.red.shade700)),
+                  Text(
+                    _error!,
+                    style: AppTextStyles.bodySmall.copyWith(
+                      color: Colors.red.shade700,
+                    ),
+                  ),
                 ],
                 const SizedBox(height: 16),
                 SizedBox(
@@ -625,8 +726,9 @@ class _BankAccountFormState extends ConsumerState<_BankAccountForm> {
         validator: validator,
         keyboardType: keyboard,
         maxLength: maxLength,
-        textCapitalization:
-            upper ? TextCapitalization.characters : TextCapitalization.words,
+        textCapitalization: upper
+            ? TextCapitalization.characters
+            : TextCapitalization.words,
         inputFormatters: [
           if (digitsOnly) FilteringTextInputFormatter.digitsOnly,
           if (upper) UpperCaseTextFormatter(),
@@ -636,9 +738,7 @@ class _BankAccountFormState extends ConsumerState<_BankAccountForm> {
           counterText: '',
           filled: true,
           fillColor: Colors.white,
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
         ),
       ),
     );
@@ -650,7 +750,9 @@ class _BankAccountFormState extends ConsumerState<_BankAccountForm> {
 class UpperCaseTextFormatter extends TextInputFormatter {
   @override
   TextEditingValue formatEditUpdate(
-      TextEditingValue oldValue, TextEditingValue newValue) {
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
     return newValue.copyWith(text: newValue.text.toUpperCase());
   }
 }
@@ -686,13 +788,17 @@ class _StatTile extends StatelessWidget {
             child: Text(
               value,
               style: AppTextStyles.heading2.copyWith(
-                  color: highlight ? AppColors.primary : AppColors.onSurface),
+                color: highlight ? AppColors.primary : AppColors.onSurface,
+              ),
             ),
           ),
           const SizedBox(height: 2),
-          Text(label,
-              style: AppTextStyles.bodySmall
-                  .copyWith(color: AppColors.onSurfaceVariant)),
+          Text(
+            label,
+            style: AppTextStyles.bodySmall.copyWith(
+              color: AppColors.onSurfaceVariant,
+            ),
+          ),
         ],
       ),
     );
@@ -724,8 +830,10 @@ class _InlineNotice extends StatelessWidget {
           Icon(icon, size: 18, color: color),
           const SizedBox(width: 10),
           Expanded(
-            child: Text(text,
-                style: AppTextStyles.bodySmall.copyWith(color: color)),
+            child: Text(
+              text,
+              style: AppTextStyles.bodySmall.copyWith(color: color),
+            ),
           ),
         ],
       ),
@@ -783,27 +891,52 @@ class _DocSpec {
   /// still required, just not part of the opening ask.
   final bool front;
 
-  const _DocSpec(this.type, this.label, this.hint,
-      {this.required = true, this.selfie = false, this.front = false});
+  const _DocSpec(
+    this.type,
+    this.label,
+    this.hint, {
+    this.required = true,
+    this.selfie = false,
+    this.front = false,
+  });
 }
 
 const _kDocSpecs = [
   _DocSpec(
-      'pan_card', 'PAN card', 'Photo of the PAN card matching the account holder name',
-      front: true),
-  _DocSpec('trade_license', 'Trade / product license',
-      'Shop establishment, FSSAI, mandi, or other license permitting you to '
-      'sell agri produce or inputs',
-      front: true),
-  _DocSpec('cancelled_cheque', 'Cancelled cheque or passbook',
-      'Must clearly show account number, IFSC and holder name'),
-  _DocSpec('address_proof', 'Address proof',
-      'Aadhaar, electricity bill or shop licence'),
-  _DocSpec('owner_photo', 'Owner photo',
-      "A clear photo of the account holder's face, for identity verification",
-      selfie: true),
-  _DocSpec('gst_certificate', 'GST certificate',
-      'Only if your business is GST registered', required: false),
+    'pan_card',
+    'PAN card',
+    'Photo of the PAN card matching the account holder name',
+    front: true,
+  ),
+  _DocSpec(
+    'trade_license',
+    'Trade / product license',
+    'Shop establishment, FSSAI, mandi, or other license permitting you to '
+        'sell agri produce or inputs',
+    front: true,
+  ),
+  _DocSpec(
+    'cancelled_cheque',
+    'Cancelled cheque or passbook',
+    'Must clearly show account number, IFSC and holder name',
+  ),
+  _DocSpec(
+    'address_proof',
+    'Address proof',
+    'Aadhaar, electricity bill or shop licence',
+  ),
+  _DocSpec(
+    'owner_photo',
+    'Owner photo',
+    "A clear photo of the account holder's face, for identity verification",
+    selfie: true,
+  ),
+  _DocSpec(
+    'gst_certificate',
+    'GST certificate',
+    'Only if your business is GST registered',
+    required: false,
+  ),
 ];
 
 class _KycSection extends ConsumerStatefulWidget {
@@ -871,10 +1004,9 @@ class _KycSectionState extends ConsumerState<_KycSection> {
         if (mounted) setState(() => _busyType = null);
         return;
       }
-      await ref.read(payoutRepoProvider).uploadDocument(
-            docType: spec.type,
-            file: File(picked.path),
-          );
+      await ref
+          .read(payoutRepoProvider)
+          .uploadDocument(docType: spec.type, file: File(picked.path));
       ref.invalidate(payoutAccountProvider);
       if (mounted) setState(() => _busyType = null);
     } catch (e) {
@@ -889,8 +1021,9 @@ class _KycSectionState extends ConsumerState<_KycSection> {
 
   @override
   Widget build(BuildContext context) {
-    final missing =
-        _kDocSpecs.where((s) => s.required && !_docs.containsKey(s.type)).length;
+    final missing = _kDocSpecs
+        .where((s) => s.required && !_docs.containsKey(s.type))
+        .length;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -900,8 +1033,9 @@ class _KycSectionState extends ConsumerState<_KycSection> {
         Text(
           'We need these on file before money can be sent to your account. '
           'Only you and our verification team can see them.',
-          style: AppTextStyles.bodySmall
-              .copyWith(color: AppColors.onSurfaceVariant),
+          style: AppTextStyles.bodySmall.copyWith(
+            color: AppColors.onSurfaceVariant,
+          ),
         ),
         const SizedBox(height: 12),
         if (missing > 0 && !_locked)
@@ -910,7 +1044,8 @@ class _KycSectionState extends ConsumerState<_KycSection> {
             child: _InlineNotice(
               icon: Icons.description_outlined,
               color: Colors.orange.shade800,
-              text: '$missing required '
+              text:
+                  '$missing required '
                   '${missing == 1 ? 'document' : 'documents'} still needed.',
             ),
           ),
@@ -923,26 +1058,32 @@ class _KycSectionState extends ConsumerState<_KycSection> {
               text: _error!,
             ),
           ),
-        ..._kDocSpecs.where((s) => s.front).map((spec) => _DocTile(
-              spec: spec,
-              uploaded: _docs[spec.type],
-              busy: _busyType == spec.type,
-              locked: _locked,
-              onUpload: () => _upload(spec),
-            )),
+        ..._kDocSpecs
+            .where((s) => s.front)
+            .map(
+              (spec) => _DocTile(
+                spec: spec,
+                uploaded: _docs[spec.type],
+                busy: _busyType == spec.type,
+                locked: _locked,
+                onUpload: () => _upload(spec),
+              ),
+            ),
         _MoreDocuments(
           // Expanded by default once verified — nothing left to fill in, and
           // a seller checking their own file wants to see all of it at once.
           initiallyOpen: _locked,
           children: _kDocSpecs
               .where((s) => !s.front)
-              .map((spec) => _DocTile(
-                    spec: spec,
-                    uploaded: _docs[spec.type],
-                    busy: _busyType == spec.type,
-                    locked: _locked,
-                    onUpload: () => _upload(spec),
-                  ))
+              .map(
+                (spec) => _DocTile(
+                  spec: spec,
+                  uploaded: _docs[spec.type],
+                  busy: _busyType == spec.type,
+                  locked: _locked,
+                  onUpload: () => _upload(spec),
+                ),
+              )
               .toList(),
         ),
       ],
@@ -983,9 +1124,12 @@ class _MoreDocumentsState extends State<_MoreDocuments> {
               child: Row(
                 children: [
                   Expanded(
-                    child: Text('More documents',
-                        style: AppTextStyles.bodyMedium
-                            .copyWith(fontWeight: FontWeight.w600)),
+                    child: Text(
+                      'More documents',
+                      style: AppTextStyles.bodyMedium.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
                   ),
                   Icon(
                     _open ? Icons.expand_less : Icons.expand_more,
@@ -1049,16 +1193,20 @@ class _DocTile extends StatelessWidget {
                     Flexible(
                       child: Text(
                         spec.label,
-                        style: AppTextStyles.bodyMedium
-                            .copyWith(fontWeight: FontWeight.w600),
+                        style: AppTextStyles.bodyMedium.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
                     ),
                     if (!spec.required)
                       Padding(
                         padding: const EdgeInsets.only(left: 6),
-                        child: Text('Optional',
-                            style: AppTextStyles.bodySmall
-                                .copyWith(color: AppColors.onSurfaceVariant)),
+                        child: Text(
+                          'Optional',
+                          style: AppTextStyles.bodySmall.copyWith(
+                            color: AppColors.onSurfaceVariant,
+                          ),
+                        ),
                       ),
                   ],
                 ),
@@ -1067,8 +1215,9 @@ class _DocTile extends StatelessWidget {
                   done
                       ? (uploaded!['fileName'] as String? ?? 'Uploaded')
                       : spec.hint,
-                  style: AppTextStyles.bodySmall
-                      .copyWith(color: AppColors.onSurfaceVariant),
+                  style: AppTextStyles.bodySmall.copyWith(
+                    color: AppColors.onSurfaceVariant,
+                  ),
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                 ),
