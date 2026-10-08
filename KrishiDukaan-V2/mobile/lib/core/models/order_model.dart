@@ -39,6 +39,11 @@ class OrderModel {
   /// The seller's Razorpay transfer as last reported (server-written; see
   /// functions/src/payouts/payout-status.ts).
   final OrderPayoutModel? payout;
+
+  /// When the delivery trigger set the seller's money to release
+  /// (routeRelease.releaseAt), and when it recorded it.
+  final DateTime? releaseAt;
+  final DateTime? releaseRecordedAt;
   final DateTime? createdAt;
 
   /// Status transitions, each `{status, at}` with an ISO timestamp. The
@@ -67,6 +72,8 @@ class OrderModel {
     required this.status,
     this.payment,
     this.payout,
+    this.releaseAt,
+    this.releaseRecordedAt,
     this.createdAt,
     this.statusHistory = const [],
     this.invoiceNumber,
@@ -171,6 +178,10 @@ class OrderModel {
       payout: d['payout'] is Map
           ? OrderPayoutModel.fromMap(Map<String, dynamic>.from(d['payout'] as Map))
           : null,
+      releaseAt: d['routeRelease'] is Map ? anyDate((d['routeRelease'] as Map)['releaseAt']) : null,
+      releaseRecordedAt: d['routeRelease'] is Map
+          ? anyDate((d['routeRelease'] as Map)['scheduledAt'] ?? (d['routeRelease'] as Map)['recordedAt'])
+          : null,
       createdAt: createdAtDate,
       statusHistory: (d['statusHistory'] as List?)
               ?.whereType<Map>()
@@ -225,6 +236,14 @@ class OrderItemModel {
 
 /// Where a seller's money for an order is, in Razorpay Route. Same fields as
 /// the website's OrderPayout (app/dashboard/_lib/seller-earnings.ts).
+/// A date stored as a Firestore Timestamp, ISO string or epoch millis.
+DateTime? anyDate(Object? v) {
+  if (v is Timestamp) return v.toDate();
+  if (v is String) return DateTime.tryParse(v);
+  if (v is num && v > 0) return DateTime.fromMillisecondsSinceEpoch(v.toInt());
+  return null;
+}
+
 class OrderPayoutModel {
   /// on_hold | scheduled | processing | settled | failed | reversed | not_routed
   final String? state;
@@ -238,6 +257,9 @@ class OrderPayoutModel {
   final DateTime? onHoldUntil;
   final String? settlementId;
 
+  /// First time the transfer was seen settled.
+  final DateTime? settledAt;
+
   const OrderPayoutModel({
     this.state,
     this.via,
@@ -245,6 +267,7 @@ class OrderPayoutModel {
     this.amount,
     this.onHoldUntil,
     this.settlementId,
+    this.settledAt,
   });
 
   factory OrderPayoutModel.fromMap(Map<String, dynamic> m) {
@@ -256,6 +279,7 @@ class OrderPayoutModel {
       amount: (m['amount'] as num?)?.toDouble(),
       onHoldUntil: until > 0 ? DateTime.fromMillisecondsSinceEpoch(until) : null,
       settlementId: m['settlementId'] as String?,
+      settledAt: anyDate(m['settledAt']),
     );
   }
 }
@@ -286,6 +310,7 @@ class OrderPaymentModel {
   /// appear owed the full original amount.
   final double? refundedAmount;
   final String? refundId;
+  final DateTime? refundedAt;
 
   const OrderPaymentModel({
     this.razorpayOrderId,
@@ -299,6 +324,7 @@ class OrderPaymentModel {
     this.transferredAt,
     this.refundedAmount,
     this.refundId,
+    this.refundedAt,
   });
 
   factory OrderPaymentModel.fromMap(Map<String, dynamic> m) =>
@@ -314,5 +340,6 @@ class OrderPaymentModel {
         transferredAt: m['transferredAt'] as String?,
         refundedAmount: (m['refundedAmount'] as num?)?.toDouble(),
         refundId: m['refundId'] as String?,
+        refundedAt: anyDate(m['refundedAt']),
       );
 }

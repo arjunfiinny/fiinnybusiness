@@ -46,6 +46,9 @@ class SellerEarningsRow {
   /// Razorpay's transfer for this order, when there is one.
   final OrderPayoutModel? payout;
 
+  /// The order itself, for its payment timeline.
+  final OrderModel? order;
+
   const SellerEarningsRow({
     required this.orderId,
     required this.gross,
@@ -55,6 +58,7 @@ class SellerEarningsRow {
     this.deliveredAt,
     this.releaseOn,
     this.payout,
+    this.order,
   });
 }
 
@@ -267,6 +271,7 @@ SellerEarnings computeSellerEarnings(
       deliveredAt: result.deliveredAt,
       releaseOn: result.releaseOn,
       payout: order.payout,
+      order: order,
     ));
     fees += gatewayFee;
 

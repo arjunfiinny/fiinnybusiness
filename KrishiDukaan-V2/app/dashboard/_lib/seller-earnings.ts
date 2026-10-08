@@ -89,17 +89,6 @@ export type OrderPayout = {
   settledAt?: unknown;
 };
 
-/** What a seller sees for a transfer's state. */
-export const PAYOUT_STATE_LABEL: Record<string, string> = {
-  on_hold: "On hold",
-  scheduled: "Release scheduled",
-  processing: "On the way to your bank",
-  settled: "In your bank",
-  failed: "Transfer failed",
-  reversed: "Reversed",
-  not_routed: "Paid by payout run",
-};
-
 export type SellerEarningsRow = {
   orderId: string;
   gross: number;
@@ -112,6 +101,8 @@ export type SellerEarningsRow = {
   releaseOn: Date | null;
   /** Razorpay's transfer for this order, when there is one. */
   payout: OrderPayout | null;
+  /** The order itself, for its payment timeline. */
+  order: OrderLike;
 };
 
 export type SellerEarningsSummary = {
@@ -268,7 +259,7 @@ export function computeSellerEarnings(
     const { gatewayFee, platformFee } = feesFor(order);
     const net = netFor(order);
 
-    rows.push({ orderId: order.id, gross, gatewayFee, platformFee, net, state, deliveredAt, releaseOn, payout: order.payout ?? null });
+    rows.push({ orderId: order.id, gross, gatewayFee, platformFee, net, state, deliveredAt, releaseOn, payout: order.payout ?? null, order });
     gatewayFees += gatewayFee;
     platformFees += platformFee;
 

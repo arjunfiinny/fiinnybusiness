@@ -1,3 +1,4 @@
+import '../widgets/payout_timeline_view.dart';
 import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -653,6 +654,11 @@ class _SellerOrderCard extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                // Where this order's money is; tap for each step.
+                if (order.payment != null) ...[
+                  PayoutHeadlineChip(order: order),
+                  const SizedBox(height: 10),
+                ],
                 // ID and Price header row
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -1433,6 +1439,13 @@ class _PaymentCard extends StatelessWidget {
                     ),
                   ),
 
+                if (payment != null && isPaid) ...[
+                  const SizedBox(height: 16),
+                  Text('Where is my money?',
+                      style: AppTextStyles.caption.copyWith(fontWeight: FontWeight.w900, letterSpacing: 0.6)),
+                  const SizedBox(height: 10),
+                  PayoutTimelineView(order: order),
+                ],
                 const Divider(height: 24),
                 // Footer
                 Row(
