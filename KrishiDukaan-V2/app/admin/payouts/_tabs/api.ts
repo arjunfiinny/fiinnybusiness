@@ -25,6 +25,10 @@ export type TransferRow = {
   settledAt: number | null;
   checkedAt: number | null;
   error: string | null;
+  deliveredAt: number | null;
+  processedAt: number | null;
+  settlementAt: number | null;
+  utr: string | null;
   timeline: Record<string, unknown>;
 };
 
@@ -72,6 +76,24 @@ async function post(body: unknown): Promise<Record<string, unknown>> {
   return json;
 }
 
+/** Downloads the Transfers table (current filter or search) as CSV, up to 5,000 rows. */
+export async function downloadCsv(params: { state?: string; q?: string }): Promise<void> {
+  const qs = new URLSearchParams({ state: params.state ?? "all", format: "csv" });
+  if (params.q) qs.set("q", params.q);
+  const res = await fetch(`/api/admin/route-payouts?${qs}`, { headers: await authHeader() });
+  if (!res.ok) throw new Error("Could not download.");
+  const blob = await res.blob();
+  const name = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") ?? "")?.[1] ?? "seller-transfers.csv";
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 export const releaseOrder = (orderId: string) => post({ action: "release", orderId });
 export const setReleaseEnabled = (enabled: boolean) => post({ action: "setReleaseEnabled", enabled });
 
@@ -86,6 +108,10 @@ export async function checkWithRazorpay(orderIds?: string[]) {
 
 export const inr = (n: number) =>
   `₹${n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+/** Date only, for table columns. */
+export const day = (ms: number | null) =>
+  ms ? new Date(ms).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : "—";
 
 export const fmt = (ms: number | null) =>
   ms

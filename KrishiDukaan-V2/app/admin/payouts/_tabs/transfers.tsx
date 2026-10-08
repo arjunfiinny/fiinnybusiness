@@ -1,11 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, Loader2, RefreshCw, Search, Send, X } from "lucide-react";
+import { AlertTriangle, Download, Loader2, RefreshCw, Search, Send, X } from "lucide-react";
 import { PayoutTimelineView } from "../../../components/shared/payout-timeline-view";
 import {
   cap,
   checkWithRazorpay,
+  day,
+  downloadCsv,
   fetchPayouts,
   fmt,
   inr,
@@ -45,6 +47,7 @@ export function TransfersTab({ initialFilter = "all" }: { initialFilter?: string
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [open, setOpen] = useState<TransferRow | null>(null);
@@ -136,6 +139,24 @@ export function TransfersTab({ initialFilter = "all" }: { initialFilter?: string
             </button>
           )}
         </form>
+        <button
+          onClick={async () => {
+            setDownloading(true);
+            setError(null);
+            try {
+              await downloadCsv({ state: filter, q: search || undefined });
+            } catch (e) {
+              setError(e instanceof Error ? e.message : "Could not download.");
+            } finally {
+              setDownloading(false);
+            }
+          }}
+          disabled={downloading}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-outline-variant/50 px-3 py-1.5 text-sm font-semibold hover:bg-surface-container disabled:opacity-50"
+        >
+          {downloading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+          Download CSV
+        </button>
         {canEdit && (
           <button
             onClick={() => void syncAll()}
@@ -175,28 +196,30 @@ export function TransfersTab({ initialFilter = "all" }: { initialFilter?: string
       {notice && <div className="mb-3 rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">{notice}</div>}
 
       <div className="overflow-x-auto rounded-2xl border border-outline-variant/30 bg-white">
-        <table className="w-full min-w-[980px] text-sm">
+        <table className="w-full min-w-[1180px] text-sm">
           <thead>
             <tr className="border-b border-outline-variant/20 text-left text-xs text-on-surface-variant">
               <th className="px-3 py-2 font-semibold">Order / Seller</th>
+              <th className="px-3 py-2 font-semibold">Order Date</th>
+              <th className="px-3 py-2 font-semibold">Delivery Date</th>
               <th className="px-3 py-2 font-semibold">Transfer Id</th>
               <th className="px-3 py-2 text-right font-semibold">Amount</th>
-              <th className="px-3 py-2 font-semibold">Created At</th>
-              <th className="px-3 py-2 font-semibold">Transfer Status</th>
-              <th className="px-3 py-2 font-semibold">Settlement Status</th>
+              <th className="px-3 py-2 font-semibold">Transfer Status / Processed</th>
+              <th className="px-3 py-2 font-semibold">Settlement Status / Settled</th>
+              <th className="px-3 py-2 font-semibold">UTR</th>
               <th className="px-3 py-2 font-semibold">Where is the money</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={7} className="px-3 py-8 text-center text-on-surface-variant">
+                <td colSpan={9} className="px-3 py-8 text-center text-on-surface-variant">
                   <Loader2 className="mr-2 inline h-4 w-4 animate-spin" /> Loading…
                 </td>
               </tr>
             ) : rows.length === 0 ? (
               <tr>
-                <td colSpan={7} className="px-3 py-8 text-center text-on-surface-variant">
+                <td colSpan={9} className="px-3 py-8 text-center text-on-surface-variant">
                   {search ? "No order matches." : "Nothing here. Orders paid online appear a few minutes after payment."}
                 </td>
               </tr>
@@ -214,14 +237,22 @@ export function TransfersTab({ initialFilter = "all" }: { initialFilter?: string
                       <p className="text-xs font-semibold text-on-surface">{r.sellerName || r.sellerPhone || "—"}</p>
                       <p className="text-[11px] capitalize text-on-surface-variant">{r.orderStatus.replace(/_/g, " ")}</p>
                     </td>
+                    <td className="px-3 py-2.5 text-xs text-on-surface-variant">{day(r.createdAt)}</td>
+                    <td className="px-3 py-2.5 text-xs text-on-surface-variant">{day(r.deliveredAt)}</td>
                     <td className="px-3 py-2.5 font-mono text-xs">
                       {r.transferId ?? "—"}
                       {r.via === "balance" && <span className="ml-1 rounded bg-surface-container px-1 text-[10px]">payout run</span>}
                     </td>
                     <td className="px-3 py-2.5 text-right font-semibold tabular-nums">{r.transferId ? inr(r.amount) : "—"}</td>
-                    <td className="px-3 py-2.5 text-xs text-on-surface-variant">{fmt(r.createdAt)}</td>
-                    <td className="px-3 py-2.5 text-xs">{cap(r.transferStatus)}</td>
-                    <td className="px-3 py-2.5 text-xs">{cap(r.settlementStatus)}</td>
+                    <td className="px-3 py-2.5 text-xs">
+                      {cap(r.transferStatus)}
+                      {r.processedAt && <p className="text-[11px] text-on-surface-variant">{day(r.processedAt)}</p>}
+                    </td>
+                    <td className="px-3 py-2.5 text-xs">
+                      {cap(r.settlementStatus)}
+                      {r.state === "settled" && r.settlementAt && <p className="text-[11px] text-on-surface-variant">{day(r.settlementAt)}</p>}
+                    </td>
+                    <td className="px-3 py-2.5 font-mono text-xs">{r.utr ?? "—"}</td>
                     <td className="px-3 py-2.5">
                       <span className={`inline-block rounded-md px-2 py-0.5 text-xs font-semibold ${meta.cls}`}>{meta.label}</span>
                       {r.state === "scheduled" && <p className="mt-0.5 text-[11px] text-on-surface-variant">Releases {fmt(r.onHoldUntil)}</p>}
@@ -296,6 +327,11 @@ function OrderPaymentPanel({
 
   const ids: [string, unknown][] = [
     ["Order", row.orderId],
+    ["Order date", fmt(row.createdAt)],
+    ["Delivery date", row.deliveredAt ? fmt(row.deliveredAt) : null],
+    ["Payment processed date", row.processedAt ? fmt(row.processedAt) : null],
+    ["Settled date", row.state === "settled" && row.settlementAt ? fmt(row.settlementAt) : null],
+    ["UTR (bank reference)", row.utr],
     ["Seller", `${row.sellerName || "—"} · ${row.sellerPhone || "—"}`],
     ["Razorpay payment", pay.razorpayPaymentId],
     ["Razorpay order", pay.razorpayOrderId],

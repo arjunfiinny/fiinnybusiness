@@ -133,7 +133,9 @@ class OrderModel {
     OrderPaymentModel? paymentModel;
     if (rawPayment is Map) {
       try {
-        paymentModel = OrderPaymentModel.fromMap(Map<String, dynamic>.from(rawPayment));
+        paymentModel = OrderPaymentModel.fromMap(
+          Map<String, dynamic>.from(rawPayment),
+        );
       } catch (_) {
         // Ignore malformed payment
       }
@@ -164,31 +166,43 @@ class OrderModel {
       deliveryBreakdown: d['deliveryBreakdown'] is Map
           ? DeliveryBreakdown.fromMap(d['deliveryBreakdown'] as Map)
           : null,
-      customerDeliveryState: (d['customerDeliveryState'] ??
-              (d['deliveryBreakdown'] is Map
-                  ? (d['deliveryBreakdown'] as Map)['customerDeliveryState']
-                  : null))
-          ?.toString(),
-      total: (d['total'] as num?)?.toDouble() ??
+      customerDeliveryState:
+          (d['customerDeliveryState'] ??
+                  (d['deliveryBreakdown'] is Map
+                      ? (d['deliveryBreakdown'] as Map)['customerDeliveryState']
+                      : null))
+              ?.toString(),
+      total:
+          (d['total'] as num?)?.toDouble() ??
           (d['grandTotal'] as num?)?.toDouble() ??
           (d['subtotal'] as num?)?.toDouble() ??
           0.0,
       status: status,
       payment: paymentModel,
       payout: d['payout'] is Map
-          ? OrderPayoutModel.fromMap(Map<String, dynamic>.from(d['payout'] as Map))
+          ? OrderPayoutModel.fromMap(
+              Map<String, dynamic>.from(d['payout'] as Map),
+            )
           : null,
-      releaseAt: d['routeRelease'] is Map ? anyDate((d['routeRelease'] as Map)['releaseAt']) : null,
+      releaseAt: d['routeRelease'] is Map
+          ? anyDate((d['routeRelease'] as Map)['releaseAt'])
+          : null,
       releaseRecordedAt: d['routeRelease'] is Map
-          ? anyDate((d['routeRelease'] as Map)['scheduledAt'] ?? (d['routeRelease'] as Map)['recordedAt'])
+          ? anyDate(
+              (d['routeRelease'] as Map)['scheduledAt'] ??
+                  (d['routeRelease'] as Map)['recordedAt'],
+            )
           : null,
       createdAt: createdAtDate,
-      statusHistory: (d['statusHistory'] as List?)
+      statusHistory:
+          (d['statusHistory'] as List?)
               ?.whereType<Map>()
-              .map((e) => {
-                    'status': (e['status'] ?? '').toString(),
-                    'at': (e['at'] ?? '').toString(),
-                  })
+              .map(
+                (e) => {
+                  'status': (e['status'] ?? '').toString(),
+                  'at': (e['at'] ?? '').toString(),
+                },
+              )
               .toList() ??
           const [],
       invoiceNumber: d['invoiceNumber']?.toString(),
@@ -216,22 +230,23 @@ class OrderItemModel {
   double get lineTotal => price * quantity;
 
   factory OrderItemModel.fromMap(Map<String, dynamic> m) => OrderItemModel(
-        catalogId: m['catalogId'] as String? ?? m['productId'] as String? ?? '',
-        name: m['name'] as String? ?? '',
-        image: m['image'] as String?,
-        price: (m['price'] as num?)?.toDouble() ?? 0.0,
-        quantity: (m['quantity'] as num?)?.toInt() ?? (m['qty'] as num?)?.toInt() ?? 1,
-        variantLabel: m['variantLabel'] as String? ?? m['variantUnit'] as String?,
-      );
+    catalogId: m['catalogId'] as String? ?? m['productId'] as String? ?? '',
+    name: m['name'] as String? ?? '',
+    image: m['image'] as String?,
+    price: (m['price'] as num?)?.toDouble() ?? 0.0,
+    quantity:
+        (m['quantity'] as num?)?.toInt() ?? (m['qty'] as num?)?.toInt() ?? 1,
+    variantLabel: m['variantLabel'] as String? ?? m['variantUnit'] as String?,
+  );
 
   Map<String, dynamic> toMap() => {
-        'catalogId': catalogId,
-        'name': name,
-        if (image != null) 'image': image,
-        'price': price,
-        'quantity': quantity,
-        if (variantLabel != null) 'variantLabel': variantLabel,
-      };
+    'catalogId': catalogId,
+    'name': name,
+    if (image != null) 'image': image,
+    'price': price,
+    'quantity': quantity,
+    if (variantLabel != null) 'variantLabel': variantLabel,
+  };
 }
 
 /// Where a seller's money for an order is, in Razorpay Route. Same fields as
@@ -260,6 +275,14 @@ class OrderPayoutModel {
   /// First time the transfer was seen settled.
   final DateTime? settledAt;
 
+  /// Razorpay's settlement time, and the bank reference (UTR) to find the
+  /// money in the seller's bank statement.
+  final DateTime? settlementAt;
+  final String? utr;
+
+  /// When Razorpay processed the transfer.
+  final DateTime? processedAt;
+
   const OrderPayoutModel({
     this.state,
     this.via,
@@ -268,6 +291,9 @@ class OrderPayoutModel {
     this.onHoldUntil,
     this.settlementId,
     this.settledAt,
+    this.settlementAt,
+    this.utr,
+    this.processedAt,
   });
 
   factory OrderPayoutModel.fromMap(Map<String, dynamic> m) {
@@ -277,9 +303,14 @@ class OrderPayoutModel {
       via: m['via'] as String?,
       transferId: m['transferId'] as String?,
       amount: (m['amount'] as num?)?.toDouble(),
-      onHoldUntil: until > 0 ? DateTime.fromMillisecondsSinceEpoch(until) : null,
+      onHoldUntil: until > 0
+          ? DateTime.fromMillisecondsSinceEpoch(until)
+          : null,
       settlementId: m['settlementId'] as String?,
       settledAt: anyDate(m['settledAt']),
+      settlementAt: anyDate(m['settlementAt']),
+      utr: m['utr'] as String?,
+      processedAt: anyDate(m['processedAt']),
     );
   }
 }

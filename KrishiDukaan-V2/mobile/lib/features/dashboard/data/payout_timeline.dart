@@ -237,15 +237,17 @@ PayoutTimeline payoutTimeline(OrderModel order, {DateTime? now}) {
   }
 
   if (state == 'settled') {
-    final s = payout?.settledAt;
+    final s = payout?.settlementAt ?? payout?.settledAt;
     settled = TimelineStep(
       'settled',
       'In your bank',
       TimelineStatus.done,
       at: s,
-      detail: payout?.settlementId != null
-          ? 'Razorpay settlement ${payout!.settlementId}.'
-          : null,
+      detail: (payout?.utr ?? '').isNotEmpty
+          ? 'Bank reference (UTR) ${payout!.utr}. Use it to find the money in your bank statement.'
+          : payout?.settlementId != null
+              ? 'Razorpay settlement ${payout!.settlementId}. The bank reference (UTR) shows here once the bank confirms.'
+              : null,
     );
     headline = s != null ? 'In your bank since ${fmtWhen(s)}' : 'In your bank';
     tone = TimelineTone.good;

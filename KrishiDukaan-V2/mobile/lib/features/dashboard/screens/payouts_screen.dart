@@ -152,8 +152,12 @@ class _EarningsSection extends StatelessWidget {
         const SizedBox(height: 20),
         Text('Order by order', style: AppTextStyles.heading3),
         const SizedBox(height: 2),
-        Text('Tap an order to see each step: paid, held, delivered, released, in your bank.',
-            style: AppTextStyles.bodySmall.copyWith(color: AppColors.onSurfaceVariant)),
+        Text(
+          'Tap an order to see each step: paid, held, delivered, released, in your bank.',
+          style: AppTextStyles.bodySmall.copyWith(
+            color: AppColors.onSurfaceVariant,
+          ),
+        ),
         const SizedBox(height: 8),
         ...earnings.rows.take(50).map((r) => _EarningRow(row: r)),
       ],
@@ -243,6 +247,17 @@ class _EarningRow extends StatelessWidget {
                         color: AppColors.onSurfaceVariant,
                       ),
                     ),
+                  if (row.payout?.state == 'settled' &&
+                      (row.payout?.settlementAt ?? row.payout?.settledAt) !=
+                          null)
+                    Text(
+                      'Settled ${DateFormat('d MMM yyyy').format((row.payout!.settlementAt ?? row.payout!.settledAt)!.toLocal())}'
+                      '${(row.payout!.utr ?? '').isNotEmpty ? ' · UTR ${row.payout!.utr}' : ''}',
+                      style: AppTextStyles.bodySmall.copyWith(
+                        color: Colors.green.shade800,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
                   if ((row.payout?.transferId ?? '').isNotEmpty)
                     Text(
                       'Razorpay ${row.payout!.transferId}',
@@ -273,7 +288,11 @@ class _EarningRow extends StatelessWidget {
               ),
             ),
             if (row.order != null)
-              const Icon(Icons.chevron_right, size: 18, color: AppColors.onSurfaceVariant),
+              const Icon(
+                Icons.chevron_right,
+                size: 18,
+                color: AppColors.onSurfaceVariant,
+              ),
           ],
         ),
       ),

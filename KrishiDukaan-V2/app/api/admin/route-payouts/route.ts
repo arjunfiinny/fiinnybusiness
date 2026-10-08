@@ -96,9 +96,59 @@ type TransferRow = {
   settledAt: number | null;
   checkedAt: number | null;
   error: string | null;
+  /** When the seller marked it delivered (last "delivered" in the history). */
+  deliveredAt: number | null;
+  /** When Razorpay processed the transfer. */
+  processedAt: number | null;
+  /** When it settled to the seller's bank (Razorpay's time, else when we saw it). */
+  settlementAt: number | null;
+  /** Bank reference of the settlement. */
+  utr: string | null;
   /** The order fields the payment timeline reads (app/lib/payout-timeline.ts). */
   timeline: Record<string, unknown>;
 };
+
+function deliveredAtOf(o: FirebaseFirestore.DocumentData): number | null {
+  const h = Array.isArray(o.statusHistory) ? o.statusHistory : [];
+  for (let i = h.length - 1; i >= 0; i--) {
+    if (h[i]?.status !== "delivered") continue;
+    const at = h[i].at;
+    const t = ms(at) ?? (typeof at === "string" ? Date.parse(at) : NaN);
+    return Number.isFinite(t) ? t : null;
+  }
+  return null;
+}
+
+/** The Transfers table as CSV, for reconciling with the bank statement. */
+function toCsv(rows: TransferRow[]): string {
+  const day = (v: number | null) =>
+    v ? new Date(v).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
+  const cols: [string, (r: TransferRow) => unknown][] = [
+    ["Order ID", (r) => r.orderId],
+    ["Seller", (r) => r.sellerName],
+    ["Seller phone", (r) => r.sellerPhone],
+    ["Order date", (r) => day(r.createdAt)],
+    ["Delivery date", (r) => day(r.deliveredAt)],
+    ["Transfer ID", (r) => r.transferId],
+    ["Paid via", (r) => (r.via === "balance" ? "Payout run" : r.transferId ? "Route" : "")],
+    ["Seller account", (r) => r.account],
+    ["Amount (INR)", (r) => (r.transferId ? r.amount.toFixed(2) : "")],
+    ["Reversed (INR)", (r) => (r.reversed ? r.reversed.toFixed(2) : "")],
+    ["Transfer status", (r) => r.transferStatus],
+    ["Payment processed date", (r) => day(r.processedAt)],
+    ["Settlement status", (r) => r.settlementStatus],
+    ["Release scheduled", (r) => (r.state === "scheduled" ? day(r.onHoldUntil) : "")],
+    ["Settled date", (r) => day(r.settlementAt)],
+    ["Settlement ID", (r) => r.settlementId],
+    ["UTR", (r) => r.utr],
+    ["State", (r) => r.state],
+  ];
+  const cell = (v: unknown) => {
+    const t = v == null ? "" : String(v);
+    return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+  };
+  return [cols.map(([h]) => h).join(","), ...rows.map((r) => cols.map(([, f]) => cell(f(r))).join(","))].join("\n");
+}
 
 function rowOf(doc: FirebaseFirestore.DocumentSnapshot): TransferRow {
   const o = doc.data() ?? {};
@@ -122,6 +172,10 @@ function rowOf(doc: FirebaseFirestore.DocumentSnapshot): TransferRow {
     settledAt: ms(p.settledAt),
     checkedAt: ms(p.checkedAt),
     error: (p.error as string) ?? null,
+    deliveredAt: deliveredAtOf(o),
+    processedAt: ms(p.processedAt),
+    settlementAt: ms(p.settlementAt) ?? ms(p.settledAt),
+    utr: (p.utr as string) ?? null,
     timeline: {
       createdAt: ms(o.createdAt),
       status: o.status ?? null,
@@ -189,6 +243,7 @@ export async function GET(req: NextRequest) {
     const filter = params.get("state") ?? "all";
     const cursor = params.get("cursor");
     const search = (params.get("q") ?? "").trim();
+    const asCsv = params.get("format") === "csv";
 
     // Totals per state: one count+sum query each.
     const summaryP = Promise.all(
@@ -207,7 +262,7 @@ export async function GET(req: NextRequest) {
         : (PAYOUT_STATES as readonly string[]).includes(filter)
           ? orders.where("payout.state", "==", filter)
           : orders.where("payout.state", "in", [...PAYOUT_STATES]);
-    q = q.orderBy("createdAt", "desc").limit(PAGE);
+    q = q.orderBy("createdAt", "desc").limit(asCsv ? 5000 : PAGE);
     if (cursor && /^[A-Za-z0-9_-]{1,120}$/.test(cursor)) {
       const after = await orders.doc(cursor).get();
       if (after.exists) q = q.startAfter(after);
@@ -244,6 +299,15 @@ export async function GET(req: NextRequest) {
       settingsP,
     ]);
     const transfers = page.docs.map(rowOf);
+    if (asCsv) {
+      // Excel opens UTF-8 CSV correctly with a byte-order mark (₹, Hindi names).
+      return new NextResponse("\uFEFF" + toCsv(transfers), {
+        headers: {
+          "Content-Type": "text/csv; charset=utf-8",
+          "Content-Disposition": `attachment; filename="seller-transfers-${filter}-${new Date().toISOString().slice(0, 10)}.csv"`,
+        },
+      });
+    }
     return NextResponse.json({
       summary,
       sellers,

@@ -81,6 +81,16 @@ void main() {
     expect(t.steps.last.detail, contains('setl_9'));
   });
 
+  test('settled with UTR: Razorpay settlement time and bank reference', () {
+    final setl = now.subtract(const Duration(hours: 5));
+    final t = payoutTimeline(
+        order(status: 'delivered', deliveredAt: delivered, payout: OrderPayoutModel(state: 'settled', transferId: 'trf_1', settlementId: 'setl_9', settledAt: now, settlementAt: setl, utr: 'UTIB0001234')),
+        now: now);
+    expect(t.steps.last.at, setl);
+    expect(t.steps.last.detail, contains('UTIB0001234'));
+    expect(t.headline, contains(fmtWhen(setl)));
+  });
+
   test('delivered but held: reassuring for the seller', () {
     final t = payoutTimeline(order(status: 'delivered', deliveredAt: delivered, payout: const OrderPayoutModel(state: 'on_hold', transferId: 'trf_1')), now: now);
     expect(t.steps[4].detail, contains('KrishiDukan releases it shortly'));

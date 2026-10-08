@@ -87,6 +87,10 @@ export type OrderPayout = {
   onHoldUntil?: number | null;
   settlementId?: string | null;
   settledAt?: unknown;
+  /** Razorpay's settlement time (ms) and the bank reference (UTR). */
+  settlementAt?: number | null;
+  utr?: string | null;
+  processedAt?: number | null;
 };
 
 export type SellerEarningsRow = {

@@ -705,6 +705,39 @@ Razorpay Route transfer as Razorpay reports it.
    scheduled" with a time, then "On the way", then "Settled".
 3. The seller's Payouts page shows the same.
 
+### S13b. Dates and bank reference (UTR) for each transfer
+
+- **Stored on `orders/{id}.payout`** by `syncPayoutStatus`:
+  - `processedAt`: when Razorpay processed the transfer.
+  - `settlementAt` and `utr`: when it settled to the seller's bank, and the
+    bank reference.
+- **Where the UTR comes from:** Razorpay's documented Fetch Settlement
+  Details call (`GET /transfers?recipient_settlement_id=…&expand[]=recipient_settlement`).
+  - It is made once per settlement and reused for every order in it.
+  - If Razorpay has no UTR yet, the order is checked again every 6 hours for
+    3 days.
+- **Shown to admins** in Seller payments → Transfers:
+  - Columns: Order Date, Delivery Date, Transfer Id, Amount, Transfer Status /
+    Processed, Settlement Status / Settled, UTR.
+  - The order panel shows all of them.
+  - **Download CSV** exports the current filter or search, up to 5,000 rows,
+    with order, delivery, processed and settled dates, settlement id and UTR,
+    for reconciling with the bank statement.
+- **Shown to sellers:**
+  - Website Payouts: a "Settled · UTR" column.
+  - App Payouts rows: "Settled 9 Oct 2026 · UTR …".
+  - The "In your bank" step of the timeline shows the UTR, so sellers can
+    find the money in their bank statement.
+- **Deploy:** functions (step 2), website (4) and app (5).
+- **After deploying**, fill in the UTR for transfers that had already
+  settled:
+
+  ```
+  cd functions
+  npx tsx scripts/backfill-payout-status.ts --project krishidukan-e8315 --refresh-settled           # preview
+  npx tsx scripts/backfill-payout-status.ts --project krishidukan-e8315 --refresh-settled --write
+  ```
+
 ### S14. Payment timeline and a reorganised admin
 
 **Payment timeline (sellers and admins).** Every order now tells its money

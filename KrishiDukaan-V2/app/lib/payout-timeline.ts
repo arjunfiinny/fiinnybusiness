@@ -56,6 +56,9 @@ export type TimelineOrder = {
     onHoldUntil?: number | null;
     settlementId?: string | null;
     settledAt?: unknown;
+    /** Razorpay's settlement time (ms) and bank reference. */
+    settlementAt?: number | null;
+    utr?: string | null;
   };
 };
 
@@ -173,7 +176,7 @@ export function payoutTimeline(
   const releaseAt =
     (state === "scheduled" && payout.onHoldUntil ? new Date(payout.onHoldUntil) : null) ??
     toDate(order.routeRelease?.releaseAt);
-  const settledAt = toDate(payout.settledAt);
+  const settledAt = toDate(payout.settlementAt) ?? toDate(payout.settledAt);
   let released: TimelineStep;
   let settled: TimelineStep;
   let headline: string;
@@ -226,7 +229,11 @@ export function payoutTimeline(
       label: "In your bank",
       status: "done",
       at: settledAt,
-      detail: payout.settlementId ? `Razorpay settlement ${payout.settlementId}.` : undefined,
+      detail: payout.utr
+        ? `Bank reference (UTR) ${payout.utr}. Use it to find the money in your bank statement.`
+        : payout.settlementId
+          ? `Razorpay settlement ${payout.settlementId}. The bank reference (UTR) shows here once the bank confirms.`
+          : undefined,
     };
     headline = settledAt ? `In your bank since ${fmtWhen(settledAt)}` : "In your bank";
     tone = "good";

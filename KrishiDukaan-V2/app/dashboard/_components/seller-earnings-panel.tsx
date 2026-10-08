@@ -28,6 +28,14 @@ const fmtDate = (d: Date | null) =>
     ? d.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })
     : "—";
 
+/** When the money reached the bank: Razorpay's time, else when we saw it. */
+function settledOn(p: { settlementAt?: number | null; settledAt?: unknown }): Date | null {
+  if (p.settlementAt) return new Date(p.settlementAt);
+  const t = p.settledAt as { toDate?: () => Date; seconds?: number } | undefined;
+  if (t?.toDate) return t.toDate();
+  return typeof t?.seconds === "number" ? new Date(t.seconds * 1000) : null;
+}
+
 export function SellerEarningsPanel({
   uid,
   profile,
@@ -140,12 +148,13 @@ export function SellerEarningsPanel({
 
       {rows.length > 0 && (
         <div className="mt-5 overflow-x-auto">
-          <table className="w-full min-w-[520px] text-sm">
+          <table className="w-full min-w-[640px] text-sm">
             <thead>
               <tr className="border-b border-outline-variant/40 text-left text-xs uppercase tracking-wide text-on-surface-variant">
                 <th className="pb-2 pr-3 font-semibold">Order</th>
                 <th className="pb-2 pr-3 font-semibold">Delivered</th>
                 <th className="pb-2 pr-3 font-semibold">Where is the money</th>
+                <th className="pb-2 pr-3 font-semibold">Settled · UTR</th>
                 <th className="pb-2 pr-3 text-right font-semibold">Gateway fee</th>
                 <th className="pb-2 text-right font-semibold">You receive</th>
               </tr>
@@ -168,6 +177,16 @@ export function SellerEarningsPanel({
                       <td className="py-2 pr-3">
                         <PayoutHeadline order={r.order as never} />
                       </td>
+                      <td className="py-2 pr-3 text-xs text-on-surface-variant">
+                        {r.payout?.state === "settled" ? (
+                          <>
+                            {fmtDate(settledOn(r.payout))}
+                            {r.payout.utr && <span className="block font-mono text-[10px]">{r.payout.utr}</span>}
+                          </>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
                       <td className="py-2 pr-3 text-right text-on-surface-variant">
                         {r.gatewayFee > 0 ? `−${inr(r.gatewayFee)}` : "—"}
                       </td>
@@ -177,7 +196,7 @@ export function SellerEarningsPanel({
                     </tr>
                     {open && (
                       <tr>
-                        <td colSpan={5} className="bg-surface-container-low/40 px-4 py-4">
+                        <td colSpan={6} className="bg-surface-container-low/40 px-4 py-4">
                           <PayoutTimelineView order={r.order as never} />
                         </td>
                       </tr>
