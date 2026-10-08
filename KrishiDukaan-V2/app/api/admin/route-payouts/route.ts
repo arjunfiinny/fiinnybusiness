@@ -30,10 +30,14 @@ const PAGE = 50;
 const PAYOUT_STATES = ["on_hold", "scheduled", "processing", "settled", "failed", "reversed", "not_routed"] as const;
 
 type AdminAuthResult =
-  | { ok: true; uid: string; response?: undefined }
-  | { ok: false; uid?: undefined; response: NextResponse };
+  | { ok: true; uid: string; role: "admin" | "team"; response?: undefined }
+  | { ok: false; uid?: undefined; role?: undefined; response: NextResponse };
 
-async function requireAdmin(req: NextRequest): Promise<AdminAuthResult> {
+/**
+ * Admins can do everything here; team members granted "routePayouts" can
+ * look (GET) but not move money or change settings.
+ */
+async function requireAdmin(req: NextRequest, opts: { allowTeam?: boolean } = {}): Promise<AdminAuthResult> {
   const header = req.headers.get("Authorization") ?? "";
   const idToken = header.startsWith("Bearer ") ? header.slice(7) : null;
   if (!idToken) {
@@ -51,18 +55,20 @@ async function requireAdmin(req: NextRequest): Promise<AdminAuthResult> {
     db.collection("users").doc(uid).get(),
     db.collection("uidIndex").doc(uid).get(),
   ]);
-  let isAdmin = byUid.exists && byUid.data()?.role === "admin";
-  if (!isAdmin && idx.exists) {
+  let profile = byUid.exists ? byUid.data() : undefined;
+  if (profile?.role !== "admin" && idx.exists) {
     const phone = idx.data()?.phone;
     if (phone) {
       const byPhone = await db.collection("users").doc(String(phone)).get();
-      isAdmin = byPhone.exists && byPhone.data()?.role === "admin";
+      if (byPhone.exists && (byPhone.data()?.role === "admin" || !profile)) profile = byPhone.data();
     }
   }
-  if (!isAdmin) {
-    return { ok: false, response: NextResponse.json({ error: "Forbidden" }, { status: 403 }) };
+  if (profile?.role === "admin") return { ok: true, uid, role: "admin" };
+  const sections = Array.isArray(profile?.adminSections) ? profile.adminSections : [];
+  if (opts.allowTeam && profile?.role === "team" && sections.includes("routePayouts")) {
+    return { ok: true, uid, role: "team" };
   }
-  return { ok: true, uid };
+  return { ok: false, response: NextResponse.json({ error: "Forbidden" }, { status: 403 }) };
 }
 
 const ms = (v: unknown): number | null => {
@@ -90,6 +96,8 @@ type TransferRow = {
   settledAt: number | null;
   checkedAt: number | null;
   error: string | null;
+  /** The order fields the payment timeline reads (app/lib/payout-timeline.ts). */
+  timeline: Record<string, unknown>;
 };
 
 function rowOf(doc: FirebaseFirestore.DocumentSnapshot): TransferRow {
@@ -114,11 +122,64 @@ function rowOf(doc: FirebaseFirestore.DocumentSnapshot): TransferRow {
     settledAt: ms(p.settledAt),
     checkedAt: ms(p.checkedAt),
     error: (p.error as string) ?? null,
+    timeline: {
+      createdAt: ms(o.createdAt),
+      status: o.status ?? null,
+      total: o.total ?? o.grandTotal ?? null,
+      statusHistory: (Array.isArray(o.statusHistory) ? o.statusHistory : [])
+        .filter((h: { status?: string }) => ["delivered", "rejected", "cancelled", "refunded"].includes(String(h?.status)))
+        .map((h: { status?: string; at?: unknown }) => ({ status: h.status, at: ms(h.at) ?? h.at ?? null })),
+      payment: {
+        status: o.payment?.status ?? null,
+        amount: o.payment?.amount ?? null,
+        paidAt: ms(o.payment?.paidAt) ?? o.payment?.paidAt ?? null,
+        razorpayPaymentId: o.payment?.razorpayPaymentId ?? null,
+        razorpayOrderId: o.payment?.razorpayOrderId ?? null,
+        transferId: o.payment?.transferId ?? null,
+        transferredAt: ms(o.payment?.transferredAt) ?? o.payment?.transferredAt ?? null,
+        refundedAmount: o.payment?.refundedAmount ?? null,
+        refundedAt: ms(o.payment?.refundedAt) ?? o.payment?.refundedAt ?? null,
+      },
+      routeRelease: o.routeRelease
+        ? { status: o.routeRelease.status ?? null, releaseAt: ms(o.routeRelease.releaseAt), recordedAt: ms(o.routeRelease.recordedAt ?? o.routeRelease.scheduledAt) }
+        : null,
+      payout: { ...p, settledAt: ms(p.settledAt), checkedAt: ms(p.checkedAt) },
+    },
   };
 }
 
+/** Orders matching a search: order id, trf_/pay_/order_ id, or seller phone. */
+async function searchOrders(q: string): Promise<FirebaseFirestore.DocumentSnapshot[]> {
+  const orders = getAdminDb().collection("orders");
+  const term = q.trim();
+  if (/^trf_[A-Za-z0-9]+$/.test(term)) {
+    const [a, b] = await Promise.all([
+      orders.where("payout.transferId", "==", term).limit(50).get(),
+      orders.where("payment.transferId", "==", term).limit(50).get(),
+    ]);
+    const byId = new Map([...a.docs, ...b.docs].map((d) => [d.id, d]));
+    return Array.from(byId.values());
+  }
+  if (/^pay_[A-Za-z0-9]+$/.test(term)) return (await orders.where("payment.razorpayPaymentId", "==", term).limit(50).get()).docs;
+  if (/^order_[A-Za-z0-9]+$/.test(term)) return (await orders.where("payment.razorpayOrderId", "==", term).limit(50).get()).docs;
+  const digits = term.replace(/\D/g, "");
+  if (digits.length >= 10 && /^[+\d\s-]+$/.test(term)) {
+    const ten = digits.slice(-10);
+    const snap = await orders.where("sellerPhone", "in", [`+91${ten}`, ten, `91${ten}`]).limit(200).get();
+    return snap.docs
+      .filter((d) => d.get("payment.razorpayPaymentId") || d.get("payment.transferId"))
+      .sort((a, b) => (ms(b.get("createdAt")) ?? 0) - (ms(a.get("createdAt")) ?? 0))
+      .slice(0, 100);
+  }
+  if (/^[A-Za-z0-9_-]{1,120}$/.test(term.replace(/^#/, ""))) {
+    const d = await orders.doc(term.replace(/^#/, "")).get();
+    return d.exists ? [d] : [];
+  }
+  return [];
+}
+
 export async function GET(req: NextRequest) {
-  const auth = await requireAdmin(req);
+  const auth = await requireAdmin(req, { allowTeam: true });
   if (!auth.ok) return auth.response;
 
   try {
@@ -127,6 +188,7 @@ export async function GET(req: NextRequest) {
     const params = req.nextUrl.searchParams;
     const filter = params.get("state") ?? "all";
     const cursor = params.get("cursor");
+    const search = (params.get("q") ?? "").trim();
 
     // Totals per state: one count+sum query each.
     const summaryP = Promise.all(
@@ -170,13 +232,25 @@ export async function GET(req: NextRequest) {
       return rows;
     })();
 
-    const [summary, page, sellers] = await Promise.all([summaryP, q.get(), sellersP]);
+    const settingsP = db.collection("settings").doc("route").get().then((d) => ({
+      // Same defaults as functions/src/route-release.ts and app/lib/route-split.ts.
+      releaseEnabled: d.exists && d.data()?.releaseEnabled === true,
+      holdTransfers: !d.exists || d.data()?.holdTransfers !== false,
+    }));
+    const [summary, page, sellers, settings] = await Promise.all([
+      summaryP,
+      search ? searchOrders(search).then((docs) => ({ docs, size: 0 })) : q.get(),
+      sellersP,
+      settingsP,
+    ]);
     const transfers = page.docs.map(rowOf);
     return NextResponse.json({
       summary,
       sellers,
+      settings,
+      canEdit: auth.role === "admin",
       transfers,
-      nextCursor: page.size === PAGE ? page.docs[page.docs.length - 1].id : null,
+      nextCursor: !search && page.size === PAGE ? page.docs[page.docs.length - 1].id : null,
     });
   } catch (error) {
     console.error("[route-payouts] failed:", error);
@@ -194,11 +268,22 @@ export async function POST(req: NextRequest) {
   const auth = await requireAdmin(req);
   if (!auth.ok) return auth.response;
 
-  let body: { action?: string; orderId?: string };
+  let body: { action?: string; orderId?: string; enabled?: boolean };
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+  }
+  if (body.action === "setReleaseEnabled") {
+    if (typeof body.enabled !== "boolean") {
+      return NextResponse.json({ error: "Expected { enabled: boolean }" }, { status: 400 });
+    }
+    // Read per delivery by functions/src/route-release.ts; no redeploy needed.
+    await getAdminDb().collection("settings").doc("route").set(
+      { releaseEnabled: body.enabled, releaseEnabledUpdatedAt: FieldValue.serverTimestamp(), releaseEnabledUpdatedBy: auth.uid },
+      { merge: true },
+    );
+    return NextResponse.json({ ok: true, releaseEnabled: body.enabled });
   }
   if (body.action !== "release" || !body.orderId || !/^[A-Za-z0-9_-]{1,120}$/.test(body.orderId)) {
     return NextResponse.json({ error: "Expected { action: 'release', orderId }" }, { status: 400 });
