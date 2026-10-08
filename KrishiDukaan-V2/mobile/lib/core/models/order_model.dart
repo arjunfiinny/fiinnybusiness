@@ -35,6 +35,10 @@ class OrderModel {
   final double total;
   final String status;
   final OrderPaymentModel? payment;
+
+  /// The seller's Razorpay transfer as last reported (server-written; see
+  /// functions/src/payouts/payout-status.ts).
+  final OrderPayoutModel? payout;
   final DateTime? createdAt;
 
   /// Status transitions, each `{status, at}` with an ISO timestamp. The
@@ -62,6 +66,7 @@ class OrderModel {
     required this.total,
     required this.status,
     this.payment,
+    this.payout,
     this.createdAt,
     this.statusHistory = const [],
     this.invoiceNumber,
@@ -163,6 +168,9 @@ class OrderModel {
           0.0,
       status: status,
       payment: paymentModel,
+      payout: d['payout'] is Map
+          ? OrderPayoutModel.fromMap(Map<String, dynamic>.from(d['payout'] as Map))
+          : null,
       createdAt: createdAtDate,
       statusHistory: (d['statusHistory'] as List?)
               ?.whereType<Map>()
@@ -213,6 +221,43 @@ class OrderItemModel {
         'quantity': quantity,
         if (variantLabel != null) 'variantLabel': variantLabel,
       };
+}
+
+/// Where a seller's money for an order is, in Razorpay Route. Same fields as
+/// the website's OrderPayout (app/dashboard/_lib/seller-earnings.ts).
+class OrderPayoutModel {
+  /// on_hold | scheduled | processing | settled | failed | reversed | not_routed
+  final String? state;
+  final String? via;
+  final String? transferId;
+
+  /// Rupees with the seller after any reversal.
+  final double? amount;
+
+  /// When a held transfer releases.
+  final DateTime? onHoldUntil;
+  final String? settlementId;
+
+  const OrderPayoutModel({
+    this.state,
+    this.via,
+    this.transferId,
+    this.amount,
+    this.onHoldUntil,
+    this.settlementId,
+  });
+
+  factory OrderPayoutModel.fromMap(Map<String, dynamic> m) {
+    final until = (m['onHoldUntil'] as num?)?.toInt() ?? 0;
+    return OrderPayoutModel(
+      state: m['state'] as String?,
+      via: m['via'] as String?,
+      transferId: m['transferId'] as String?,
+      amount: (m['amount'] as num?)?.toDouble(),
+      onHoldUntil: until > 0 ? DateTime.fromMillisecondsSinceEpoch(until) : null,
+      settlementId: m['settlementId'] as String?,
+    );
+  }
 }
 
 class OrderPaymentModel {

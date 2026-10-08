@@ -15,10 +15,11 @@ import { orderTotal } from "./platform-daily";
  *                            status: { placed: n, ... } },
  *       items: { <key>: { name, qty, revenue } } }
  *       earnings: { orders, gatewayFees, platformFees,
- *                   awaiting|delivered|transferred: { net, webNet, platformFee } } }
+ *                   awaiting|delivered|transferred: { net, webNet, platformFee },
+ *                   settled: { net, webNet } } }   part of transferred: in the bank
  *   sellerDailyStats/{sellerKey}_{YYYY-MM-DD}   (India dates):
  *     { sellerKey, date, orders: { count, revenue },
- *       holds: { <orderId>: { net, webNet, at } } }   orders delivered that day
+ *       holds: { <orderId>: { net, webNet, at, releaseAt? } } }   orders delivered that day
  *                                                   and not yet transferred
  *
  * Same rules as the dashboard's former order scan: revenue and products sold
@@ -89,6 +90,10 @@ export function deliveredAtMs(d: admin.firestore.DocumentData): number {
  */
 export function earningsPhase(d: admin.firestore.DocumentData): "transferred" | "not_payable" | "awaiting" | "delivered" {
   if (d.payment?.transferId) return "transferred";
+  // A Route transfer Razorpay has released (or settled) is paid out too
+  // (payout is kept by payouts/payout-status.ts).
+  const payoutState = String(d.payout?.state ?? "");
+  if (payoutState === "processing" || payoutState === "settled") return "transferred";
   const status = String(d.status ?? "").toLowerCase();
   if (status === "cancelled" || status === "rejected" || status === "refunded") return "not_payable";
   const delivered = status === "delivered" || deliveredAtMs(d) > 0;
@@ -110,6 +115,12 @@ function addEarnings(c: Contribution, totals: string, key: string, d: admin.fire
   addTo(c, totals, `earnings.${phase}.webNet`, Math.max(0, gross - gatewayFee - platformFee));
   addTo(c, totals, "earnings.gatewayFees", gatewayFee);
   addTo(c, totals, "earnings.platformFees", platformFee);
+  // Of the paid-out money, what has reached the seller's bank (Razorpay
+  // settlement). A part of "transferred", so older screens still add up.
+  if (phase === "transferred" && d.payout?.state === "settled") {
+    addTo(c, totals, "earnings.settled.net", net);
+    addTo(c, totals, "earnings.settled.webNet", Math.max(0, gross - gatewayFee - platformFee));
+  }
 
   // A delivered order is on hold for 7 days from its delivery time: record it
   // on its delivery day so the dashboard reads only the last few days to
@@ -120,6 +131,10 @@ function addEarnings(c: Contribution, totals: string, key: string, d: admin.fire
     addTo(c, day, `holds.${orderId}.net`, net);
     addTo(c, day, `holds.${orderId}.webNet`, Math.max(0, gross - gatewayFee - platformFee));
     addTo(c, day, `holds.${orderId}.at`, at);
+    // The real release time when the Route transfer has one (24h after
+    // delivery); screens fall back to `at` + 7 days without it.
+    const releaseAt = Number(d.payout?.onHoldUntil ?? 0) || millisOf(d.routeRelease?.releaseAt);
+    if (releaseAt > 0) addTo(c, day, `holds.${orderId}.releaseAt`, releaseAt);
   }
 }
 

@@ -480,11 +480,32 @@ service cloud.firestore {
     // ─── orders ──────────────────────────────────────────────────────────────
     // Accepts both new (customerPhone/sellerPhone) and legacy (customerId/sellerId) fields.
     match /orders/{orderId} {
+      // Payment fields only the server writes (transfers, refunds, fees). A
+      // customer setting payment.transferId would make the order look paid
+      // out, and the payout run would skip the seller.
+      function protectedPaymentKeys() {
+        return ['transferId', 'transferredAt', 'transferredNet', 'transferReversals',
+                'transferReversalId', 'refundId', 'refundedAmount', 'refundedAt',
+                'refundReason', 'platformFee', 'gatewayFee', 'gatewayTax', 'feeFetchedAt'];
+      }
+      function noProtectedPaymentKeys(p) {
+        return !(p is map) || !p.keys().hasAny(protectedPaymentKeys());
+      }
+      function keepsProtectedPayment(after, before) {
+        return (after is map && before is map)
+          ? !after.diff(before).affectedKeys().hasAny(protectedPaymentKeys())
+          : noProtectedPaymentKeys(after) && noProtectedPaymentKeys(before);
+      }
+
       allow create: if isAuthed() && (
         request.resource.data.customerPhone == myPhone() ||
         request.resource.data.customerId == request.auth.uid
       ) && request.resource.data.status == 'placed'
-        && request.resource.data.sellerType in ['retailer', 'manufacturer'];
+        && request.resource.data.sellerType in ['retailer', 'manufacturer']
+        // Who-gets-paid fields are the server's (payout: Razorpay's transfer
+        // status, functions/src/payouts/payout-status.ts).
+        && !request.resource.data.keys().hasAny(['payout', 'routeRelease', 'routeTransfer', 'reassignment'])
+        && noProtectedPaymentKeys(request.resource.data.get('payment', null));
 
       // teamHas('users') covers the admin "view seller's dashboard" link.
       allow read: if isAdmin() || teamHas('users') || teamHas('orders') || (isAuthed() && (
@@ -509,14 +530,15 @@ service cloud.firestore {
       ) && resource.data.status != 'reassigning'
         && request.resource.data.status in ['placed','accepted','dispatched','out_for_delivery','delivered']
         && !request.resource.data.diff(resource.data).affectedKeys().hasAny([
-          'reassignment', 'routeTransfer', 'routeRelease', 'payment',
+          'reassignment', 'routeTransfer', 'routeRelease', 'payment', 'payout',
           'sellerPhone', 'sellerId', 'customerId', 'customerPhone'
         ]))
         // Allow customer to update payment field on their own order
         || (isAuthed() && (
           resource.data.customerId == request.auth.uid ||
           resource.data.customerPhone == myPhone()
-        ) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['payment', 'updatedAt']))
+        ) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['payment', 'updatedAt'])
+          && keepsProtectedPayment(request.resource.data.get('payment', null), resource.data.get('payment', null)))
         // Allow customer to write invoice metadata after PDF upload
         || (isAuthed() && (
           resource.data.customerId == request.auth.uid ||

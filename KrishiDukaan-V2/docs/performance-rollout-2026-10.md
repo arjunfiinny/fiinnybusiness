@@ -256,6 +256,7 @@ fields to WhatsApp docs and write the new totals collections.
 | S8 | Seller earnings (website Payouts panel, app Payouts screen) | Every order the seller ever had (website: every id form × 2 fields; app: live listeners), on every visit | The seller stats docs (2) plus the last 9 days' day docs for the "on hold" split; the order-by-order table from the newest 30 orders |
 | S9 | Website seller Enquiries, Reviews and order requests | Every enquiry (newest 200 by array match, unordered), every store review (both lists read in full each visit, the summary computed from them) and every order offer the seller was ever sent, filtered on the device | 50 enquiries per tab and 50 reviews at a time, newest first; tab counts, review count, average and star bars from count/sum queries over all of them; only open offers read |
 | S10 | App manufacturer screens: network, catalog, find retailer, assign and remove | Network list: 2 overlapping live queries; network tiles read the whole network again to count it; catalog: 2 overlapping live queries; "Find retailer" read 100 retailer accounts per search and missed everyone after them; assigning to several retailers and removing a retailer ran one step after another | One OR query for the list and for the catalog (each doc read once); tiles from 6 count queries; search by name, shop, email or phone over all retailers (about 12 small queries); assignments 5 at a time, one failing no longer stops the rest; removal updates the products at once |
+| S13 | Seller payout status from Razorpay (Route transfers) | Nothing read Razorpay's transfer or settlement status back. Sellers saw a fixed "7 days after delivery" guess (Route-paid orders sat at "Ready to transfer" forever, never "Paid out"); the admin Route page called Razorpay once per order on every load | Each paid order carries Razorpay's transfer and settlement status, checked only when due (every 15 min job, backing off while held, stopping once settled) and at once on Razorpay webhooks; sellers see On hold / Release time / On the way / In your bank; admin sees totals per state from count/sum queries |
 
 ### S1. Add-product search
 
@@ -607,6 +608,102 @@ fields to WhatsApp docs and write the new totals collections.
 - **Check:** on a phone, open Analytics → Share my stats, turn Sales on and
   off and see the preview change, then share to Instagram story and WhatsApp.
   On a laptop, the website downloads the image.
+
+### S13. Seller payout status from Razorpay (new feature)
+
+**What it does.** Every order paid online now carries `payout`: the seller's
+Razorpay Route transfer as Razorpay reports it.
+- Fields: transfer id (`trf_…`), linked account (`acc_…`), amount, transfer
+  status (processed / failed), settlement status (on hold / pending /
+  settled), release time and settlement id (`setl_…`). These are the columns
+  of Razorpay's Route → Transfers screen.
+- It also covers transfers made by the admin payout run (`payment.transferId`),
+  showing each order's share.
+- It is read-only: it never creates, releases or reverses a transfer.
+
+**Where it shows.**
+- **Seller website, Payouts:**
+  - "Paid out" splits into *in your bank* and *on the way*.
+  - "On hold" uses the real release time (24 hours after delivery for Route,
+    instead of the old guess of 7 days).
+  - Each order shows its state and transfer id.
+- **Seller website, order card:** the old "Transferred to your registered bank
+  account" (shown whatever had happened) is replaced by the real state.
+- **Seller app, Payouts screen:** the same as the website.
+- **Admin → Route Payouts:**
+  - Totals and counts per state: Needs action, On hold, Release scheduled, On
+    the way, Settled, Failed.
+  - A paged transfer list with filters.
+  - "Check with Razorpay now".
+  - **Release** for delivered orders whose money is still held. These are
+    orders delivered while `settings/route.releaseEnabled` was off; the delivery
+    trigger only releases at the moment of delivery. Release checks Razorpay
+    first (the seller's own transfer, still held, not reversed) and asks for
+    confirmation.
+
+**How it stays current (and cheap).**
+- `trackPayoutOnOrderWrite` starts following an order once it is paid. It
+  makes the order due again when something that moves money changes:
+  delivered, refunded, payout run, release.
+- `syncPayoutStatus` runs every 15 minutes and reads only due orders (a query
+  on `payout.nextCheckAt`, up to 150 a run).
+  - One Razorpay request covers a payment, for all its sellers.
+  - A transfer on hold is re-checked daily; one with a release date, an hour
+    after that time; one released but not settled, every 3 hours.
+  - Settled, failed or reversed transfers are no longer checked. Orders older
+    than 120 days stop being followed.
+  - Razorpay errors back off (1h, 2h, 4h … a day).
+- Razorpay webhooks `transfer.processed`, `transfer.failed` and
+  `settlement.processed` make the matching orders due at once. The function
+  still reads Razorpay itself, so a webhook can only speed a check up.
+
+**Deploy.**
+- **Step 1 (rules, indexes):**
+  - Indexes: `orders` (`payout.state`, `createdAt` ↓) and (`payout.state`,
+    `status`, `createdAt` ↓).
+  - Rules: customers and sellers can no longer write `payout`.
+  - Customers can no longer create an order carrying `payout`, `routeRelease`,
+    `routeTransfer` or `reassignment`.
+  - Customers can no longer set or change server-written payment fields
+    (`transferId`, refund and fee fields). Before, a customer could set
+    `payment.transferId` on their own order. That made it look paid out, and
+    the payout run would skip the seller.
+- **Step 2 (functions):**
+  - New: `syncPayoutStatus` (scheduled, asia-south1), `trackPayoutOnOrderWrite`
+    (asia-south1) and `syncPayoutsNow` (callable, us-central1, admin only).
+  - Changed: `sellerStatsOnOrderWrite`, for settled totals and release times.
+  - They use the existing `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` secrets,
+    as `releaseTransferOnDelivery` does.
+- **Step 3 (once, after functions), from `functions/`:**
+
+  ```
+  npx tsx scripts/backfill-payout-status.ts --project krishidukan-e8315           # preview
+  npx tsx scripts/backfill-payout-status.ts --project krishidukan-e8315 --write
+  ```
+
+  This marks paid orders from the last 120 days (`--days` to change) to be
+  followed. Statuses fill in over the next runs, 150 orders per 15 minutes.
+- **Step 4 (website) and step 5 (app).**
+
+**Razorpay dashboard (no code).**
+- Settings → Webhooks → the existing `…/api/webhooks/razorpay` webhook: also
+  tick `transfer.processed`, `transfer.failed` and `settlement.processed`.
+  Keep the same secret. This is optional: without it, statuses still update
+  within 15 minutes to a few hours.
+- Route itself is already on: transfers are being created at checkout.
+
+**Settings to check (Firestore `settings/route`).**
+- `releaseEnabled: true` releases a seller's money automatically 24 hours
+  after delivery. While it is false, delivered orders stay "On hold" and show
+  up under Admin → Route Payouts → Needs action.
+- `holdTransfers` (default true) keeps money held until delivery.
+
+**Check.**
+1. Admin → Route Payouts shows the same transfers and statuses as Razorpay's
+   Route → Transfers screen. Use "Check with Razorpay now" to refresh.
+2. Mark a held order delivered (with `releaseEnabled` on): it moves to "Release
+   scheduled" with a time, then "On the way", then "Settled".
+3. The seller's Payouts page shows the same.
 
 ## Testing on UAT
 

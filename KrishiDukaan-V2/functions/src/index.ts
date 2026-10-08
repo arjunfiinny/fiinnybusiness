@@ -12,6 +12,7 @@ export { transcodeReel } from "./reels/media/transcodeReel";
 export { backfillReelTranscodes } from "./reels/media/backfillReelTranscodes";
 export { backfillReelThumbnails } from "./reels/media/backfillReelThumbnails";
 export { releaseTransferOnDelivery } from "./route-release";
+export { syncPayoutStatus, trackPayoutOnOrderWrite, syncPayoutsNow } from "./payouts/payout-status";
 export {
   notifyOwnerOnReelRepost,
   flushEngagementNotifications,

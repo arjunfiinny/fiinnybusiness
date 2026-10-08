@@ -125,6 +125,16 @@ class _EarningsSection extends StatelessWidget {
             ),
           ],
         ),
+        if (earnings.paidOut > 0) ...[
+          const SizedBox(height: 10),
+          _InlineNotice(
+            icon: Icons.account_balance_outlined,
+            color: Colors.green.shade700,
+            text: '${CurrencyUtils.format(earnings.settled)} is in your bank. '
+                '${CurrencyUtils.format((earnings.paidOut - earnings.settled).clamp(0, double.infinity).toDouble())} '
+                'is on the way (Razorpay settles it, usually by the next working day).',
+          ),
+        ],
         if (earnings.nextReleaseOn != null) ...[
           const SizedBox(height: 10),
           _InlineNotice(
@@ -147,7 +157,15 @@ class _EarningRow extends StatelessWidget {
   final SellerEarningsRow row;
   const _EarningRow({required this.row});
 
-  ({String label, Color color}) get _badge => switch (row.state) {
+  ({String label, Color color}) get _badge => switch (row.payout?.state) {
+        // Razorpay's own word on the transfer, when there is one.
+        'settled' => (label: 'In your bank', color: Colors.green.shade700),
+        'processing' => (label: 'On the way', color: Colors.blue.shade700),
+        'failed' => (label: 'Transfer failed', color: AppColors.error),
+        _ => _stateBadge,
+      };
+
+  ({String label, Color color}) get _stateBadge => switch (row.state) {
         PayoutState.due => (label: 'Ready', color: AppColors.primary),
         PayoutState.onHold => (label: 'On hold', color: Colors.orange.shade800),
         PayoutState.awaitingDelivery =>
@@ -194,9 +212,17 @@ class _EarningRow extends StatelessWidget {
                   ),
                 if (row.state == PayoutState.onHold && row.releaseOn != null)
                   Text(
-                    'Releases ${DateFormat('d MMM').format(row.releaseOn!)}',
+                    row.payout?.state == 'scheduled'
+                        ? 'Releases ${DateFormat('d MMM, h:mm a').format(row.releaseOn!)}'
+                        : 'Releases ${DateFormat('d MMM').format(row.releaseOn!)}',
                     style: AppTextStyles.bodySmall
                         .copyWith(color: AppColors.onSurfaceVariant),
+                  ),
+                if ((row.payout?.transferId ?? '').isNotEmpty)
+                  Text(
+                    'Razorpay ${row.payout!.transferId}',
+                    style: AppTextStyles.bodySmall
+                        .copyWith(color: AppColors.onSurfaceVariant, fontSize: 10.5),
                   ),
               ],
             ),
@@ -258,10 +284,12 @@ class _HowItWorks extends StatelessWidget {
   }
 
   static const _points = [
-    'Money is released $kPayoutHoldDays days after you mark an order Delivered '
-        '— that covers the customer\'s refund window.',
-    'KrishiDukan commission is ₹0. We take no cut.',
-    'Only the payment gateway\'s own charge is deducted.',
+    'Money is released after you mark an order Delivered; the date shows '
+        'against each order.',
+    'Razorpay then settles it to your bank, usually by the next working day. '
+        '"In your bank" means it has settled.',
+    'The payment gateway\'s charge and any platform fee shown on the order '
+        'are deducted.',
   ];
 }
 

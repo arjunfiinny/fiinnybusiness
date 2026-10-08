@@ -5,9 +5,10 @@ import { Loader2, RefreshCw } from "lucide-react";
 import { createSellerOrdersPager } from "../../firebase";
 import {
   computeSellerEarnings,
-  PAYOUT_HOLD_DAYS,
+  PAYOUT_STATE_LABEL,
   summaryFromStats,
   type PayoutState,
+  type SellerEarningsRow,
   type SellerEarningsSummary,
 } from "../_lib/seller-earnings";
 import { fetchSellerEarningsStats } from "../_lib/analytics-firestore";
@@ -44,6 +45,24 @@ const STATE_CLASS: Record<PayoutState, string> = {
   transferred: "bg-blue-50 text-blue-700",
   not_payable: "bg-surface-container text-on-surface-variant",
 };
+
+/** A row's badge: Razorpay's transfer state when there is one, else ours. */
+function badgeFor(r: SellerEarningsRow): { label: string; cls: string } {
+  const p = r.payout?.state;
+  if (p === "settled") return { label: PAYOUT_STATE_LABEL.settled, cls: "bg-green-50 text-green-700" };
+  if (p === "processing") return { label: PAYOUT_STATE_LABEL.processing, cls: "bg-blue-50 text-blue-700" };
+  if (p === "failed") return { label: PAYOUT_STATE_LABEL.failed, cls: "bg-red-50 text-red-700" };
+  if (r.state === "on_hold" && p === "scheduled" && r.releaseOn) {
+    return { label: `Releases ${fmtDateTime(r.releaseOn)}`, cls: STATE_CLASS.on_hold };
+  }
+  return {
+    label: STATE_LABEL[r.state] + (r.state === "on_hold" && r.releaseOn ? ` · ${fmtDate(r.releaseOn)}` : ""),
+    cls: STATE_CLASS[r.state],
+  };
+}
+
+const fmtDateTime = (d: Date) =>
+  d.toLocaleString("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
 
 export function SellerEarningsPanel({
   uid,
@@ -109,7 +128,8 @@ export function SellerEarningsPanel({
     );
   }
 
-  const { due, onHold, awaitingDelivery, paidOut, gatewayFees, nextReleaseOn, rows, counted } = summary;
+  const { due, onHold, awaitingDelivery, paidOut, settled, gatewayFees, nextReleaseOn, rows, counted } = summary;
+  const onTheWay = Math.max(0, paidOut - settled);
 
   return (
     <section className="rounded-2xl border border-outline-variant/40 bg-surface-container-lowest p-4 md:p-5">
@@ -117,8 +137,9 @@ export function SellerEarningsPanel({
         <div>
           <h2 className="text-base font-semibold text-on-surface">Your earnings</h2>
           <p className="mt-0.5 text-sm text-on-surface-variant">
-            Money is released {PAYOUT_HOLD_DAYS} days after you mark an order
-            delivered, so the customer&apos;s refund window has closed first.
+            Money is released after you mark an order delivered (the date shows
+            against each order). Razorpay then settles it to your bank, usually
+            by the next working day.
           </p>
         </div>
         <button
@@ -138,14 +159,18 @@ export function SellerEarningsPanel({
           tone="warn"
         />
         <Tile label="Awaiting delivery" value={inr(awaitingDelivery)} />
-        <Tile label="Paid out" value={inr(paidOut)} tone="info" />
+        <Tile
+          label="Paid out"
+          value={inr(paidOut)}
+          hint={paidOut > 0 ? `${inr(settled)} in your bank · ${inr(onTheWay)} on the way` : undefined}
+          tone="info"
+        />
       </div>
 
       <p className="mt-3 text-xs text-on-surface-variant">
-        KrishiDukan commission is <strong>₹0</strong>. Amounts shown are after
-        the payment gateway&apos;s own charge
-        {gatewayFees > 0 ? ` (${inr(gatewayFees)} so far)` : ""}, which Razorpay
-        deducts — not us.
+        Amounts shown are after the payment gateway&apos;s charge
+        {gatewayFees > 0 ? ` (${inr(gatewayFees)} so far)` : ""} and any
+        platform fee shown on the order.
       </p>
 
       {rows.length > 0 && (
@@ -170,20 +195,20 @@ export function SellerEarningsPanel({
                     {fmtDate(r.deliveredAt)}
                   </td>
                   <td className="py-2 pr-3">
-                    <span
-                      className={`inline-block rounded-md px-2 py-0.5 text-xs font-semibold ${STATE_CLASS[r.state]}`}
-                    >
-                      {STATE_LABEL[r.state]}
-                      {r.state === "on_hold" && r.releaseOn
-                        ? ` · ${fmtDate(r.releaseOn)}`
-                        : ""}
+                    <span className={`inline-block rounded-md px-2 py-0.5 text-xs font-semibold ${badgeFor(r).cls}`}>
+                      {badgeFor(r).label}
                     </span>
+                    {r.payout?.transferId && (
+                      <span className="mt-0.5 block font-mono text-[10px] text-on-surface-variant" title="Razorpay transfer id">
+                        {r.payout.transferId}
+                      </span>
+                    )}
                   </td>
                   <td className="py-2 pr-3 text-right text-on-surface-variant">
                     {r.gatewayFee > 0 ? `−${inr(r.gatewayFee)}` : "—"}
                   </td>
                   <td className="py-2 text-right font-semibold text-on-surface">
-                    {inr(r.net)}
+                    {inr(r.payout?.transferId && typeof r.payout.amount === "number" ? r.payout.amount : r.net)}
                   </td>
                 </tr>
               ))}

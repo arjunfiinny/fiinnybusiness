@@ -1262,7 +1262,7 @@ class DashboardRepository {
       for (final e in totalsByKey.values) {
         add('orders', e['orders']);
         add('gatewayFees', e['gatewayFees']);
-        for (final phase in ['awaiting', 'delivered', 'transferred']) {
+        for (final phase in ['awaiting', 'delivered', 'transferred', 'settled']) {
           final b = e[phase];
           add(phase, b is Map ? b['net'] : null);
         }
@@ -1276,8 +1276,13 @@ class DashboardRepository {
             if (entry is! Map) continue;
             final net = (entry['net'] as num?)?.toDouble() ?? 0;
             final atMs = (entry['at'] as num?)?.toInt() ?? 0;
+            final releaseMs = (entry['releaseAt'] as num?)?.toInt() ?? 0;
             if (net > 0 && atMs > 0) {
-              holds.add(EarningsHold(net: net, deliveredAt: DateTime.fromMillisecondsSinceEpoch(atMs)));
+              holds.add(EarningsHold(
+                net: net,
+                deliveredAt: DateTime.fromMillisecondsSinceEpoch(atMs),
+                releaseAt: releaseMs > 0 ? DateTime.fromMillisecondsSinceEpoch(releaseMs) : null,
+              ));
             }
           }
         }

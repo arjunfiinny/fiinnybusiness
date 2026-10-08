@@ -1,5 +1,6 @@
 "use client";
 
+import type { OrderPayout } from "../_lib/seller-earnings";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { useEffectiveUser } from "../_context/effective-user-context";
@@ -109,6 +110,29 @@ function formatDateStr(iso: string | undefined): string {
  * predate the fee capture, or whose payment never captured, render an honest
  * "—" rather than a guessed number — the same rule now applies to both rows.
  */
+/** Where this order's money is, from Razorpay's transfer when we have it. */
+function payoutLine(order: OrderDoc): string {
+  const p = (order as any).payout as OrderPayout | undefined;
+  const at = (ms?: number | null) =>
+    ms ? new Date(ms).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : "";
+  switch (p?.state) {
+    case "settled":
+      return `Settled to your bank account${p.transferId ? ` (Razorpay ${p.transferId})` : ""}.`;
+    case "processing":
+      return "Released. Razorpay is settling it to your bank account, usually by the next working day.";
+    case "scheduled":
+      return `Releases to your bank account on ${at(p.onHoldUntil)}.`;
+    case "failed":
+      return "The transfer to your account failed. KrishiDukan support will contact you.";
+    case "reversed":
+      return "This payment was reversed (refund or reassignment).";
+  }
+  if ((order as any).payment?.transferId) return "Sent to your bank account by KrishiDukan's payout run.";
+  return order.status === "delivered"
+    ? "Released to your bank account after delivery (see Payouts for the date)."
+    : "Released to your bank account after you mark this order delivered.";
+}
+
 function PayoutBreakdown({ order }: { order: OrderDoc }) {
   // undefined = still resolving, null = genuinely unavailable
   const [gatewayFee, setGatewayFee] = useState<number | null | undefined>(undefined);
@@ -186,9 +210,7 @@ function PayoutBreakdown({ order }: { order: OrderDoc }) {
         </div>
       </div>
       <p className="mt-2.5 text-[10px] text-on-surface-variant">
-        {order.status === "delivered"
-          ? "Transferred to your registered bank account."
-          : "Transferred to your bank account once you mark this order delivered."}{" "}
+        {payoutLine(order)}{" "}
         Figures are before GST and other applicable taxes. See the{" "}
         <a href="/seller-terms" className="font-semibold text-primary hover:underline">
           Seller &amp; Manufacturer Subscription Terms

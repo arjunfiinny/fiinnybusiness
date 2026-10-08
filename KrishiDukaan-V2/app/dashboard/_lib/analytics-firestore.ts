@@ -239,7 +239,7 @@ export async function fetchSellerEarningsStats(
     stats.orders = add(stats.orders, e.orders);
     stats.gatewayFees = add(stats.gatewayFees, e.gatewayFees);
     stats.platformFees = add(stats.platformFees, e.platformFees);
-    for (const phase of ["awaiting", "delivered", "transferred"] as const) {
+    for (const phase of ["awaiting", "delivered", "transferred", "settled"] as const) {
       const cur = stats[phase] ?? {};
       stats[phase] = {
         net: add(cur.net, e[phase]?.net),
@@ -249,7 +249,12 @@ export async function fetchSellerEarningsStats(
     }
     for (const day of days) {
       for (const h of Object.values((day.holds ?? {}) as Record<string, any>)) {
-        holds.push({ net: Number(h?.net ?? 0) || 0, webNet: Number(h?.webNet ?? 0) || 0, deliveredAtMs: Number(h?.at ?? 0) || 0 });
+        holds.push({
+          net: Number(h?.net ?? 0) || 0,
+          webNet: Number(h?.webNet ?? 0) || 0,
+          deliveredAtMs: Number(h?.at ?? 0) || 0,
+          releaseAtMs: Number(h?.releaseAt ?? 0) || 0,
+        });
       }
     }
   }
