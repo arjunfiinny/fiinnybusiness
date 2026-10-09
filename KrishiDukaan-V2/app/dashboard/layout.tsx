@@ -24,6 +24,11 @@ import {
 // sessionStorage key for the admin view UID — persists across within-tab navigation
 const ADMIN_VIEW_KEY = 'kd_admin_view_uid';
 
+// The upgrade/checkout route. An unpaid seller must be able to reach it (it is
+// where they buy a plan), so it is exempted from both the paid-access guard and
+// the profile-completion guard below.
+const UPGRADE_PATH = '/dashboard/upgrade';
+
 export default function DashboardLayout({
   children,
 }: Readonly<{
@@ -34,6 +39,9 @@ export default function DashboardLayout({
 
   const [loading, setLoading] = useState(true);
   const [profileIncomplete, setProfileIncomplete] = useState(false);
+  // True for an authenticated seller who hasn't paid and isn't invite-linked —
+  // they may use /dashboard/upgrade to buy a plan but no other dashboard route.
+  const [sellerNeedsUpgrade, setSellerNeedsUpgrade] = useState(false);
   const [uidState, setUidState] = useState<string | null>(null);
   const prevPathnameRef = useRef<string>(pathname ?? '');
 
@@ -159,20 +167,33 @@ export default function DashboardLayout({
           '',
       });
 
-      if (profile && (role === 'retailer' || role === 'manufacturer') && isPaid) {
+      const isSeller = role === 'retailer' || role === 'manufacturer';
+
+      if (profile && isSeller && isPaid) {
+        setSellerNeedsUpgrade(false);
         setLoading(false);
-      } else if (role === 'retailer') {
+      } else if (isSeller) {
+        // Unpaid retailer or manufacturer.
+        //
         // P5: The dashboard only observes access state — invite acceptance and backfill
         // are handled exclusively by the signup/invite flow. grantAccessIfManufacturerLinked
         // is a lightweight read-only check that writes isPaid:true when the invite was
         // accepted but the flag hasn't propagated yet (race between backfill and redirect).
-        const linked = await grantAccessIfManufacturerLinked(user.uid).catch(() => false);
-        if (linked) {
-          setLoading(false);
-        } else {
-          router.push('/');
-        }
+        // It applies to retailers only; a manufacturer is never granted via an invite link.
+        const linked = role === 'retailer'
+          ? await grantAccessIfManufacturerLinked(user.uid).catch(() => false)
+          : false;
+
+        // Access is decided REACTIVELY by the effect below, not here: an unpaid,
+        // non-linked seller is confined to /dashboard/upgrade (where they buy a
+        // plan) rather than bounced to the homepage. We still render the shell
+        // (setLoading(false)) so the redirect effect — which keys off the live
+        // pathname — can run; deciding it inline here would leave them stuck on
+        // the spinner, since this guard never re-runs on client navigation.
+        setSellerNeedsUpgrade(!linked);
+        setLoading(false);
       } else {
+        // Non-seller roles (farmer / customer / etc.) keep their existing restriction.
         router.push('/');
       }
     });
@@ -193,10 +214,32 @@ export default function DashboardLayout({
 
   // Redirect incomplete profiles — skip in admin view
   useEffect(() => {
-    if (!loading && !effectiveUser.isAdminView && profileIncomplete && pathname !== '/dashboard/profile') {
+    if (
+      !loading &&
+      !effectiveUser.isAdminView &&
+      profileIncomplete &&
+      // An unpaid seller is steered to the upgrade page (below), not pushed
+      // through profile completion first — a newly registered seller must be
+      // able to buy a plan before filling in every field.
+      !sellerNeedsUpgrade &&
+      pathname !== '/dashboard/profile' &&
+      // A paid seller with an incomplete profile may still open the upgrade page
+      // to buy more seats, so it is exempt too — just like the profile page.
+      pathname !== UPGRADE_PATH
+    ) {
       router.push('/dashboard/profile');
     }
-  }, [loading, profileIncomplete, pathname, router, effectiveUser.isAdminView]);
+  }, [loading, profileIncomplete, sellerNeedsUpgrade, pathname, router, effectiveUser.isAdminView]);
+
+  // Confine an unpaid seller to the upgrade page. From any other protected
+  // dashboard route, send them to /dashboard/upgrade (where they buy a plan)
+  // instead of the homepage. Reactive to the live pathname, and since the
+  // upgrade page is the one exempt destination there is no redirect loop.
+  useEffect(() => {
+    if (!loading && sellerNeedsUpgrade && pathname !== UPGRADE_PATH) {
+      router.replace(UPGRADE_PATH);
+    }
+  }, [loading, sellerNeedsUpgrade, pathname, router]);
 
   if (loading) return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50">

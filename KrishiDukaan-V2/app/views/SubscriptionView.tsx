@@ -512,6 +512,26 @@ export default function SubscriptionView({ user, role, onSuccess, onLogout }: Su
               }).catch(() => {});
             }).catch(() => {});
 
+            // One-time, client-only handoff to the /success page. Written ONLY
+            // here — past the paymentLogged guard above — so /success can tell a
+            // genuinely activated purchase from a direct visit or refresh without
+            // re-verifying or re-activating anything. Minimal, non-sensitive
+            // fields only: no signature and no card/token data. The payment id is
+            // the dedup key for any later Google Ads conversion. All values other
+            // than durationMonths come from verify/ (the gateway), not the browser.
+            try {
+              sessionStorage.setItem('kd_sub_success', JSON.stringify({
+                paymentId: paymentResponse.razorpay_payment_id,
+                planName: verifyData.planName || (isStandard ? 'Standard' : 'Custom'),
+                seatCount: verifyData.seatCount || grantedSeats,
+                durationMonths: duration.months,
+                amountPaid: verifyData.amountPaid ?? finalTotal,
+                ts: Date.now(),
+              }));
+            } catch {
+              /* sessionStorage unavailable — /success will show its neutral state */
+            }
+
             await onSuccess();
           } catch (err: any) {
             setError(err.message || 'Payment completed but profile update failed. Please refresh.');
