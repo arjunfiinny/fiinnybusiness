@@ -96,6 +96,13 @@ export default function AdminSalesExecActivityPage() {
   const [selectedVisits, setSelectedVisits] = useState<DealerVisit[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
 
+  // Which of the two already-loaded sections is visible below Monthly
+  // Performance. Both `sessions` and `dealers` are fetched together above, so
+  // this is purely a display toggle — no extra Firestore reads.
+  const [activeSection, setActiveSection] = useState<"sessions" | "dealers">(
+    "sessions",
+  );
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -270,54 +277,70 @@ export default function AdminSalesExecActivityPage() {
                 </section>
               )}
 
-              {/* ── Sessions list ───────────────────────────────────────── */}
-              <section>
-                <p className="mb-3 text-xs font-black uppercase tracking-widest text-on-surface-variant">
+              {/* ── Section tabs ─────────────────────────────────────────── */}
+              <div className="flex space-x-2 border-b border-outline-variant/20 mb-4">
+                <button
+                  type="button"
+                  onClick={() => setActiveSection("sessions")}
+                  className={`pb-2 px-1 font-semibold text-sm ${activeSection === "sessions" ? "border-b-2 border-primary text-primary" : "text-on-surface-variant hover:text-on-surface"}`}
+                >
                   Daily Sessions {sessions.length > 0 && `(${sessions.length})`}
-                </p>
-                {sessions.length === 0 ? (
-                  <div className="rounded-2xl border border-outline-variant/30 bg-surface-container-lowest px-5 py-10 text-center">
-                    <MapPin className="mx-auto mb-2 h-6 w-6 text-outline" />
-                    <p className="text-sm font-semibold text-on-surface">No daily sessions yet</p>
-                    <p className="mt-1 text-xs text-on-surface-variant">
-                      This executive hasn&apos;t started any day sessions in the field app.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                    {sessions.map((session) => (
-                      <DaySessionCard
-                        key={session.id}
-                        session={session}
-                        visitCount={visitCountByDate.get(session.date) ?? 0}
-                        onClick={() => void openSession(session)}
-                      />
-                    ))}
-                  </div>
-                )}
-              </section>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveSection("dealers")}
+                  className={`pb-2 px-1 font-semibold text-sm ${activeSection === "dealers" ? "border-b-2 border-primary text-primary" : "text-on-surface-variant hover:text-on-surface"}`}
+                >
+                  Dealers Added {dealers.length > 0 && `(${dealers.length})`}
+                </button>
+              </div>
+
+              {/* ── Sessions list ───────────────────────────────────────── */}
+              {activeSection === "sessions" && (
+                <section>
+                  {sessions.length === 0 ? (
+                    <div className="rounded-2xl border border-outline-variant/30 bg-surface-container-lowest px-5 py-10 text-center">
+                      <MapPin className="mx-auto mb-2 h-6 w-6 text-outline" />
+                      <p className="text-sm font-semibold text-on-surface">No daily sessions yet</p>
+                      <p className="mt-1 text-xs text-on-surface-variant">
+                        This executive hasn&apos;t started any day sessions in the field app.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                      {sessions.map((session) => (
+                        <DaySessionCard
+                          key={session.id}
+                          session={session}
+                          visitCount={visitCountByDate.get(session.date) ?? 0}
+                          onClick={() => void openSession(session)}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </section>
+              )}
 
               {/* ── Dealers added ───────────────────────────────────────── */}
-              <section>
-                <p className="mb-3 text-xs font-black uppercase tracking-widest text-on-surface-variant">
-                  Dealers Added {dealers.length > 0 && `(${dealers.length})`}
-                </p>
-                {dealers.length === 0 ? (
-                  <div className="rounded-2xl border border-outline-variant/30 bg-surface-container-lowest px-5 py-10 text-center">
-                    <Store className="mx-auto mb-2 h-6 w-6 text-outline" />
-                    <p className="text-sm font-semibold text-on-surface">No dealers added yet</p>
-                    <p className="mt-1 text-xs text-on-surface-variant">
-                      This executive hasn&apos;t added any dealers in the field app.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                    {dealers.map((dealer) => (
-                      <AdminDealerCard key={dealer.id} dealer={dealer} />
-                    ))}
-                  </div>
-                )}
-              </section>
+              {activeSection === "dealers" && (
+                <section>
+                  {dealers.length === 0 ? (
+                    <div className="rounded-2xl border border-outline-variant/30 bg-surface-container-lowest px-5 py-10 text-center">
+                      <Store className="mx-auto mb-2 h-6 w-6 text-outline" />
+                      <p className="text-sm font-semibold text-on-surface">No dealers added yet</p>
+                      <p className="mt-1 text-xs text-on-surface-variant">
+                        This executive hasn&apos;t added any dealers in the field app.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                      {dealers.map((dealer) => (
+                        <AdminDealerCard key={dealer.id} dealer={dealer} execId={execId} />
+                      ))}
+                    </div>
+                  )}
+                </section>
+              )}
             </>
           )}
         </>
