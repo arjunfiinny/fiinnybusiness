@@ -15,7 +15,7 @@ import { CustomFieldsEditor, type CustomFieldEntry } from "../_components/custom
 import Link from "next/link";
 import { ref as storageRef, uploadBytes, getDownloadURL } from "firebase/storage";
 import { storage, fetchAllMarketplaceProducts, adminCreateProduct, adminUpdateProduct } from "../../firebase";
-import { compressImage } from "../../utils/compressImage";
+import { compressImage, imageUploadMetadata } from "../../utils/compressImage";
 import { createManufacturerProduct, searchProductsByName } from "../_lib/manufacturer-products-firestore";
 import { createProductAndInventory, retailerHasProduct } from "../_lib/inventory-firestore";
 import type { SeatStats } from "../_types/subscriptions";
@@ -254,8 +254,8 @@ function ImageCard({ slot, index, disabled, onChange, onClear }: {
     onChange({ uploading: true, error: "" });
     try {
       const toUpload = await compressImage(file);
-      const path = `product-images/${Date.now()}-${file.name.replace(/\s+/g, "_")}`;
-      const snap = await uploadBytes(storageRef(storage, path), toUpload);
+      const path = `product-images/${Date.now()}-${toUpload.name.replace(/\s+/g, "_")}`;
+      const snap = await uploadBytes(storageRef(storage, path), toUpload, imageUploadMetadata(toUpload));
       onChange({ url: await getDownloadURL(snap.ref), uploading: false });
     } catch {
       onChange({ uploading: false, error: "Upload failed. Paste URL instead." });

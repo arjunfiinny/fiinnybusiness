@@ -126,6 +126,8 @@ export default function AboutView() {
           </div>
           <div className="rounded-3xl overflow-hidden shadow-ambient border border-surface-container h-80 md:h-auto">
             <img
+              loading="lazy"
+              decoding="async"
               src="https://lh3.googleusercontent.com/aida-public/AB6AXuBcJewaf8J1gWZEdY6ipzy3p0M5aZoePmxCri9BSh7nbzy4FW-i7Azi-fBl6G0vr9TDZY9Q0XxD_GHq2_mJECmXU0oGsqJSZEnh1-5IRtoFi-mxGzKT9SHQH5HJW6wrhRD4Z98Wjo19TKEXGiIpyPXcFVZVvSuhCD9bXXV1kQRL_o0HNQ6-7KIySLLVdAddKSxPd14-jD0W8uG58KaJpjHYahRINJqJMRzG_CvOOiM2CGpIBu5yKjDn4P8gspnpRXThlkMm_JgsHX0L"
               alt={t('aboutMissionImageAlt')}
               className="w-full h-full object-cover"

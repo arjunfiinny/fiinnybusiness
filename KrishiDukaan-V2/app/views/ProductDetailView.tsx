@@ -252,6 +252,8 @@ function RetailerProfileSection({
                 <div className="aspect-square overflow-hidden bg-surface-container">
                   {p.image ? (
                     <img
+                      loading="lazy"
+                      decoding="async"
                       src={p.image}
                       alt={p.name}
                       className="h-full w-full object-cover"
@@ -413,7 +415,7 @@ function ManufacturerBrandSection({
               >
                 <div className="aspect-square overflow-hidden bg-surface-container">
                   {p.image ? (
-                    <img src={p.image} alt={p.name} className="h-full w-full object-cover" />
+                    <img loading="lazy" decoding="async" src={p.image} alt={p.name} className="h-full w-full object-cover" />
                   ) : (
                     <div className="flex h-full items-center justify-center text-on-surface-variant/30">
                       <ICONS.Market className="h-8 w-8" />
@@ -1317,7 +1319,7 @@ export default function ProductDetailView({
                       : 'border border-surface-container-highest opacity-60 hover:opacity-100 hover:border-outline-variant'
                   }`}
                 >
-                  <img src={img} className="w-full h-full object-contain" alt={`${product.name} view ${i + 1}`} />
+                  <img loading="lazy" decoding="async" src={img} className="w-full h-full object-contain" alt={`${product.name} view ${i + 1}`} />
                 </button>
               ))}
             </div>
@@ -1455,7 +1457,7 @@ export default function ProductDetailView({
                   >
                     <div className={`hidden md:block rounded-xl overflow-hidden transition-colors ${isExpanded ? 'bg-primary text-white' : 'bg-white shadow-sm text-on-surface-variant'} ${store.logo ? 'w-10 h-10' : 'p-2.5'}`}>
                       {store.logo ? (
-                        <img src={store.logo} alt={store.name} className="w-10 h-10 object-cover" />
+                        <img loading="lazy" decoding="async" src={store.logo} alt={store.name} className="w-10 h-10 object-cover" />
                       ) : (
                         <ICONS.Market className="w-5 h-5" />
                       )}
@@ -2116,7 +2118,7 @@ export default function ProductDetailView({
                 className="shrink-0 w-44 cursor-pointer rounded-2xl border border-surface-container bg-white shadow-sm hover:shadow-md hover:border-primary/30 transition-all hover:scale-[1.02] overflow-hidden"
               >
                 <div className="aspect-square overflow-hidden bg-surface-container-low">
-                  <img src={p.image} alt={p.name} className="w-full h-full object-cover" />
+                  <img loading="lazy" decoding="async" src={p.image} alt={p.name} className="w-full h-full object-cover" />
                 </div>
                 <div className="p-3 flex flex-col gap-0.5">
                   <span className="text-[10px] font-black uppercase tracking-widest text-primary">{p.category}</span>

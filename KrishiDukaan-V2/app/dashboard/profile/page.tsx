@@ -39,7 +39,7 @@ import { DELIVERY_TERMS_VERSION, LEGAL_ROUTES } from "../../lib/legal-constants"
 import type { DeliveryTermsAcceptance } from "../_lib/profile-persistence";
 import { fetchManufacturerCatalogueRows } from "../_lib/inventory-firestore";
 import type { ManufacturerProductRow } from "../_types/inventory";
-import { compressImage } from "../../utils/compressImage";
+import { compressImage, imageUploadMetadata } from "../../utils/compressImage";
 
 declare global { interface Window { google?: any; } }
 
@@ -157,9 +157,8 @@ function OnlineDeliveryToggle({ value, onChange }: { value: boolean; onChange: (
 
 async function uploadImageToStorage(file: File, pathPrefix: string): Promise<string> {
   const toUpload = await compressImage(file);
-  const path = `${pathPrefix}/${Date.now()}-${file.name.replace(/\s+/g, "_")}`;
-  const contentType = toUpload.type || file.type || "image/jpeg";
-  const snap = await uploadBytes(storageRef(storage, path), toUpload, { contentType });
+  const path = `${pathPrefix}/${Date.now()}-${toUpload.name.replace(/\s+/g, "_")}`;
+  const snap = await uploadBytes(storageRef(storage, path), toUpload, imageUploadMetadata(toUpload));
   return getDownloadURL(snap.ref);
 }
 

@@ -143,7 +143,7 @@ function RetailerStoreCard({ retailer, isExpanded, onToggle }: {
             isExpanded ? 'bg-primary text-white' : 'bg-white shadow-sm text-on-surface-variant'
           } ${retailer.logo ? 'w-10 h-10' : 'p-2.5'}`}>
             {retailer.logo ? (
-              <img src={retailer.logo} alt={retailer.shopName} className="w-10 h-10 object-cover" />
+              <img loading="lazy" decoding="async" src={retailer.logo} alt={retailer.shopName} className="w-10 h-10 object-cover" />
             ) : (
               <Store className="w-5 h-5" />
             )}
@@ -250,7 +250,7 @@ function ManufacturerCard({ brand, isExpanded, onToggle }: {
             brand.logo ? 'w-10 h-10' : `p-2.5 ${isExpanded ? 'bg-amber-500 text-white' : 'bg-amber-100 text-amber-600'}`
           }`}>
             {brand.logo ? (
-              <img src={brand.logo} alt={brand.businessName} className="w-10 h-10 object-contain" />
+              <img loading="lazy" decoding="async" src={brand.logo} alt={brand.businessName} className="w-10 h-10 object-contain" />
             ) : (
               <Building2 className="w-5 h-5" />
             )}
@@ -854,7 +854,7 @@ function ProductCard({
     >
       <div className="aspect-square bg-[#f7f5f0] flex items-center justify-center overflow-hidden p-2 relative">
         {product.image ? (
-          <img src={product.image} alt={product.name}
+          <img loading="lazy" decoding="async" src={product.image} alt={product.name}
             className="w-full h-full object-contain group-hover:scale-105 transition-transform duration-300" />
         ) : (
           <span className="text-4xl opacity-20">🌿</span>

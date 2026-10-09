@@ -677,7 +677,7 @@ export default function SubscriptionView({ user, role, onSuccess, onLogout }: Su
                   </p>
                   <ProductListingCard
                     className="w-44"
-                    image="/product-images/Product_Images/NPK.jpeg"
+                    image="/product-images/Product_Images/NPK.webp"
                     name={isRetailer ? 'NPK Fertilizer 50kg' : 'Krishi Plus NPK 50kg'}
                     category="Fertilizer"
                     price={850}

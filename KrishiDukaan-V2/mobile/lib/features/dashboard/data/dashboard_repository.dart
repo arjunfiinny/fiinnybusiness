@@ -35,6 +35,30 @@ class DashboardRepository {
 
   // ── Stats ────────────────────────────────────────────────────────────────
 
+  /// Lifetime engagement counters from productStats/{id} for the given
+  /// products. Legacy values on the product docs are added by the caller.
+  Future<Map<String, int>> fetchProductStatsTotals(List<String> ids) async {
+    final totals = {'impressions': 0, 'clicks': 0, 'directionRequests': 0};
+    for (var i = 0; i < ids.length; i += 30) {
+      try {
+        final snap = await _db
+            .collection('productStats')
+            .where(FieldPath.documentId,
+                whereIn: ids.sublist(i, i + 30 > ids.length ? ids.length : i + 30))
+            .get();
+        for (final doc in snap.docs) {
+          final d = doc.data();
+          for (final field in totals.keys.toList()) {
+            totals[field] = totals[field]! + ((d[field] as num?)?.toInt() ?? 0);
+          }
+        }
+      } catch (_) {
+        // Unreadable stats — the caller still shows the legacy counters.
+      }
+    }
+    return totals;
+  }
+
   Future<Map<String, int>> fetchStats(String sellerPhone) async {
     final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
 
@@ -1256,8 +1280,25 @@ class DashboardRepository {
     final ref = _storage.ref().child(
       'product-images/${DateTime.now().millisecondsSinceEpoch}-$safeName',
     );
-    final task = await ref.putFile(imageFile);
+    final task = await ref.putFile(imageFile, _uploadedImageMetadata(imageFile));
     return await task.ref.getDownloadURL();
+  }
+
+  /// Every image upload lands at a new timestamped path, so the bytes behind a
+  /// download URL never change. That lets phones and browsers keep them for a
+  /// year instead of re-checking each image with Storage on every view — the
+  /// same header web uses for banners and the reel pipeline for videos.
+  SettableMetadata _uploadedImageMetadata(File imageFile) {
+    final path = imageFile.path.toLowerCase();
+    final contentType = path.endsWith('.png')
+        ? 'image/png'
+        : path.endsWith('.webp')
+            ? 'image/webp'
+            : 'image/jpeg';
+    return SettableMetadata(
+      contentType: contentType,
+      cacheControl: 'public, max-age=31536000, immutable',
+    );
   }
 
   /// Uploads a seller's profile/shop logo and returns its public download URL.
@@ -1270,7 +1311,7 @@ class DashboardRepository {
     final ref = _storage.ref().child(
       'profile-images/logos/${DateTime.now().millisecondsSinceEpoch}-$phone.jpg',
     );
-    final task = await ref.putFile(imageFile);
+    final task = await ref.putFile(imageFile, _uploadedImageMetadata(imageFile));
     return await task.ref.getDownloadURL();
   }
 
@@ -1281,7 +1322,7 @@ class DashboardRepository {
     final ref = _storage.ref().child(
       'profile-images/banners/${DateTime.now().millisecondsSinceEpoch}-$phone.jpg',
     );
-    final task = await ref.putFile(imageFile);
+    final task = await ref.putFile(imageFile, _uploadedImageMetadata(imageFile));
     return await task.ref.getDownloadURL();
   }
 

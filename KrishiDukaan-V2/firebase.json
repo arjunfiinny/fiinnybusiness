@@ -30,7 +30,7 @@
         "wiki/**"
       ],
       "frameworksBackend": {
-        "region": "us-central1"
+        "region": "asia-south1"
       }
     },
     {
@@ -43,7 +43,7 @@
         "wiki/**"
       ],
       "frameworksBackend": {
-        "region": "us-central1"
+        "region": "asia-south1"
       }
     }
   ]
