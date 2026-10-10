@@ -11,6 +11,7 @@ import { useI18n } from '../../app/i18n/I18nContext';
 import { MarketplaceProduct } from '../../types/product';
 import { reverseGeocodeToDisplay } from '../../app/utils/geolocation';
 import { HelperIcon } from '../helpers';
+import { EnvBadge } from './env-badge';
 
 type View = 'home' | 'market' | 'hub' | 'product' | 'map' | 'about' | 'profile' | 'orders' | 'login' | 'signup' | 'subscription' | 'cart' | 'brand' | 'become-retailer' | 'help';
 
@@ -458,6 +459,9 @@ export function Navbar({
           </div>
 
         <div className="flex items-center gap-1.5 md:gap-2 shrink-0">
+          {/* Local-dev-only environment badge (never rendered in hosted builds) */}
+          <EnvBadge />
+
           {/* Cart icon (placeholder) */}
           <button
             onClick={() => {

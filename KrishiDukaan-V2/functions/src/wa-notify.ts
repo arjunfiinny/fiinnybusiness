@@ -13,6 +13,7 @@ type WaTemplate =
   | "manufacturer_network_summary"
   | "enquiry_notification"
   | "order_reassign_offer"
+  | "free_seats_assigned"
   | "generic";
 
 type WaPayload = Record<string, string | number | boolean>;

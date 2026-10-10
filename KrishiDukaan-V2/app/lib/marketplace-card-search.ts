@@ -29,6 +29,15 @@ export async function findCardsByName(
   const cardsCol = collection(db, CARDS_COLLECTION);
   const [primary] = searchTerms(lower);
 
+  // The two lookups run independently. The prefix query on marketplaceCards
+  // needs only the automatic single-field index on nameKey, while the token
+  // query on marketplaceSearch needs a composite (nameKeywords + nameKey)
+  // index. If that composite index is missing in an environment the token
+  // query rejects — and combining both with Promise.all used to make the whole
+  // search throw, so the caller's catch blanked the autocomplete even when the
+  // prefix query had matches. Isolating each failure keeps the reliable prefix
+  // results flowing and surfaces the real error in the console instead of
+  // silently showing no suggestions.
   const [prefixSnap, tokenSnap] = await Promise.all([
     getDocs(query(
       cardsCol,
@@ -36,20 +45,26 @@ export async function findCardsByName(
       where("nameKey", "<", `${lower}`),
       orderBy("nameKey"),
       limit(max),
-    )),
+    )).catch((e) => {
+      console.warn("[findCardsByName] marketplaceCards prefix query failed:", e);
+      return null;
+    }),
     primary
       ? getDocs(query(
         collection(db, SEARCH_COLLECTION),
         where("nameKeywords", "array-contains", primary),
         orderBy("nameKey"),
         limit(Math.ceil(max * 2.5)),
-      ))
+      )).catch((e) => {
+        console.warn("[findCardsByName] marketplaceSearch token query failed (needs composite index?):", e);
+        return null;
+      })
       : Promise.resolve(null),
   ]);
 
   const nameById = new Map<string, string>();
   const cardData = new Map<string, DocumentData>();
-  for (const d of prefixSnap.docs) {
+  for (const d of prefixSnap?.docs ?? []) {
     nameById.set(d.id, String(d.get("nameKey") ?? ""));
     cardData.set(d.id, d.data());
   }

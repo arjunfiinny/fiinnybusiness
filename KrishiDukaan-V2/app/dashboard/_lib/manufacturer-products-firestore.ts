@@ -4,6 +4,7 @@ import {
   getDoc,
   getDocs,
   increment,
+  orderBy,
   query,
   serverTimestamp,
   setDoc,
@@ -12,7 +13,7 @@ import {
   writeBatch,
 } from "firebase/firestore";
 import { db } from "../../firebase";
-import { findCardsByName } from "../../lib/marketplace-card-search";
+import { CARDS_COLLECTION } from "../../lib/marketplace-cards";
 import type { RetailerSeatListing } from "../_types/subscriptions";
 import {
   addSeatListingToBatch,
@@ -384,27 +385,38 @@ function toSearchResult(id: string, r: Record<string, unknown>): ProductSearchRe
 }
 
 /**
- * Existing products whose name contains `term`, for the add-product form's
+ * Existing products whose name CONTAINS `term`, for the add-product form's
  * suggestions: at most 10, sorted by name.
  *
- * Reads the marketplace cards (one per product name, built by Cloud
- * Functions) instead of the products collection (see findCardsByName): at
- * most ~35 small reads instead of every product. A card's id is the product
- * its merge chose as canonical, which is the manufacturer_inventory product
- * when one exists, so the chosen id (the new copy's originalProductId)
- * follows the same source ranking as before.
+ * Matching is a substring scan (name.includes(term)), the original production
+ * behavior. It reads the merged marketplace cards (one doc per product name,
+ * built by Cloud Functions) instead of the whole `products` collection — far
+ * fewer docs, keeping the "don't read every product" improvement — and a
+ * card's own `id` field is the product its merge chose as canonical (the
+ * manufacturer_inventory product when one exists), so the chosen id (the new
+ * copy's originalProductId) follows the same source ranking as before.
+ *
+ * NOTE: this intentionally does NOT use findCardsByName's indexed prefix/token
+ * query. That query only surfaced names STARTING WITH the term (plus whole
+ * single-token matches), so a search like "urea" missed "IFFCO Urea 50kg" and
+ * only a couple of products appeared — the regression this restores.
  *
  * Cards merge variants across sellers; call fetchProductForAutofill with the
  * chosen id to autofill from that product's own doc.
  */
 export async function searchProductsByName(term: string): Promise<ProductSearchResult[]> {
-  const cards = await findCardsByName(db, term, 10);
-  return cards
+  const lower = term.trim().toLowerCase();
+  if (!lower) return [];
+  const snap = await getDocs(query(collection(db, CARDS_COLLECTION), orderBy("nameKey")));
+  return snap.docs
+    // nameKey is the lowercased product name — substring match, as production did.
+    .filter((d) => String(d.get("nameKey") ?? "").includes(lower))
     // The card's `id` field is the canonical product's id; the card doc's
     // own id is a hash of the name.
-    .map(([, card]) => toSearchResult(String(card.id ?? ""), card))
+    .map((d) => toSearchResult(String((d.data() as Record<string, unknown>).id ?? ""), d.data() as Record<string, unknown>))
     .filter((p) => p.id)
-    .sort((a, b) => a.name.localeCompare(b.name));
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .slice(0, 10);
 }
 
 /**
