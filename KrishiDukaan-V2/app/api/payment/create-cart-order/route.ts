@@ -442,13 +442,14 @@ export async function POST(request: Request) {
     // GST + their delivery) — what their order record will say. Legacy clients
     // don't give us per-seller totals, so they keep the subtotal proportions.
     const totalsSum = Array.from(totalBySeller.values()).reduce((a, b) => a + b, 0);
-    const { transfers, splitSummary } = await buildRouteTransfers(
+    const route = await buildRouteTransfers(
       amountPaise,
       isNewClient && totalsSum > 0 ? totalBySeller : subtotalBySeller,
       await routePrefetch,
     );
+    let { splitSummary } = route;
 
-    const order = await razorpay.orders.create({
+    const orderBody = (transfers: typeof route.transfers) => ({
       amount:   amountPaise,
       currency: 'INR',
       receipt:  `cart_${Date.now()}`,
@@ -459,9 +460,21 @@ export async function POST(request: Request) {
         serverSubtotal:  String(serverSubtotal),
         deliveryCharge:  String(deliveryForPayment),
         gstAdded:        String(gstForPayment),
-        routedSellers:   String(splitSummary.length),
+        routedSellers:   String(transfers.length),
       },
       ...(transfers.length > 0 ? { transfers } : {}),
+    });
+
+    const order = await razorpay.orders.create(orderBody(route.transfers)).catch(async (e) => {
+      // A transfer Razorpay refuses (a linked account not active yet, still in
+      // its first-day cooling period, or suspended) must not stop the customer
+      // paying. Retry once without transfers: the payment then stays with
+      // KrishiDukan and the seller is paid later (functions/src/payouts/
+      // pay-after-kyc.ts or the payout run), exactly like a seller not on Route.
+      if (route.transfers.length === 0) throw e;
+      console.error('[create-cart-order] order with transfers refused, retrying without:', e);
+      splitSummary = [];
+      return razorpay.orders.create(orderBody([]));
     });
 
     // Recorded before the customer sees the checkout sheet, so a lost sale is

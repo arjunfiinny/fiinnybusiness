@@ -168,7 +168,7 @@ class _EarningsSection extends StatelessWidget {
   }
 }
 
-class _EarningRow extends StatelessWidget {
+class _EarningRow extends ConsumerWidget {
   final SellerEarningsRow row;
   const _EarningRow({required this.row});
 
@@ -195,10 +195,11 @@ class _EarningRow extends StatelessWidget {
   };
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final order = row.order;
+    final kycPending = ref.watch(kycPendingProvider);
     // Razorpay's word on the money, the same headline as the timeline.
-    final badge = order != null ? _timelineBadge(order) : _badge;
+    final badge = order != null ? _timelineBadge(order, kycPending) : _badge;
     return InkWell(
       borderRadius: BorderRadius.circular(12),
       onTap: order == null
@@ -302,8 +303,11 @@ class _EarningRow extends StatelessWidget {
     );
   }
 
-  static ({String label, Color color}) _timelineBadge(OrderModel order) {
-    final t = payoutTimeline(order);
+  static ({String label, Color color}) _timelineBadge(
+    OrderModel order,
+    bool kycPending,
+  ) {
+    final t = payoutTimeline(order, kycPending: kycPending);
     final color = switch (t.tone) {
       TimelineTone.good => Colors.green.shade700,
       TimelineTone.info => Colors.blue.shade700,

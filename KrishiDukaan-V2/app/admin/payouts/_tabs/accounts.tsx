@@ -822,6 +822,7 @@ export function PayoutRunPanel() {
   // (firestore.rules: settings is write:false), so it is read and set through
   // the same admin route.
   const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [autoPayout, setAutoPayout] = useState<boolean | null>(null);
   const [togglingFlag, setTogglingFlag] = useState(false);
 
   const authHeaders = useCallback(async () => {
@@ -840,7 +841,10 @@ export function PayoutRunPanel() {
           headers: await authHeaders(),
         });
         const json = await res.json();
-        if (!cancelled && res.ok) setEnabled(json.transfersEnabled === true);
+        if (!cancelled && res.ok) {
+          setEnabled(json.transfersEnabled === true);
+          setAutoPayout(json.autoPayout === true);
+        }
       } catch {
         /* leave unknown; the toggle shows a neutral state */
       }
@@ -850,21 +854,22 @@ export function PayoutRunPanel() {
     };
   }, [authHeaders]);
 
-  const toggleFlag = async (next: boolean) => {
+  const toggleFlag = async (next: boolean, key: "transfersEnabled" | "autoPayout" = "transfersEnabled") => {
     setTogglingFlag(true);
     setError(null);
     try {
       const res = await fetch("/api/admin/payout-transfer", {
         method: "PATCH",
         headers: await authHeaders(),
-        body: JSON.stringify({ transfersEnabled: next }),
+        body: JSON.stringify({ [key]: next }),
       });
       const json = await res.json();
       if (!res.ok) {
         setError(json.error ?? "Could not update the setting.");
         return;
       }
-      setEnabled(next);
+      if (key === "autoPayout") setAutoPayout(next);
+      else setEnabled(next);
     } catch {
       setError("Could not reach the server.");
     } finally {
@@ -933,14 +938,44 @@ export function PayoutRunPanel() {
         </button>
       </div>
 
+      {/* Automatic payout after KYC (functions/src/payouts/pay-after-kyc.ts):
+          every hour, pays verified sellers for orders that were not split at
+          checkout, once delivery + the hold has passed. Needs live transfers. */}
+      <div className="mb-3 flex flex-wrap items-center gap-3 rounded-xl border border-outline-variant/40 bg-surface-container-low/60 px-3 py-2">
+        <span className="text-sm font-semibold text-on-surface">Pay verified sellers automatically</span>
+        <span
+          className={`rounded-md px-2 py-0.5 text-xs font-bold ${
+            autoPayout === null
+              ? "bg-surface-container text-on-surface-variant"
+              : autoPayout && enabled
+                ? "bg-green-50 text-green-700"
+                : "bg-amber-50 text-amber-800"
+          }`}
+        >
+          {autoPayout === null ? "Checking…" : autoPayout ? (enabled ? "On" : "On, but live transfers are off") : "Off"}
+        </span>
+        <span className="basis-full text-xs text-on-surface-variant sm:basis-auto">
+          Every hour: sellers who sold before finishing KYC are paid once verified (and 24 hours after
+          their Razorpay account was created), {result?.holdDays ?? 7} days after delivery, less the
+          commission and gateway fee. Same amounts as this run.
+        </span>
+        <button
+          disabled={togglingFlag || autoPayout === null}
+          onClick={() => void toggleFlag(!autoPayout, "autoPayout")}
+          className="ml-auto rounded-lg border border-outline-variant/50 px-3 py-1.5 text-xs font-semibold hover:bg-surface-container disabled:opacity-60"
+        >
+          {togglingFlag ? "Saving…" : autoPayout ? "Turn off" : "Turn on"}
+        </button>
+      </div>
+
       <div className="flex flex-wrap items-center gap-3">
         <Banknote className="h-5 w-5 text-primary" />
         <div className="min-w-0 flex-1">
           <h2 className="text-sm font-bold text-on-surface">Release due payouts</h2>
           <p className="text-xs text-on-surface-variant">
             Pays verified sellers for orders delivered more than{" "}
-            {result?.holdDays ?? 7} days ago. Preview first — a live run cannot
-            be undone here.
+            {result?.holdDays ?? 7} days ago, less KrishiDukan&apos;s commission and the gateway fee
+            (the same split as checkout). Preview first — a live run cannot be undone here.
           </p>
         </div>
         <button
