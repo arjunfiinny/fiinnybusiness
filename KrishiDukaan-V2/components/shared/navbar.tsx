@@ -299,7 +299,7 @@ export function Navbar({
               className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-surface-container-low transition-colors text-left"
             >
               <div className="w-10 h-10 rounded-xl overflow-hidden shrink-0 bg-surface-container-low border border-surface-container">
-                <img src={p.image} alt={p.name} className="w-full h-full object-cover" />
+                <img loading="lazy" decoding="async" src={p.image} alt={p.name} className="w-full h-full object-cover" />
               </div>
               <div className="flex-1 min-w-0">
                 <p className="font-bold text-sm text-on-surface truncate">{p.name}</p>

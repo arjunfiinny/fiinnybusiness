@@ -1,12 +1,17 @@
 import {
   collection,
+  doc,
+  getAggregateFromServer,
+  getCountFromServer,
+  getDoc,
   getDocs,
   query,
-  Timestamp,
+  sum,
   where,
 } from "firebase/firestore";
 import { db } from "../../firebase";
-import { orderGrandTotal } from "../../../types/order";
+import { getDocsByIds } from "../../lib/firestore-by-ids";
+import { PAYOUT_HOLD_DAYS, type EarningsHold, type EarningsStats } from "./seller-earnings";
 
 export type SearchAppearanceStats = {
   impressions: string;
@@ -148,6 +153,117 @@ function bucketSeries(
   return out;
 }
 
+/** Same as normalizeSellerKey in functions/src/stats/seller-stats.ts. */
+function sellerKeyOf(value: unknown): string {
+  const raw = String(value ?? "").trim();
+  const digits = raw.replace(/\D/g, "");
+  if (/^\+?\d{10,12}$/.test(raw.replace(/[\s-]/g, "")) && digits.length >= 10) return `+91${digits.slice(-10)}`;
+  return raw;
+}
+
+type SellerTotals = {
+  earnings?: EarningsStats;
+  orders?: { count?: number; revenue?: number; paid?: number; paidAmount?: number; status?: Record<string, number> };
+  items?: Record<string, { name?: string; qty?: number; revenue?: number }>;
+};
+
+/**
+ * The seller's order totals (all time) and per-day orders/revenue for the
+ * window, from sellerStats/{key} and sellerDailyStats (kept by the
+ * sellerStatsOnOrderWrite Cloud Function) for each key the seller's orders
+ * may be filed under. Each order is filed under exactly one key, so the
+ * keys' totals add up without double counting.
+ */
+async function readSellerOrderStats(keys: string[], fromKey: string, toKey: string) {
+  const reads = await Promise.allSettled(keys.map(async (key) => {
+    const [totals, daySnap] = await Promise.all([
+      getDoc(doc(db, "sellerStats", key)),
+      toKey
+        ? getDocs(query(
+          collection(db, "sellerDailyStats"),
+          where("sellerKey", "==", key),
+          where("date", ">=", fromKey),
+          where("date", "<=", toKey),
+        ))
+        : Promise.resolve(null),
+    ]);
+    return { totals: (totals.exists() ? totals.data() : {}) as SellerTotals, days: daySnap?.docs.map((d) => d.data()) ?? [] };
+  }));
+  const ok = reads.filter((r): r is PromiseFulfilledResult<{ totals: SellerTotals; days: Record<string, any>[] }> => r.status === "fulfilled");
+  return {
+    results: ok.map((r) => r.value),
+    errors: reads.filter((r): r is PromiseRejectedResult => r.status === "rejected").map((r) => r.reason),
+  };
+}
+
+/** The keys a seller's orders may be filed under in sellerStats. */
+function sellerKeysFor(uid: string | null, profile?: any): string[] {
+  return Array.from(new Set(
+    [uid, profile?.uid, profile?.id, profile?.phone].filter(Boolean).map(sellerKeyOf).filter(Boolean),
+  ));
+}
+
+export type SellerOrderTotals = { count: number; paid: number; paidAmount: number; status: Record<string, number> };
+
+/** All-time order totals for the seller's Orders page tabs and tiles (2-3 doc reads). */
+export async function fetchSellerOrderTotals(uid: string | null, profile?: any): Promise<SellerOrderTotals> {
+  const out: SellerOrderTotals = { count: 0, paid: 0, paidAmount: 0, status: {} };
+  const { results } = await readSellerOrderStats(sellerKeysFor(uid, profile), "", "");
+  for (const { totals } of results) {
+    out.count += Number(totals.orders?.count ?? 0) || 0;
+    out.paid += Number(totals.orders?.paid ?? 0) || 0;
+    out.paidAmount += Number(totals.orders?.paidAmount ?? 0) || 0;
+    for (const [k, n] of Object.entries(totals.orders?.status ?? {})) out.status[k] = (out.status[k] ?? 0) + (Number(n) || 0);
+  }
+  return out;
+}
+
+/**
+ * The seller's earnings totals (sellerStats.earnings, summed over their keys)
+ * and the hold entries of the last PAYOUT_HOLD_DAYS + 2 days — a few doc
+ * reads instead of every order. Feed them to summaryFromStats.
+ */
+export async function fetchSellerEarningsStats(
+  uid: string | null,
+  profile?: any,
+): Promise<{ stats: EarningsStats; holds: EarningsHold[] }> {
+  const from = new Date();
+  from.setDate(from.getDate() - (PAYOUT_HOLD_DAYS + 2));
+  const { results, errors } = await readSellerOrderStats(sellerKeysFor(uid, profile), getLocalDayKey(from), getLocalDayKey(new Date()));
+  if (results.length === 0 && errors.length > 0) throw errors[0];
+  const stats: EarningsStats = {};
+  const add = (a: number | undefined, b: unknown) => (a ?? 0) + (Number(b ?? 0) || 0);
+  const holds: EarningsHold[] = [];
+  for (const { totals, days } of results) {
+    const e = totals.earnings ?? {};
+    stats.orders = add(stats.orders, e.orders);
+    stats.gatewayFees = add(stats.gatewayFees, e.gatewayFees);
+    stats.platformFees = add(stats.platformFees, e.platformFees);
+    for (const phase of ["awaiting", "delivered", "transferred", "settled"] as const) {
+      const cur = stats[phase] ?? {};
+      stats[phase] = {
+        net: add(cur.net, e[phase]?.net),
+        webNet: add(cur.webNet, e[phase]?.webNet),
+        platformFee: add(cur.platformFee, e[phase]?.platformFee),
+      };
+    }
+    for (const day of days) {
+      for (const h of Object.values((day.holds ?? {}) as Record<string, any>)) {
+        holds.push({
+          net: Number(h?.net ?? 0) || 0,
+          webNet: Number(h?.webNet ?? 0) || 0,
+          deliveredAtMs: Number(h?.at ?? 0) || 0,
+          releaseAtMs: Number(h?.releaseAt ?? 0) || 0,
+        });
+      }
+    }
+  }
+  return { stats, holds };
+}
+
+/** Products the dashboard already loaded, so analytics doesn't read them again. */
+export type LoadedProduct = { id: string } & Record<string, unknown>;
+
 /**
  * Seller analytics, aggregated from the two collections that actually hold
  * data for a seller:
@@ -169,6 +285,8 @@ export async function fetchRetailerAnalytics(
   profile?: any,
   period: AnalyticsPeriodKey = "week",
   customRange?: CustomDateRange,
+  /** The seller's products if the caller already has them (dashboard Home). */
+  loadedProducts?: LoadedProduct[],
 ): Promise<RetailerAnalytics> {
   const days = customRange
     ? getDaySeriesForRange(customRange.start, customRange.end)
@@ -176,11 +294,6 @@ export async function fetchRetailerAnalytics(
   const dayKeys = new Set(days.map((d) => d.key));
 
   // ── Candidate identifiers ────────────────────────────────────────────────
-  const uidCandidates = new Set<string>();
-  if (retailerId) uidCandidates.add(retailerId);
-  if (profile?.uid) uidCandidates.add(profile.uid);
-  if (profile?.id) uidCandidates.add(profile.id);
-
   const phoneCandidates = new Set<string>();
   const rawPhone = String(profile?.phone ?? "").trim();
   if (rawPhone) {
@@ -189,12 +302,6 @@ export async function fetchRetailerAnalytics(
     if (stripped) phoneCandidates.add(stripped);
     if (!rawPhone.startsWith("+")) phoneCandidates.add(`+91${rawPhone}`);
   }
-  // Some accounts are keyed by phone in uid-shaped fields and vice versa —
-  // querying a field with a wrong-shaped value just returns empty, never errors.
-  const allCandidates = Array.from(
-    new Set([...Array.from(uidCandidates), ...Array.from(phoneCandidates)]),
-  );
-
   const errors: unknown[] = [];
 
   // ── Followers + reel engagement ──────────────────────────────────────────
@@ -212,42 +319,21 @@ export async function fetchRetailerAnalytics(
   {
     // Reels and follows are keyed by the seller's PHONE (shopOwnerId /
     // followedShopId), never a uid — querying with a uid just returns empty.
+    // A follow or reel carries one phone value, so the phone forms' results
+    // never overlap: counts and sums add up. Count and sum queries instead of
+    // reading every follower and reel.
     const phoneKeys = Array.from(phoneCandidates);
-    const settled = await Promise.allSettled([
-      ...phoneKeys.map((phone) =>
-        getDocs(query(collection(db, "follows"), where("followedShopId", "==", phone))),
-      ),
-      ...phoneKeys.map((phone) =>
-        getDocs(query(collection(db, "reels"), where("shopOwnerId", "==", phone))),
-      ),
-    ]);
-
-    // A seller's phone can appear in several formats; dedupe by doc id so the
-    // same follower or reel is never counted twice.
-    const seenFollows = new Set<string>();
-    const seenReels = new Set<string>();
-    for (let i = 0; i < settled.length; i += 1) {
-      const r = settled[i];
-      if (r.status !== "fulfilled") {
-        errors.push(r.reason);
-        continue;
-      }
-      const isFollows = i < phoneKeys.length;
-      for (const d of r.value.docs) {
-        if (isFollows) {
-          if (seenFollows.has(d.id)) continue;
-          seenFollows.add(d.id);
-          followers += 1;
-        } else {
-          if (seenReels.has(d.id)) continue;
-          seenReels.add(d.id);
-          const data = d.data() as Record<string, unknown>;
-          reelViews += Number(data.viewsCount ?? 0) || 0;
-          reelLikes += Number(data.likesCount ?? 0) || 0;
-          reelComments += Number(data.commentsCount ?? 0) || 0;
-        }
-      }
-    }
+    const settled = await Promise.allSettled(phoneKeys.flatMap((phone) => {
+      const reels = query(collection(db, "reels"), where("shopOwnerId", "==", phone));
+      return [
+        getCountFromServer(query(collection(db, "follows"), where("followedShopId", "==", phone)))
+          .then((c) => { followers += c.data().count; }),
+        getAggregateFromServer(reels, { v: sum("viewsCount") }).then((a) => { reelViews += Number(a.data().v ?? 0) || 0; }),
+        getAggregateFromServer(reels, { v: sum("likesCount") }).then((a) => { reelLikes += Number(a.data().v ?? 0) || 0; }),
+        getAggregateFromServer(reels, { v: sum("commentsCount") }).then((a) => { reelComments += Number(a.data().v ?? 0) || 0; }),
+      ];
+    }));
+    for (const r of settled) if (r.status === "rejected") errors.push(r.reason);
   }
 
   // ── Products: engagement counters ────────────────────────────────────────
@@ -264,48 +350,81 @@ export async function fetchRetailerAnalytics(
   let totalClicks = 0;
   let totalPositionSum = 0;
 
-  const productFields = [
-    "ownerId",
-    "ownerPhone",
-    "retailerId",
-    "retailerPhone",
-    "retailerDocId",
-  ];
-  const productSnaps = await Promise.all(
-    productFields.flatMap((field) =>
-      allCandidates.map((idVal) =>
-        getDocs(query(collection(db, "products"), where(field, "==", idVal))).catch(
-          (err) => {
-            errors.push(err);
-            console.error(`[analytics] products ${field}==${idVal} failed:`, err);
-            return null;
-          },
-        ),
-      ),
-    ),
-  );
+  // The seller's products: the ones the caller loaded, else the same owner
+  // fields the dashboard's product lists read (fetchRetailerProducts /
+  // fetchManufacturerProducts), queried here directly so an admin or team
+  // member viewing the dashboard doesn't need the seller's uidIndex entry.
+  let productsFailed = false;
+  let products: LoadedProduct[] = loadedProducts ?? [];
+  if (!loadedProducts) {
+    const productsCol = collection(db, "products");
+    const isManufacturer = profile?.role === "manufacturer";
+    const phones = Array.from(phoneCandidates);
+    const queries = [
+      ...(retailerId && isManufacturer
+        ? [
+          query(productsCol, where("ownerId", "==", retailerId), where("ownerType", "==", "manufacturer")),
+          query(productsCol, where("manufacturerId", "==", retailerId), where("ownerType", "==", "manufacturer")),
+        ]
+        : []),
+      ...(retailerId && !isManufacturer
+        ? [
+          query(productsCol, where("retailerId", "==", retailerId)),
+          query(productsCol, where("ownerId", "==", retailerId)),
+        ]
+        : []),
+      ...(!isManufacturer
+        ? phones.flatMap((phone) => [
+          query(productsCol, where("retailerPhone", "==", phone)),
+          query(productsCol, where("ownerPhone", "==", phone)),
+        ])
+        : []),
+    ];
+    const snaps = await Promise.all(queries.map((q) => getDocs(q).catch((err) => {
+      errors.push(err);
+      return null;
+    })));
+    productsFailed = snaps.length > 0 && snaps.every((snap) => snap === null);
+    const byId = new Map<string, LoadedProduct>();
+    for (const snap of snaps) {
+      for (const d of snap?.docs ?? []) {
+        if (d.data().isActive === false) continue;
+        byId.set(d.id, { id: d.id, ...d.data() });
+      }
+    }
+    products = Array.from(byId.values());
+  }
+
+  const addCounters = (data: Record<string, unknown>) => {
+    totalImpressions += Number(data.impressions || 0);
+    totalClicks += Number(data.clicks || 0);
+    totalPositionSum += Number(data.positionSum || 0);
+
+    const impressionsDay = (data.impressionsByDay ?? {}) as Record<string, unknown>;
+    const callsDay = (data.callsByDay ?? {}) as Record<string, unknown>;
+    const directionsDay = (data.directionRequestsByDay ?? {}) as Record<string, unknown>;
+    days.forEach((day) => {
+      viewsByDay[day.key] += Number(impressionsDay[day.key] || 0);
+      callsByDay[day.key] += Number(callsDay[day.key] || 0);
+      directionsByDay[day.key] += Number(directionsDay[day.key] || 0);
+    });
+  };
 
   const seenProductIds = new Set<string>();
-  for (const snap of productSnaps) {
-    if (!snap) continue;
-    for (const doc of snap.docs) {
-      if (seenProductIds.has(doc.id)) continue; // dedupe across field/id combos
-      seenProductIds.add(doc.id);
-      const data = doc.data();
-      totalImpressions += Number(data.impressions || 0);
-      totalClicks += Number(data.clicks || 0);
-      totalPositionSum += Number(data.positionSum || 0);
-
-      const impressionsDay = (data.impressionsByDay ?? {}) as Record<string, unknown>;
-      const callsDay = (data.callsByDay ?? {}) as Record<string, unknown>;
-      const directionsDay = (data.directionRequestsByDay ?? {}) as Record<string, unknown>;
-      days.forEach((day) => {
-        viewsByDay[day.key] += Number(impressionsDay[day.key] || 0);
-        callsByDay[day.key] += Number(callsDay[day.key] || 0);
-        directionsByDay[day.key] += Number(directionsDay[day.key] || 0);
-      });
-    }
+  for (const p of products) {
+    if (seenProductIds.has(p.id)) continue;
+    seenProductIds.add(p.id);
+    // Legacy counters still written by older app versions.
+    addCounters(p);
   }
+
+  // Current counters live in productStats/{id}, 30 per query in parallel.
+  const stats = await getDocsByIds(db, "productStats", seenProductIds).catch((err) => {
+    errors.push(err);
+    console.error("[analytics] productStats read failed:", err);
+    return new Map<string, Record<string, unknown>>();
+  });
+  stats.forEach((data) => addCounters(data));
 
   // ── Orders: revenue and volume ───────────────────────────────────────────
   const revenueByDay: Record<string, number> = {};
@@ -315,65 +434,34 @@ export async function fetchRetailerAnalytics(
     ordersByDay[d.key] = 0;
   });
 
-  const orderSnaps = await Promise.all(
-    ["sellerPhone", "sellerId"].flatMap((field) =>
-      // Real orders (especially older/web-checkout ones) store the seller's
-      // Firebase Auth UID in sellerId, not a phone — phoneCandidates alone
-      // never matched them, so totalOrders/totalRevenue silently read zero
-      // for every seller. allCandidates (uid + phone) matches what the
-      // products query above already does.
-      allCandidates.map((idVal) =>
-        getDocs(query(collection(db, "orders"), where(field, "==", idVal))).catch(
-          (err) => {
-            errors.push(err);
-            console.error(`[analytics] orders ${field}==${idVal} failed:`, err);
-            return null;
-          },
-        ),
-      ),
-    ),
-  );
+  // All-time totals and the window's per-day series from the seller's stats
+  // docs (sellerStatsOnOrderWrite), instead of every order the seller ever had.
+  const sellerKeys = sellerKeysFor(retailerId, profile);
+  const orderStats = await readSellerOrderStats(sellerKeys, days[0].key, days[days.length - 1].key);
+  errors.push(...orderStats.errors);
 
   let totalOrders = 0;
   let totalRevenue = 0;
   const statusCounts: Record<string, number> = {};
   const productAgg = new Map<string, { name: string; quantity: number; revenue: number }>();
-  const seenOrderIds = new Set<string>();
-
-  for (const snap of orderSnaps) {
-    if (!snap) continue;
-    for (const doc of snap.docs) {
-      if (seenOrderIds.has(doc.id)) continue;
-      seenOrderIds.add(doc.id);
-      const data = doc.data();
-      const status = String(data.status ?? "unknown");
-      statusCounts[status] = (statusCounts[status] ?? 0) + 1;
-      totalOrders += 1;
-
-      const cancelled = status === "cancelled" || status === "rejected";
-      // Canonical final total: web orders carry `grandTotal`, mobile orders `total`.
-      // Reading only `total` silently counted every web order as ₹0 here.
-      const total = orderGrandTotal(data as Parameters<typeof orderGrandTotal>[0]);
-      if (!cancelled) totalRevenue += total;
-
-      const createdAt = data.createdAt as Timestamp | undefined;
-      const dayKey = createdAt?.toDate ? getLocalDayKey(createdAt.toDate()) : null;
-      if (dayKey && dayKeys.has(dayKey)) {
-        ordersByDay[dayKey] += 1;
-        if (!cancelled) revenueByDay[dayKey] += total;
-      }
-
-      if (!cancelled && Array.isArray(data.items)) {
-        for (const item of data.items) {
-          const name = String(item?.name ?? "Unknown product");
-          const qty = Number(item?.quantity ?? 0);
-          const lineRevenue = Number(item?.price ?? 0) * qty;
-          const agg = productAgg.get(name) ?? { name, quantity: 0, revenue: 0 };
-          agg.quantity += qty;
-          agg.revenue += lineRevenue;
-          productAgg.set(name, agg);
-        }
-      }
+  for (const { totals, days: dayDocs } of orderStats.results) {
+    totalOrders += Number(totals.orders?.count ?? 0) || 0;
+    totalRevenue += Number(totals.orders?.revenue ?? 0) || 0;
+    for (const [status, n] of Object.entries(totals.orders?.status ?? {})) {
+      statusCounts[status] = (statusCounts[status] ?? 0) + (Number(n) || 0);
+    }
+    for (const item of Object.values(totals.items ?? {})) {
+      const name = String(item?.name ?? "Unknown product");
+      const agg = productAgg.get(name) ?? { name, quantity: 0, revenue: 0 };
+      agg.quantity += Number(item?.qty ?? 0) || 0;
+      agg.revenue += Number(item?.revenue ?? 0) || 0;
+      productAgg.set(name, agg);
+    }
+    for (const day of dayDocs) {
+      const key = String(day.date ?? "");
+      if (!dayKeys.has(key)) continue;
+      ordersByDay[key] += Number(day.orders?.count ?? 0) || 0;
+      revenueByDay[key] += Number(day.orders?.revenue ?? 0) || 0;
     }
   }
 
@@ -385,8 +473,8 @@ export async function fetchRetailerAnalytics(
   // when *nothing* succeeded; partial data is still worth showing.
   const everythingFailed =
     errors.length > 0 &&
-    productSnaps.every((s) => s === null) &&
-    orderSnaps.every((s) => s === null);
+    productsFailed &&
+    orderStats.results.length === 0;
   if (everythingFailed) {
     throw errors[0];
   }

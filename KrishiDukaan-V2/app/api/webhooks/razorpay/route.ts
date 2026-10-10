@@ -6,6 +6,7 @@ import {
   findOrdersForRazorpayOrder,
   recoverOrderFromCapturedPayment,
 } from "../../../lib/order-recovery";
+import { markPayoutsDueFromWebhook } from "../../../lib/payout-sync";
 
 /**
  * Razorpay webhook — the server-to-server signal that closes the gaps our
@@ -26,9 +27,14 @@ import {
  * normal client path gets to finish first), the order is rebuilt server-side
  * from the paymentAttempts record. See app/lib/order-recovery.ts.
  *
+ * transfer.processed / transfer.failed / settlement.processed — a seller's
+ * Route transfer moved; the order is re-checked with Razorpay right away
+ * (app/lib/payout-sync.ts) instead of at its next scheduled check.
+ *
  * Configure in Razorpay Dashboard -> Settings -> Webhooks:
  *   URL:    https://krishidukan.com/api/webhooks/razorpay
- *   Events: payment.failed, payment.captured
+ *   Events: payment.failed, payment.captured, transfer.processed,
+ *           transfer.failed, settlement.processed
  *   Secret: put the same value in RAZORPAY_WEBHOOK_SECRET
  * (This is a DIFFERENT secret from RAZORPAY_KEY_SECRET — the webhook secret
  * is generated when the webhook is created in the Dashboard.)
@@ -97,6 +103,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // The event is logged either way so nothing is silently lost.
   try {
     const eventName = String(event.event ?? "unknown");
+    if (/^transfers?\./.test(eventName) || eventName === "settlement.processed") {
+      const marked = await markPayoutsDueFromWebhook(eventName, event.payload);
+      return NextResponse.json({ ok: true, marked });
+    }
     if (eventName !== "payment.failed" && eventName !== "payment.captured") {
       return NextResponse.json({ ok: true, ignored: eventName });
     }

@@ -9,6 +9,7 @@ import '../../../core/models/order_model.dart';
 import '../../../core/utils/currency_utils.dart';
 import '../../../core/widgets/empty_state.dart';
 import '../../../core/widgets/error_view.dart';
+import '../../../core/widgets/load_more_tile.dart';
 import '../providers/orders_provider.dart';
 
 class CustomerOrdersScreen extends ConsumerWidget {
@@ -42,10 +43,14 @@ class CustomerOrdersScreen extends ConsumerWidget {
               onAction: () => context.go('/marketplace'),
             );
           }
+          // The newest 30 per query are live; "Load more" reads older ones.
+          final feed = ref.read(customerOrdersFeedProvider);
           return ListView.builder(
             padding: const EdgeInsets.all(16),
-            itemCount: orders.length,
-            itemBuilder: (_, i) => _OrderCard(order: orders[i]),
+            itemCount: orders.length + 1,
+            itemBuilder: (_, i) => i == orders.length
+                ? LoadMoreTile(feed: feed, label: 'Load older orders')
+                : _OrderCard(order: orders[i]),
           );
         },
       ),

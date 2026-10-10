@@ -1,3 +1,5 @@
+import '../../../core/utils/link_share.dart';
+import '../../../core/utils/web_links.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -46,12 +48,14 @@ class _ShopProfileScreenState extends ConsumerState<ShopProfileScreen> {
     );
   }
 
-  /// Best-effort, silent bump of `retailers/{phone}.storeViews` and today's
+  /// Best-effort, silent bump of `storeStats/{phone}.storeViews` and today's
   /// bucket in `storeViewsByDay` — the counters the weekly/monthly/yearly
-  /// analytics digest reads for "store views". Same shape and same
-  /// authenticated-shopper gate as _trackProductEvent in the product detail
-  /// screen; a seller opening their own storefront is not a view, and a
-  /// tracking failure must never affect the page.
+  /// analytics digest reads for "store views". Kept off `retailers/{phone}`
+  /// because that doc is downloaded by every store-list read, and a growing
+  /// per-day map made each of those reads heavier. Same authenticated-shopper
+  /// gate as _trackProductEvent in the product detail screen; a seller opening
+  /// their own storefront is not a view, and a tracking failure must never
+  /// affect the page.
   void _trackStoreView() {
     final auth = FirebaseAuth.instance.currentUser;
     if (auth == null) return;
@@ -63,12 +67,15 @@ class _ShopProfileScreenState extends ConsumerState<ShopProfileScreen> {
     final dayKey = '${now.year}-${now.month.toString().padLeft(2, '0')}-'
         '${now.day.toString().padLeft(2, '0')}';
     FirebaseFirestore.instance
-        .collection('retailers')
+        .collection('storeStats')
         .doc(widget.shopPhone)
-        .update({
-      'storeViews': FieldValue.increment(1),
-      'storeViewsByDay.$dayKey': FieldValue.increment(1),
-    }).catchError((_) {});
+        .set(
+      {
+        'storeViews': FieldValue.increment(1),
+        'storeViewsByDay': {dayKey: FieldValue.increment(1)},
+      },
+      SetOptions(merge: true),
+    ).catchError((_) {});
   }
 
   @override
@@ -288,6 +295,19 @@ class _ShopProfileScreenState extends ConsumerState<ShopProfileScreen> {
                   icon: const Icon(Icons.video_call_rounded),
                   tooltip: 'Post a Reel',
                   onPressed: () => context.push('/reels/upload'),
+                ),
+              if (WebLinks.shop(shopPhone) != null)
+                Builder(
+                  builder: (btnContext) => IconButton(
+                    icon: const Icon(Icons.share_rounded),
+                    tooltip: 'Share shop',
+                    onPressed: () {
+                      final user = shopAsync.value;
+                      LinkShare.shop(btnContext,
+                          phone: shopPhone,
+                          name: user?.businessName ?? user?.name ?? 'Shop');
+                    },
+                  ),
                 ),
             ],
           ),
@@ -792,10 +812,11 @@ class _ReelGridCard extends StatelessWidget {
             if (_gridThumb(reel) != null) ...[
               ClipRRect(
                 borderRadius: BorderRadius.circular(8),
-                child: Image.network(
-                  _gridThumb(reel)!,
+                child: CachedNetworkImage(
+                  imageUrl: _gridThumb(reel)!,
                   fit: BoxFit.cover,
-                  errorBuilder: (context, error, stackTrace) => const SizedBox.shrink(),
+                  memCacheWidth: 400,
+                  errorWidget: (context, url, error) => const SizedBox.shrink(),
                 ),
               ),
               // Dark overlay for text readability
@@ -1316,12 +1337,13 @@ class _ProductTile extends StatelessWidget {
                 top: Radius.circular(11),
               ),
               child: listing.imageUrl != null
-                  ? Image.network(
-                      listing.imageUrl!,
+                  ? CachedNetworkImage(
+                      imageUrl: listing.imageUrl!,
                       height: 100,
                       width: 130,
                       fit: BoxFit.cover,
-                      errorBuilder: (_, _, _) => _placeholder(),
+                      memCacheWidth: 400,
+                      errorWidget: (_, _, _) => _placeholder(),
                     )
                   : _placeholder(),
             ),
@@ -1726,10 +1748,11 @@ class _SingleReelViewState extends ConsumerState<_SingleReelView>
       fit: StackFit.expand,
       children: [
         if (thumb != null && thumb.isNotEmpty)
-          Image.network(
-            thumb,
+          CachedNetworkImage(
+            imageUrl: thumb,
             fit: BoxFit.cover,
-            errorBuilder: (context, error, stackTrace) => const SizedBox.shrink(),
+            memCacheWidth: 1000,
+            errorWidget: (context, url, error) => const SizedBox.shrink(),
           ),
         const Center(
           child: CircularProgressIndicator(
@@ -2038,12 +2061,13 @@ class _ProductBadge extends StatelessWidget {
             if (reel.linkedProductImageUrl != null)
               ClipRRect(
                 borderRadius: BorderRadius.circular(4),
-                child: Image.network(
-                  reel.linkedProductImageUrl!,
+                child: CachedNetworkImage(
+                  imageUrl: reel.linkedProductImageUrl!,
                   width: 28,
                   height: 28,
                   fit: BoxFit.cover,
-                  errorBuilder: (_, _, _) => const Icon(
+                  memCacheWidth: 200,
+                  errorWidget: (_, _, _) => const Icon(
                     Icons.shopping_bag_outlined,
                     color: Colors.white,
                     size: 18,

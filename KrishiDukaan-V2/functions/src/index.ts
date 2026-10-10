@@ -12,6 +12,7 @@ export { transcodeReel } from "./reels/media/transcodeReel";
 export { backfillReelTranscodes } from "./reels/media/backfillReelTranscodes";
 export { backfillReelThumbnails } from "./reels/media/backfillReelThumbnails";
 export { releaseTransferOnDelivery } from "./route-release";
+export { syncPayoutStatus, trackPayoutOnOrderWrite, syncPayoutsNow } from "./payouts/payout-status";
 export {
   notifyOwnerOnReelRepost,
   flushEngagementNotifications,
@@ -22,6 +23,21 @@ export {
   notifyLowStock,
 } from "./notifications/inventory";
 export { sendStoreAnalyticsDigest } from "./notifications/digest";
+export {
+  syncMarketplaceCardOnProductWrite,
+  syncMarketplaceCardOnReviewWrite,
+  recomputeDueMarketplaceCards,
+  reconcileMarketplaceCards,
+} from "./marketplace/cards";
+export { syncMaxDiscountOnProductWrite } from "./marketplace/max-discount";
+export {
+  markStoreDirectoryDirtyOnRetailer,
+  markStoreDirectoryDirtyOnManufacturer,
+  markStoreDirectoryDirtyOnProfile,
+  markStoreDirectoryDirtyOnStore,
+  markStoreDirectoryDirtyOnStoreReview,
+  rebuildStoreDirectoryIfDirty,
+} from "./stores/directory";
 export { raiseAbandonedCheckoutEnquiries } from "./notifications/enquiries";
 export { notifySellerOfOrderOffer, expireOrderReassignments } from "./notifications/reassignment";
 export { generateInvoiceForNewOrder, sweepMissingInvoices } from "./orders/invoices";
@@ -41,6 +57,15 @@ export {
   redeemErpHandoffCode,
 } from "./erp-bridge";
 export { onActiveUserPresence } from "./analytics/activity";
+export {
+  platformStatsOnOrderWrite,
+  platformStatsOnSubscriptionWrite,
+  platformStatsOnPaymentAttemptWrite,
+  platformStatsOnUserWrite,
+  platformStatsOnProductCreate,
+  platformStatsOnProductDelete,
+} from "./stats/platform-daily";
+export { sellerStatsOnOrderWrite } from "./stats/seller-stats";
 
 admin.initializeApp();
 const db = admin.firestore();

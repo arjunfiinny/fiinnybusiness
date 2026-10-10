@@ -18,6 +18,7 @@ import {
 } from "firebase/firestore";
 import { db } from "../../firebase";
 import { authedJsonHeaders } from "../../lib/authed-fetch";
+import { getDocsByIds } from "../../lib/firestore-by-ids";
 import type {
   ManufacturerRetailerDoc,
   ManufacturerRetailerRow,
@@ -808,32 +809,30 @@ export async function fetchRetailerAssignedProducts(
     where("listingType",   "==", "assigned"),
   );
   const snap = await getDocs(q);
-  const rows: AssignedProductRow[] = [];
-  await Promise.all(snap.docs.map(async (d) => {
+  // The listed products, 30 per query in parallel, instead of one read each.
+  const products = await getDocsByIds(
+    db,
+    "products",
+    snap.docs.map((d) => String(d.data().productId ?? "")),
+  ).catch(() => new Map<string, Record<string, any>>());
+  const rows: AssignedProductRow[] = snap.docs.map((d) => {
     const r    = d.data() as any;
     const status: "active" | "released" | "expired" =
       r.status === "released" ? "released" : r.status === "expired" ? "expired" : "active";
-    let productName = "—", category = "—", unit = "—", price = 0, image = "";
-    try {
-      const pSnap = await getDoc(doc(db, "products", String(r.productId ?? "")));
-      if (pSnap.exists()) {
-        const p = pSnap.data() as any;
-        productName = String(p.name ?? "—");
-        category    = String(p.category ?? "—");
-        unit        = String(p.unit ?? "—");
-        price       = Number(p.price ?? 0);
-        image       = String(p.image ?? "");
-      }
-    } catch { /* skip */ }
-    rows.push({
+    const p = products.get(String(r.productId ?? "")) as any;
+    return {
       listingId:   d.id,
       productId:   String(r.productId ?? ""),
-      productName, category, unit, price, image,
+      productName: p ? String(p.name ?? "—") : "—",
+      category:    p ? String(p.category ?? "—") : "—",
+      unit:        p ? String(p.unit ?? "—") : "—",
+      price:       p ? Number(p.price ?? 0) : 0,
+      image:       p ? String(p.image ?? "") : "",
       status,
       assignedAt:  r.assignedAt?.toDate?.() ?? null,
       expiresAt:   r.expiresAt?.toDate?.()  ?? null,
-    });
-  }));
+    };
+  });
   return rows.sort((a, b) => (b.assignedAt?.getTime() ?? 0) - (a.assignedAt?.getTime() ?? 0));
 }
 

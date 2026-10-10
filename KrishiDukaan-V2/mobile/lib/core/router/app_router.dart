@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../providers/auth_provider.dart';
+import '../utils/web_links.dart';
 import '../providers/user_provider.dart';
 import '../widgets/app_shell.dart';
 import '../../features/auth/screens/phone_entry_screen.dart';
@@ -20,6 +21,7 @@ import '../../features/orders/screens/order_detail_screen.dart';
 import '../../features/hubs/screens/hubs_screen.dart';
 import '../../features/hubs/screens/hub_detail_screen.dart';
 import '../../features/brand/screens/brand_screen.dart';
+import '../../features/brand/screens/brand_link_screen.dart';
 import '../../features/dashboard/screens/inventory_screen.dart';
 import '../../features/dashboard/screens/seller_orders_screen.dart';
 import '../../features/dashboard/screens/subscription_dashboard_screen.dart';
@@ -163,11 +165,19 @@ String? _translateExternalLink(Uri uri) {
     return '/login?inviteCode=${Uri.encodeComponent(invite)}';
   }
 
-  // NOTE: brand links (web path /brand/{slug}) are deliberately NOT mapped
-  // here — the app's /brand/:phone route needs a phone number, but the web
-  // slug is name-based and only resolves to a phone via an async Firestore
-  // query. There's also no in-app "share brand" action yet to produce these
-  // links. Add slug resolution here if/when that's built.
+  // Shared shop link: WebLinks.shop → /shop/+91XXXXXXXXXX (any phone form).
+  if (segments.length == 2 && segments[0] == 'shop') {
+    final phone = WebLinks.sharePhone(segments[1]);
+    if (phone != null) return '/shop/$phone';
+  }
+
+  // Brand page: WebLinks.brand → /brand/+91XXXXXXXXXX; the brand page's own
+  // address /brand/{slug} needs a Firestore lookup, done by BrandLinkScreen.
+  if (segments.length == 2 && segments[0] == 'brand' && segments[1].isNotEmpty) {
+    final phone = WebLinks.sharePhone(segments[1]);
+    if (phone != null) return '/brand/$phone';
+    return '/brand-link/${Uri.encodeComponent(segments[1])}';
+  }
 
   // Bare domain (e.g. the app icon's own web link, or an unrecognised path
   // under a known host) → land on Home rather than erroring.
@@ -613,6 +623,13 @@ final routerProvider = Provider<GoRouter>((ref) {
           child: HubDetailScreen(
             postId: state.pathParameters['postId']!,
           ),
+        ),
+      ),
+      GoRoute(
+        path: '/brand-link/:slug',
+        parentNavigatorKey: _rootKey,
+        builder: (_, state) => _RootBackFallback(
+          child: BrandLinkScreen(slug: state.pathParameters['slug'] ?? ''),
         ),
       ),
       GoRoute(

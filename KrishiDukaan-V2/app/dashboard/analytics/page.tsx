@@ -14,6 +14,9 @@ import {
 } from "../_lib/analytics-firestore";
 import { useEffectiveUser } from "../_context/effective-user-context";
 import { HelperIcon } from "../../../components/helpers";
+import { ShareStatsButton } from "../_components/share-stats-dialog";
+import type { StatsShareData } from "../_lib/stats-share-card";
+import { shopShareUrl } from "../../lib/share-links";
 import { useI18n } from "../../i18n/I18nContext";
 
 function formatINR(amount: number): string {
@@ -116,6 +119,34 @@ export default function AnalyticsPage() {
 
   const emptySeries = [] as { label: string; value: number }[];
 
+  // "Share my stats" image: the selected window's numbers (the order tiles
+  // above are all-time; the series are the window).
+  const sum = (series?: { value: number }[]) => (series ?? []).reduce((a, p) => a + (Number(p.value) || 0), 0);
+  const shopName = String(profile?.businessName || profile?.shopName || profile?.name || "My shop");
+  const shareLink = shopShareUrl(String(profile?.phone ?? ""));
+  const shareData: StatsShareData | null = stats
+    ? {
+        shopName,
+        logoUrl: profile?.logoUrl || profile?.logo || null,
+        periodLabel: customRange
+          ? `${formatShort(customRange.start)} – ${formatShort(customRange.end)}`
+          : period === "week"
+            ? "Last 7 days"
+            : period === "month"
+              ? "Last 30 days"
+              : "Last 12 months",
+        link: shareLink ? shareLink.replace(/^https?:\/\//, "") : null,
+        orders: sum(orders?.ordersOverTime),
+        revenue: sum(orders?.revenueOverTime),
+        productViews: sum(stats.viewsOverTime),
+        calls: sum(stats.callsOverTime),
+        followers: stats.followers ?? 0,
+        reelViews: stats.reelViews ?? 0,
+        bestSeller: orders?.topProducts?.[0]?.name ?? null,
+        trend: orders?.ordersOverTime ?? [],
+      }
+    : null;
+
   const insightCards = [
     { id: "i1", title: t('peakTraffic'), body: t('peakTrafficBody') },
     { id: "i2", title: t('callConversion'), body: t('callConversionBody') },
@@ -130,8 +161,9 @@ export default function AnalyticsPage() {
         helperKey="dashAnalytics"
       />
 
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
       {/* Window selector — matches the app's Week/Month/Year/Custom picker. */}
-      <div className="mb-2 inline-flex flex-wrap items-center gap-1 rounded-xl border border-outline-variant/40 bg-surface-container-lowest p-1">
+      <div className="inline-flex flex-wrap items-center gap-1 rounded-xl border border-outline-variant/40 bg-surface-container-lowest p-1">
         {ANALYTICS_PERIODS.map((p) => (
           <button
             key={p.key}
@@ -169,6 +201,8 @@ export default function AnalyticsPage() {
             ? `${formatShort(customRange.start)} – ${formatShort(customRange.end)}`
             : "Custom"}
         </button>
+      </div>
+      <ShareStatsButton data={shareData} />
       </div>
 
       {showCustomPicker && (

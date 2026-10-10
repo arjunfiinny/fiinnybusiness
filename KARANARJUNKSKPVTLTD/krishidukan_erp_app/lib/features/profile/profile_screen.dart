@@ -272,114 +272,128 @@ class _SubscriptionCard extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final sub = ref.watch(subscriptionProvider);
+    final s = sub.valueOrNull;
 
-    return sub.when(
-      loading: () => const Panel(
-        padding: EdgeInsets.all(20),
-        child: Center(
-          child: SizedBox(
-            height: 18,
-            width: 18,
-            child: CircularProgressIndicator(strokeWidth: 2),
-          ),
-        ),
-      ),
-      error: (_, __) => const EmptyNote('Could not load subscription status.'),
-      data: (s) {
-        // Master-tenant / platform accounts carry no subscription at all.
-        if (s == null) return const SizedBox.shrink();
-
-        final (label, color) = switch (s.status) {
-          SubStatus.active => ('Active', AppColors.good),
-          SubStatus.trial => ('Trial', AppColors.b2b),
-          SubStatus.pastDue => ('Payment due', AppColors.warning),
-          SubStatus.suspended => ('Suspended', AppColors.critical),
-          SubStatus.cancelled => ('Cancelled', AppColors.critical),
-          SubStatus.none => ('No active plan', AppColors.critical),
-        };
-
-        return Panel(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      s.planName,
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w700,
-                        color: AppColors.ink,
-                      ),
-                    ),
-                  ),
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: color.withValues(alpha: 0.14),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Text(
-                      label.toUpperCase(),
-                      style: kMicro.copyWith(color: color, letterSpacing: 0.6),
-                    ),
-                  ),
-                ],
+    // The upgrade button renders in every state — loading, error, no plan —
+    // so the way to pay is never hidden behind a status we failed to read.
+    return Panel(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (sub.isLoading)
+            const Center(
+              child: SizedBox(
+                height: 18,
+                width: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
               ),
-              if (s.expiresAt != null) ...[
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Icon(
-                      s.isExpired || s.isExpiringSoon
-                          ? Icons.warning_amber_rounded
-                          : Icons.event_outlined,
-                      size: 13,
-                      color: s.isExpired
-                          ? AppColors.critical
-                          : s.isExpiringSoon
-                              ? AppColors.warning
-                              : AppColors.inkMute,
-                    ),
-                    const SizedBox(width: 6),
-                    Text(
-                      s.isExpired
-                          ? 'Expired ${fmtFullDate(s.expiresAt!)}'
-                          : 'Renews / expires ${fmtFullDate(s.expiresAt!)}',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: s.isExpired
-                            ? AppColors.critical
-                            : s.isExpiringSoon
-                                ? AppColors.warning
-                                : AppColors.inkDim,
-                      ),
-                    ),
-                  ],
+            )
+          else if (sub.hasError || s == null)
+            Text(
+              'Could not load your plan status.',
+              style: TextStyle(fontSize: 12.5, color: AppColors.inkDim),
+            )
+          else
+            _SubscriptionStatus(s: s),
+          const SizedBox(height: 14),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              onPressed: () => launchUrl(
+                Uri.parse(_pricingUrl),
+                mode: LaunchMode.externalApplication,
+              ),
+              icon: const Icon(Icons.workspace_premium_outlined, size: 17),
+              label: Text(
+                s?.status == SubStatus.active
+                    ? 'Manage subscription'
+                    : 'Upgrade plan',
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Opens the ERP pricing page. Sign in there with this same account; '
+            'your plan updates here automatically after payment.',
+            style: TextStyle(fontSize: 11, color: AppColors.inkMute),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SubscriptionStatus extends StatelessWidget {
+  const _SubscriptionStatus({required this.s});
+
+  final TenantSubscription s;
+
+  @override
+  Widget build(BuildContext context) {
+    final (label, color) = switch (s.status) {
+      SubStatus.active => ('Active', AppColors.good),
+      SubStatus.trial => ('Trial', AppColors.b2b),
+      SubStatus.pastDue => ('Payment due', AppColors.warning),
+      SubStatus.suspended => ('Suspended', AppColors.critical),
+      SubStatus.cancelled => ('Cancelled', AppColors.critical),
+      SubStatus.none => ('No active plan', AppColors.critical),
+    };
+    final dateColor = s.isExpired
+        ? AppColors.critical
+        : s.isExpiringSoon
+            ? AppColors.warning
+            : AppColors.inkDim;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                s.planName,
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.ink,
                 ),
-              ],
-              const SizedBox(height: 14),
-              SizedBox(
-                width: double.infinity,
-                child: OutlinedButton.icon(
-                  onPressed: () => launchUrl(
-                    Uri.parse(_pricingUrl),
-                    mode: LaunchMode.externalApplication,
-                  ),
-                  icon: const Icon(Icons.workspace_premium_outlined, size: 17),
-                  label: Text(
-                    s.status == SubStatus.active
-                        ? 'Manage subscription'
-                        : 'Upgrade plan',
-                  ),
-                ),
+              ),
+            ),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: 0.14),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                label.toUpperCase(),
+                style: kMicro.copyWith(color: color, letterSpacing: 0.6),
+              ),
+            ),
+          ],
+        ),
+        if (s.expiresAt != null) ...[
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Icon(
+                s.isExpired || s.isExpiringSoon
+                    ? Icons.warning_amber_rounded
+                    : Icons.event_outlined,
+                size: 13,
+                color: dateColor,
+              ),
+              const SizedBox(width: 6),
+              Text(
+                s.isExpired
+                    ? 'Expired ${fmtFullDate(s.expiresAt!)}'
+                    : 'Renews / expires ${fmtFullDate(s.expiresAt!)}',
+                style: TextStyle(fontSize: 12, color: dateColor),
               ),
             ],
           ),
-        );
-      },
+        ],
+      ],
     );
   }
 }

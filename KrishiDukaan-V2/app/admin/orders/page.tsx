@@ -30,7 +30,9 @@ import {
   Undo2,
   Loader2,
 } from "lucide-react";
-import { getOrders, invalidateCache, CACHE_KEYS } from "../_lib/admin-data";
+import { fetchOrderTotals, ordersQuery, searchOrdersDirect, type OrderTotals } from "../_lib/admin-queries";
+import { readAllDocs, usePagedQuery } from "../_lib/use-paged-query";
+import { LoadMore } from "../_components/load-more";
 import { formatCustomerAddress, normalizeOrderItems, orderGrandTotal } from "../../../types/order";
 import type { OrderDoc, OrderStatus, PaymentStatus } from "../../../types/order";
 import { openInvoice } from "../../utils/invoice-generator";
@@ -373,8 +375,6 @@ function OrderDetail({ order, onRefunded }: { order: OrderDoc; onRefunded: () =>
 }
 
 export default function AdminOrdersPage() {
-  const [orders, setOrders] = useState<OrderDoc[]>([]);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
@@ -384,41 +384,26 @@ export default function AdminOrdersPage() {
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [totals, setTotals] = useState<OrderTotals | null>(null);
+  const [directMatches, setDirectMatches] = useState<OrderDoc[]>([]);
+  const [exporting, setExporting] = useState(false);
 
-  const loadOrders = (force = false) => {
-    if (force) invalidateCache(CACHE_KEYS.orders);
-    setLoading(true);
-    setError(null);
-    getOrders({ force })
-      .then(setOrders)
+  const loadTotals = () => {
+    fetchOrderTotals(Object.keys(STATUS_META))
+      .then((t) => { setTotals(t); setError(null); })
       .catch((err) => {
-        console.error("Failed to load orders:", err);
+        console.error("Failed to load order totals:", err);
         setError(
           err?.code === "permission-denied"
             ? "Firestore denied read access to /orders. Deploy the updated firestore.rules (the admin/team read clause) and retry."
             : "Failed to load orders from Firestore. Check your connection and retry."
         );
-      })
-      .finally(() => setLoading(false));
+      });
   };
 
-  useEffect(loadOrders, []);
+  useEffect(loadTotals, []);
 
-  const counts = useMemo(() => {
-    const paidOrders = orders.filter((o) => o.payment?.status === "paid");
-    return {
-      total: orders.length,
-      paid: paidOrders.length,
-      revenue: paidOrders.reduce((sum, o) => sum + (o.payment?.amount ?? orderTotal(o)), 0),
-      gross: orders.reduce((sum, o) => sum + orderTotal(o), 0),
-      unpaid: orders.filter((o) => !o.payment || o.payment.status !== "paid").length,
-      byStatus: orders.reduce<Record<string, number>>((acc, o) => {
-        acc[o.status] = (acc[o.status] ?? 0) + 1;
-        return acc;
-      }, {}),
-    };
-  }, [orders]);
-
+  const counts = totals ?? { total: 0, paid: 0, unpaid: 0, revenue: 0, gross: 0, byStatus: {} as Record<string, number> };
   // Bounds derived once per render of the filter, not per order — a fresh
   // `new Date()` per row would just be wasted work in a filter this size.
   const dateBounds = useMemo((): { from: number | null; to: number | null } => {
@@ -443,9 +428,35 @@ export default function AdminOrdersPage() {
     }
   }, [dateFilter, customFrom, customTo]);
 
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return orders.filter((o) => {
+  // Status, seller type and dates run in the query, newest first, 50 at a
+  // time; the payment filter and free-text search narrow the loaded rows.
+  const base = useMemo(
+    () => ordersQuery({ status: statusFilter, sellerType: sellerFilter, fromMs: dateBounds.from, toMs: dateBounds.to }),
+    [statusFilter, sellerFilter, dateBounds],
+  );
+  const paged = usePagedQuery(base, (d) => ({ id: d.id, ...(d.data() as Omit<OrderDoc, "id">) }) as OrderDoc);
+  const orders = paged.rows;
+  const loading = paged.loading && totals === null;
+  const loadOrders = () => { void paged.reload(); loadTotals(); };
+
+  useEffect(() => {
+    if (paged.error) setError(paged.error);
+  }, [paged.error]);
+
+  // A pasted order id, invoice number, Razorpay id or phone is looked up
+  // directly, so it is found even when it isn't loaded (or has no createdAt).
+  useEffect(() => {
+    setDirectMatches([]);
+    const q = search.trim();
+    if (q.length < 4) return;
+    let cancelled = false;
+    const t = setTimeout(() => {
+      searchOrdersDirect(q).then((rows) => { if (!cancelled) setDirectMatches(rows as OrderDoc[]); });
+    }, 350);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [search]);
+
+  const matchesFilters = (o: OrderDoc, q: string) => {
       if (statusFilter !== "all" && o.status !== statusFilter) return false;
       if (sellerFilter !== "all" && o.sellerType !== sellerFilter) return false;
       if (paymentFilter === "none" && o.payment) return false;
@@ -476,17 +487,42 @@ export default function AdminOrdersPage() {
         .join(" ")
         .toLowerCase();
       return haystack.includes(q);
-    });
-  }, [orders, search, statusFilter, paymentFilter, sellerFilter, dateBounds]);
+  };
 
-  const exportCsv = () => {
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const byId = new Map<string, OrderDoc>();
+    // Direct lookups ignore the date filter (legacy orders may have no date).
+    for (const o of directMatches) {
+      if (statusFilter !== "all" && o.status !== statusFilter) continue;
+      if (sellerFilter !== "all" && o.sellerType !== sellerFilter) continue;
+      byId.set(o.id, o);
+    }
+    for (const o of orders) if (matchesFilters(o, q)) byId.set(o.id, o);
+    return Array.from(byId.values()).sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+  }, [orders, directMatches, search, statusFilter, paymentFilter, sellerFilter, dateBounds]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Export reads every order matching the filters (not only the loaded pages).
+  const exportCsv = async () => {
+    setExporting(true);
+    let all: OrderDoc[];
+    try {
+      const q = search.trim().toLowerCase();
+      const docs = await readAllDocs(base);
+      all = docs.map((d) => ({ id: d.id, ...(d.data() as Omit<OrderDoc, "id">) }) as OrderDoc).filter((o) => matchesFilters(o, q));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Export failed.");
+      setExporting(false);
+      return;
+    }
+    setExporting(false);
     const header = [
       "Order ID", "Invoice", "Date", "Customer", "Customer Phone", "Store / Seller",
       "Seller Type", "Products", "Qty", "Subtotal", "GST", "Delivery", "Grand Total",
       "Order Status", "Payment Status", "Razorpay Payment ID", "Razorpay Order ID",
     ];
     const esc = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-    const rows = filtered.map((o) => [
+    const rows = all.map((o) => [
       o.id,
       o.invoiceNumber ?? "",
       formatDate(o.createdAt),
@@ -538,18 +574,18 @@ export default function AdminOrdersPage() {
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => loadOrders(true)}
+            onClick={() => loadOrders()}
             className="inline-flex items-center gap-1.5 rounded-xl border border-outline-variant/40 bg-surface-container-lowest px-3 py-2 text-xs font-bold text-on-surface-variant hover:bg-surface-container transition-colors"
           >
             <RefreshCw className="h-3.5 w-3.5" /> Refresh
           </button>
           <button
             type="button"
-            onClick={exportCsv}
-            disabled={filtered.length === 0}
+            onClick={() => void exportCsv()}
+            disabled={exporting || counts.total === 0}
             className="inline-flex items-center gap-1.5 rounded-xl bg-primary px-3 py-2 text-xs font-bold text-white hover:bg-primary/90 disabled:opacity-40 transition-colors"
           >
-            <Download className="h-3.5 w-3.5" /> Export CSV
+            <Download className="h-3.5 w-3.5" /> {exporting ? "Exporting…" : "Export CSV"}
           </button>
         </div>
       </div>
@@ -681,7 +717,7 @@ export default function AdminOrdersPage() {
         </div>
 
         <p className="text-xs text-on-surface-variant">
-          Showing <span className="font-bold text-on-surface">{filtered.length}</span> of {counts.total} orders
+          Showing <span className="font-bold text-on-surface">{filtered.length}</span>{paged.hasMore ? "+" : ""} of {counts.total} orders
         </p>
       </div>
 
@@ -755,12 +791,13 @@ export default function AdminOrdersPage() {
                     </div>
                   </button>
 
-                  {isOpen && <OrderDetail order={o} onRefunded={() => loadOrders(true)} />}
+                  {isOpen && <OrderDetail order={o} onRefunded={() => loadOrders()} />}
                 </div>
               );
             })}
           </div>
         )}
+        <LoadMore hasMore={paged.hasMore} loading={paged.loadingMore} onClick={() => void paged.loadMore()} label="Load older orders" />
       </div>
     </div>
   );

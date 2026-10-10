@@ -42,7 +42,7 @@ export function ProductListingCard({
   const inner = (
     <>
       <div className="aspect-square overflow-hidden bg-surface-container-low">
-        <img src={image} alt={name} className="w-full h-full object-cover" />
+        <img loading="lazy" decoding="async" src={image} alt={name} className="w-full h-full object-cover" />
       </div>
       <div className="p-3 flex flex-col gap-0.5">
         {category ? (
