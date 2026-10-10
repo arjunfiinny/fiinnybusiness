@@ -1,7 +1,9 @@
 "use client";
 
+import { PayoutTimelineView } from "../../components/shared/payout-timeline-view";
+import { useKycPending } from "../_lib/use-kyc-pending";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useEffectiveUser } from "../_context/effective-user-context";
 import {
   Truck,
@@ -20,7 +22,9 @@ import {
   Lock,
   RefreshCw,
 } from "lucide-react";
-import { auth, fetchIncomingOrdersForSeller, updateOrderStatus } from "../../firebase";
+import { auth, createSellerOrdersPager, updateOrderStatus } from "../../firebase";
+import { fetchSellerOrderTotals, type SellerOrderTotals } from "../_lib/analytics-firestore";
+import type { MergedPager } from "../../lib/merged-pager";
 import { PageHeader } from "../_components/page-header";
 import { formatCustomerAddress, normalizeOrderItems, orderGrandTotal } from "../../../types/order";
 import { ORDER_STATUS_FLOW, type OrderDoc, type OrderStatus } from "../../../types/order";
@@ -108,6 +112,7 @@ function formatDateStr(iso: string | undefined): string {
  * "—" rather than a guessed number — the same rule now applies to both rows.
  */
 function PayoutBreakdown({ order }: { order: OrderDoc }) {
+  const kycPending = useKycPending();
   // undefined = still resolving, null = genuinely unavailable
   const [gatewayFee, setGatewayFee] = useState<number | null | undefined>(undefined);
   const [platformFee, setPlatformFee] = useState<number | null | undefined>(undefined);
@@ -183,10 +188,13 @@ function PayoutBreakdown({ order }: { order: OrderDoc }) {
           </span>
         </div>
       </div>
+      <div className="mt-4 border-t border-surface-container pt-3">
+        <p className="mb-2 text-xs font-black uppercase tracking-widest text-on-surface-variant">
+          Where is my money?
+        </p>
+        <PayoutTimelineView order={order as never} kycPending={kycPending} />
+      </div>
       <p className="mt-2.5 text-[10px] text-on-surface-variant">
-        {order.status === "delivered"
-          ? "Transferred to your registered bank account."
-          : "Transferred to your bank account once you mark this order delivered."}{" "}
         Figures are before GST and other applicable taxes. See the{" "}
         <a href="/seller-terms" className="font-semibold text-primary hover:underline">
           Seller &amp; Manufacturer Subscription Terms
@@ -376,24 +384,65 @@ export default function OrdersPage() {
   const [sellerInfo, setSellerInfo] = useState<{ name: string; phone: string; gstin: string } | null>(null);
   const [sellerProfile, setSellerProfile] = useState<any>(null);
 
+  // Newest 30 orders of the selected tab, "Load more" for older ones; the tab
+  // counts and paid totals come from the seller's stats docs.
+  const pagerRef = useRef<MergedPager | null>(null);
+  const loadGen = useRef(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [totals, setTotals] = useState<SellerOrderTotals | null>(null);
+
   const load = async (
     nextUid: string,
-    nextSellerType: "retailer" | "manufacturer",
+    _nextSellerType: "retailer" | "manufacturer",
     nextProfile?: any,
+    status: FilterTab = activeFilter,
   ) => {
+    const gen = ++loadGen.current;
     setLoading(true);
     setError(null);
+    fetchSellerOrderTotals(nextUid, nextProfile).then((t) => { if (gen === loadGen.current) setTotals(t); }).catch(() => {});
     try {
-      const rows = await fetchIncomingOrdersForSeller(nextUid, nextSellerType, nextProfile);
-      setOrders(rows);
+      const pager = await createSellerOrdersPager(nextUid, nextProfile, { status: status === "all" ? undefined : status });
+      const docs = await pager.next();
+      if (gen !== loadGen.current) return;
+      pagerRef.current = pager;
+      setOrders(docs.map((d) => ({ id: d.id, ...(d.data() as Omit<OrderDoc, "id">) })));
+      setHasMore(pager.hasMore);
     } catch (e) {
+      if (gen !== loadGen.current) return;
       const msg = e instanceof Error ? e.message : "Failed to load orders.";
       setError(msg);
       setOrders([]);
+      setHasMore(false);
     } finally {
-      setLoading(false);
+      if (gen === loadGen.current) setLoading(false);
     }
   };
+
+  const loadMore = async () => {
+    const pager = pagerRef.current;
+    if (!pager || loadingMore) return;
+    const gen = loadGen.current;
+    setLoadingMore(true);
+    try {
+      const docs = await pager.next();
+      if (gen !== loadGen.current) return;
+      setOrders((prev) => [...prev, ...docs.map((d) => ({ id: d.id, ...(d.data() as Omit<OrderDoc, "id">) }))]);
+      setHasMore(pager.hasMore);
+    } catch {
+      // keep what is shown
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  // Switching tab queries that status (newest first) instead of filtering.
+  const didMountFilter = useRef(false);
+  useEffect(() => {
+    if (!didMountFilter.current) { didMountFilter.current = true; return; }
+    if (uid && sellerType && onlineDelivery) void load(uid, sellerType, sellerProfile, activeFilter);
+  }, [activeFilter]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (new URLSearchParams(window.location.search).get("tab") === "requests") {
@@ -491,18 +540,20 @@ export default function OrdersPage() {
     ? orders
     : orders.filter((o) => o.status === activeFilter);
 
-  const statusCounts = orders.reduce<Record<string, number>>((acc, o) => {
+  // All-time totals (seller stats docs); the loaded rows until they arrive.
+  const statusCounts = totals?.status ?? orders.reduce<Record<string, number>>((acc, o) => {
     acc[o.status] = (acc[o.status] || 0) + 1;
     return acc;
   }, {});
+  const totalCount = totals?.count ?? orders.length;
 
-  const paidOrdersCount = orders.filter((o) => o.payment?.status === "paid").length;
-  const totalRevenue = orders
+  const paidOrdersCount = totals?.paid ?? orders.filter((o) => o.payment?.status === "paid").length;
+  const totalRevenue = totals?.paidAmount ?? orders
     .filter((o) => o.payment?.status === "paid")
     .reduce((sum, o) => sum + (o.payment?.amount || 0), 0);
 
   const FILTER_TABS: { key: FilterTab; label: string; color: string }[] = [
-    { key: "all",              label: `All (${orders.length})`,                                        color: "bg-surface-container text-on-surface" },
+    { key: "all",              label: `All (${totalCount})`,                                        color: "bg-surface-container text-on-surface" },
     { key: "placed",           label: `New (${statusCounts["placed"] || 0})`,                              color: "bg-amber-100 text-amber-800" },
     { key: "accepted",         label: `Accepted (${statusCounts["accepted"] || 0})`,                        color: "bg-blue-100 text-blue-800" },
     { key: "dispatched",       label: `Dispatched (${statusCounts["dispatched"] || 0})`,                    color: "bg-indigo-100 text-indigo-800" },
@@ -559,7 +610,7 @@ export default function OrdersPage() {
         </div>
       ) : error ? (
         <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>
-      ) : !orders.length ? (
+      ) : !orders.length && activeFilter === "all" && totalCount === 0 ? (
         <div className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-outline-variant/40 bg-surface-container-low/40 px-6 py-16 text-center">
           <Package className="h-12 w-12 text-on-surface-variant/30" />
           <p className="font-semibold text-on-surface">No orders yet</p>
@@ -578,7 +629,7 @@ export default function OrdersPage() {
               }`}
             >
               <Package className="w-4 h-4" />
-              Orders ({orders.length})
+              Orders ({totalCount})
             </button>
             <button
               onClick={() => setActiveViewTab("payments")}
@@ -642,7 +693,7 @@ export default function OrdersPage() {
                   </div>
                   <div>
                     <p className="text-[10px] font-black uppercase tracking-widest text-primary">Paid Orders</p>
-                    <p className="text-xl font-black text-primary">{paidOrdersCount} / {orders.length}</p>
+                    <p className="text-xl font-black text-primary">{paidOrdersCount} / {totalCount}</p>
                   </div>
                 </div>
               </div>
@@ -795,6 +846,14 @@ export default function OrdersPage() {
                     </div>
                   );
                 })
+              )}
+              {hasMore && (
+                <div className="flex justify-center py-2">
+                  <button type="button" onClick={() => void loadMore()} disabled={loadingMore}
+                    className="rounded-xl border border-outline-variant/40 bg-white px-5 py-2 text-sm font-bold text-on-surface hover:bg-surface-container-low disabled:opacity-50">
+                    {loadingMore ? "Loading…" : "Load older orders"}
+                  </button>
+                </div>
               )}
             </>
           )}

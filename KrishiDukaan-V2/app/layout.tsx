@@ -156,6 +156,7 @@ export default function RootLayout({
             HTML and re-renders the whole page in the browser. Next.js still
             runs it before hydration from here. */}
         <OpenAIPixel />
+        <OpenAIPixel />
         <script
           type="application/ld+json"
           dangerouslySetInnerHTML={{ __html: JSON.stringify(organizationLd) }}

@@ -10,6 +10,7 @@ export const MIN_TOKEN = 2;
 export const MAX_TOKEN = 15;
 const MAX_WORD = 30;
 const MAX_TOKENS = 1000;
+const MAX_NAME_TOKENS = 500;
 const MAX_DESCRIPTION_WORDS = 100;
 
 // \p{M} keeps Devanagari vowel signs attached to their letters.
@@ -82,4 +83,15 @@ export function buildSearchKeywords(input: {
   for (const w of searchWords(input.description).slice(0, MAX_DESCRIPTION_WORDS)) addPrefixes(out, w);
 
   return Array.from(out).slice(0, MAX_TOKENS);
+}
+
+/**
+ * Substrings of the product's own name words only. The sellers' add-product
+ * search matches names, and descriptions, categories and shop names in
+ * searchKeywords would crowd name matches out of its small result window.
+ */
+export function buildNameKeywords(names: string[]): string[] {
+  const out = new Set<string>();
+  for (const w of names.flatMap(searchWords)) addSubstrings(out, w);
+  return Array.from(out).slice(0, MAX_NAME_TOKENS);
 }

@@ -10,6 +10,8 @@ import {
 import { ReviewSection } from '../../components/shared/ReviewSection';
 import type { ManufacturerBrandData, BrandProductSummary, BrandRetailerSummary } from '../dashboard/_lib/brand-page-types';
 import { haversineDistance, formatDistance } from '../utils/haversine';
+import { ShareLinkButton } from '../components/shared/share-link-button';
+import { brandShareUrl } from '../lib/share-links';
 import { useSharedCart } from '../lib/useSharedCart';
 import type { MarketplaceProduct } from '../../types/product';
 
@@ -494,6 +496,13 @@ export default function BrandView({
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
+              <ShareLinkButton
+                url={brandShareUrl(brand.phone)}
+                title={brand.businessName}
+                text={`${brand.businessName} on KrishiDukan: products and stores near you`}
+                label="Share"
+                className="flex items-center gap-1.5 bg-white/10 border border-white/20 rounded-full px-3 py-1 text-xs font-bold text-white hover:bg-white/20"
+              />
               {(brand.averageRating ?? 0) > 0 && (
                 <span className="flex items-center gap-1.5 bg-white/10 border border-white/20 rounded-full px-3 py-1 text-xs font-bold text-white">
                   <span className="text-amber-400">{'★'.repeat(Math.round(brand.averageRating!))}</span>

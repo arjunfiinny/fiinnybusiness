@@ -499,6 +499,8 @@ of them use only Firebase and Google Cloud.
 | App products and stores | `mobile/lib/features/marketplace/data/catalog_repository.dart`, `store_repository.dart` |
 | App counters | `mobile/.../product_analytics_service.dart`, `shop_profile_screen.dart` |
 | App speed timers | `mobile/lib/core/services/perf_trace.dart` |
+| Per-day platform totals and per-seller order totals (admin Analytics, seller dashboards) | `functions/src/stats/platform-daily.ts`, `seller-stats.ts`, `increments.ts`; scripts `backfill-platform-daily-stats.ts`, `backfill-seller-stats.ts` |
+| Paged lists (admin tables, seller orders) | `app/admin/_lib/use-paged-query.ts`, `admin-queries.ts`, `app/lib/merged-pager.ts`, `mobile/lib/core/data/paged_feed.dart` |
 | Rules and indexes | `firestore.rules`, `firestore.indexes.json` |
 | Website server region | `firebase.json` |
 | Deploy steps | `docs/performance-rollout-2026-10.md` |

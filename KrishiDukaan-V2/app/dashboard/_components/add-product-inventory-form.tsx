@@ -16,7 +16,7 @@ import Link from "next/link";
 import { ref as storageRef, uploadBytes, getDownloadURL } from "firebase/storage";
 import { storage, fetchAllMarketplaceProducts, adminCreateProduct, adminUpdateProduct } from "../../firebase";
 import { compressImage, imageUploadMetadata } from "../../utils/compressImage";
-import { createManufacturerProduct, searchProductsByName } from "../_lib/manufacturer-products-firestore";
+import { createManufacturerProduct, fetchProductForAutofill, searchProductsByName, type ProductSearchResult } from "../_lib/manufacturer-products-firestore";
 import { createProductAndInventory, retailerHasProduct } from "../_lib/inventory-firestore";
 import type { SeatStats } from "../_types/subscriptions";
 import { useI18n } from "../../i18n/I18nContext";
@@ -125,12 +125,7 @@ type Variant = {
 
 type ImageSlot = { mode: "url" | "upload"; url: string; uploading: boolean; error: string };
 
-type SearchResult = {
-  id: string; name: string; category: string; unit: string; price: number;
-  description: string; image: string; images: string[]; variants: { unit: string; price: number }[];
-  categoryInfo?: Record<string, string | string[]>;
-  nitrogen?: string; phosphorus?: string; potassium?: string; applicationDesc?: string; dosage?: string; bestForCrops?: string[];
-};
+type SearchResult = ProductSearchResult;
 
 type AdminProductPayload = {
   name: string; fullName?: string; category: string;
@@ -529,6 +524,7 @@ export function AddProductInventoryForm({
   const [autofilled,    setAutofilled]    = useState(false);
   const [existingProductId, setExistingProductId] = useState<string | null>(null);
   const searchTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestPickRef = useRef<string | null>(null);
   const nameRef = useRef<HTMLInputElement>(null);
 
   // GST state
@@ -595,6 +591,7 @@ export function AddProductInventoryForm({
   // ── Search ───────────────────────────────────────────────────────────────────
   const handleNameChange = useCallback((val: string) => {
     setName(val);
+    latestPickRef.current = null;
     setAutofilled(false);
     setExistingProductId(null);
     setAlreadyListed(false);
@@ -672,6 +669,20 @@ export function AddProductInventoryForm({
         unit: firstUnit,
       }).then(setAlreadyListed).catch(() => {});
     }
+  };
+
+  // Suggestions come from marketplace cards, whose variants are merged across
+  // sellers: autofill from the chosen product's own doc (1 read per pick,
+  // never per keystroke), or from the card if that read fails.
+  const pickSuggestion = async (product: SearchResult) => {
+    latestPickRef.current = product.id;
+    setName(product.name);
+    setShowDropdown(false);
+    setSuggestions([]);
+    const full = await fetchProductForAutofill(product.id).catch(() => null);
+    // Skip if the seller has since typed a new name or picked another product.
+    if (latestPickRef.current !== product.id) return;
+    applyAutofill(full ?? product);
   };
 
   // Close dropdown on outside click
@@ -950,7 +961,7 @@ export function AddProductInventoryForm({
                     <p className="px-3 pt-2 pb-1 text-[11px] font-semibold text-on-surface-variant uppercase tracking-wide">{t('formExistingProducts')}</p>
                     {suggestions.map((s) => (
                       <button key={s.id} type="button"
-                        onMouseDown={(e) => { e.preventDefault(); applyAutofill(s); }}
+                        onMouseDown={(e) => { e.preventDefault(); void pickSuggestion(s); }}
                         className="flex w-full items-center gap-3 px-3 py-2.5 text-left hover:bg-primary/5 transition-colors border-t border-outline-variant/10"
                       >
                         {s.image ? (

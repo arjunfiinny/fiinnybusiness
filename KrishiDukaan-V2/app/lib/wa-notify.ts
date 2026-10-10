@@ -11,6 +11,7 @@ type WaTemplate =
   | "product_assignment_pending_signup"
   | "manufacturer_network_summary"
   | "payment_failed_app_update"
+  | "free_seats_assigned"
   | "generic";
 
 type WaPayload = Record<string, string | number | boolean>;
@@ -144,6 +145,12 @@ export async function queueOrderNotification(
     }
   );
 }
+
+// NOTE: the promotional free_seats_assigned WhatsApp is NOT queued from here
+// anymore. It is sent by the notifyOnPromotionSeatAssigned Cloud Function
+// (functions/src/index.ts), which triggers on each promotions/{id}/recipients
+// doc creation — so it fires automatically after a successful seat assignment
+// without depending on any frontend env flag.
 
 // Customer confirmation — sent to the buyer immediately after order placement.
 // order_confirmation_customer body {{1}} = customerName, button {{1}} = orderId.

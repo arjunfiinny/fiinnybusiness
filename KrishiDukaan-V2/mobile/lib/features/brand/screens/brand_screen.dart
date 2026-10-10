@@ -1,3 +1,5 @@
+import '../../../core/utils/link_share.dart';
+import '../../../core/utils/web_links.dart';
 import 'dart:math' as math;
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
@@ -210,6 +212,15 @@ class _BrandHero extends StatelessWidget {
       backgroundColor: const Color(0xFF0A1F08),
       foregroundColor: Colors.white,
       actions: [
+        if (WebLinks.brand(brand.phone) != null)
+          Builder(
+            builder: (btnContext) => IconButton(
+              icon: const Icon(Icons.share_rounded),
+              tooltip: 'Share brand page',
+              onPressed: () => LinkShare.brand(btnContext,
+                  phone: brand.phone, name: brand.businessName),
+            ),
+          ),
         if (onEdit != null)
           Padding(
             padding: const EdgeInsets.only(right: 8),

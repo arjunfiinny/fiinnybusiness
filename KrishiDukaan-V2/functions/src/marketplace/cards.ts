@@ -5,7 +5,7 @@ import { onSchedule } from "firebase-functions/v2/scheduler";
 import { logger } from "firebase-functions/v2";
 import { buildRatingAgg, mapMarketplaceDoc, mergeMarketplaceProducts } from "./merge";
 import { nextDiscountBoundary } from "./discount";
-import { buildSearchKeywords } from "./search-keywords";
+import { buildNameKeywords, buildSearchKeywords } from "./search-keywords";
 
 /**
  * marketplaceCards/{sha1(nameKey)} holds one ready-to-render marketplace card
@@ -198,6 +198,7 @@ export function buildCardData(
   const search = {
     nameKey,
     categoryKey,
+    nameKeywords: buildNameKeywords(unique([product.name])),
     searchKeywords: buildSearchKeywords({
       names: unique([product.name, product.fullName, ...active.map((d) => d.data.fullName)]),
       category: String(product.category ?? ""),

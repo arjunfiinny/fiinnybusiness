@@ -290,6 +290,12 @@ export type OrderDoc = {
    * not onboarded a linked account yet.
    */
   routeRelease?: RouteReleaseInfo;
+  /**
+   * The seller's transfer as Razorpay last reported it (transfer status,
+   * settlement status, hold), kept by functions/src/payouts/payout-status.ts.
+   * Written by the server only.
+   */
+  payout?: PayoutInfo;
   createdAt?: unknown;
   updatedAt?: unknown;
 };
@@ -303,9 +309,38 @@ export type RouteReleaseInfo = {
    * `scheduled` - a release time is set and Razorpay will settle then.
    * `already_released` - the transfer was no longer on hold when we looked.
    */
-  status: "scheduled" | "already_released";
+  status: "scheduled" | "already_released" | "released_by_admin";
+  /** Admin uid, for a release from Admin → Route Payouts. */
+  releasedBy?: string;
   /** When the money settles to the seller. Delivery + 24h. */
   releaseAt?: unknown;
   scheduledAt?: unknown;
   recordedAt?: unknown;
+};
+
+export type PayoutInfo = {
+  via?: "route" | "balance";
+  transferId?: string | null;
+  /** Seller's Razorpay linked account (acc_…). */
+  account?: string | null;
+  /** Rupees with the seller after any reversal. */
+  amount?: number;
+  reversed?: number;
+  /** Razorpay transfer status: created, pending, processed, failed, reversed… */
+  transferStatus?: string | null;
+  /** Razorpay settlement status: on_hold, pending, settled. */
+  settlementStatus?: string | null;
+  onHoldUntil?: number | null;
+  settlementId?: string | null;
+  state?: "on_hold" | "scheduled" | "processing" | "settled" | "failed" | "reversed" | "not_routed";
+  settledAt?: unknown;
+  /** When Razorpay processed the transfer (ms). */
+  processedAt?: number | null;
+  /** When it settled to the seller's bank, Razorpay's time (ms). */
+  settlementAt?: number | null;
+  /** Bank reference (UTR) of that settlement. */
+  utr?: string | null;
+  checkedAt?: unknown;
+  nextCheckAt?: number;
+  error?: string | null;
 };

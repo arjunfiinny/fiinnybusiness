@@ -25,6 +25,12 @@ const APP_PATHS = [
   "/products/*",   // SEO product pages
   "/subscribe",    // sales / marketing referral + offer links
   "/invoice/*",    // invoice links sent on WhatsApp
+  // Shared shop and brand links (app/lib/share-links.ts). Only the phone form:
+  // the app's /shop/:phone and /brand/:phone screens take a phone, in every
+  // installed version. /brand/{slug} (the brand page's own address) keeps
+  // opening on the website, as before.
+  "/shop/+91*",
+  "/brand/+91*",
 ];
 
 const AASA = {

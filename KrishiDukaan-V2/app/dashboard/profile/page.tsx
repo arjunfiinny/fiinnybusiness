@@ -30,6 +30,8 @@ import {
   type RetailerProfileExtras,
 } from "../_lib/profile-persistence";
 import { useI18n } from "../../i18n/I18nContext";
+import { ShareLinkButton } from "../../components/shared/share-link-button";
+import { brandShareUrl, shopShareUrl } from "../../lib/share-links";
 import { StatusToast } from "../../components/shared/status-toast";
 import {
   OnlineDeliveryTermsDialog,
@@ -261,6 +263,8 @@ function ProfilePageInner() {
   const [uploadingBanner, setUploadingBanner] = useState(false);
 
   const [upgradeBusinessName, setUpgradeBusinessName] = useState("");
+  // The account's phone (users/{phone}): the key of the public shop page.
+  const [accountPhone, setAccountPhone] = useState("");
   const [upgrading, setUpgrading] = useState(false);
 
   const addressInputRef         = useRef<HTMLInputElement | null>(null);
@@ -303,6 +307,7 @@ function ProfilePageInner() {
         const idxSnap = await getDoc(doc(db, "uidIndex", userId));
         if (idxSnap.exists()) {
           const phone = String(idxSnap.data().phone ?? "");
+          if (phone) setAccountPhone(phone);
           if (phone) {
             const userSnap = await getDoc(doc(db, "users", phone));
             if (userSnap.exists()) {
@@ -830,10 +835,28 @@ function ProfilePageInner() {
                   </div>
                 </div>
               </div>
-              <button type="button" onClick={() => setEditMode(true)}
-                className="inline-flex items-center gap-1.5 rounded-xl border border-outline-variant/40 bg-white px-3 py-1.5 text-xs font-semibold text-on-surface hover:bg-surface-container transition-colors">
-                <Pencil className="h-3.5 w-3.5" /> {t('editProfileBtn')}
-              </button>
+              <div className="flex flex-wrap justify-end gap-2">
+                <ShareLinkButton
+                  url={shopShareUrl(accountPhone || (effectiveProfile as any)?.phone || form.phone)}
+                  title={form.businessName || "My shop"}
+                  text={`${form.businessName || "My shop"} on KrishiDukan: see our products and prices`}
+                  label="Share shop"
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-outline-variant/40 bg-white px-3 py-1.5 text-xs font-semibold text-primary hover:bg-surface-container transition-colors"
+                />
+                {userRole === "manufacturer" && (
+                  <ShareLinkButton
+                    url={brandShareUrl(mfrDocId || accountPhone || (effectiveProfile as any)?.phone || form.phone)}
+                    title={form.businessName || "Our brand"}
+                    text={`${form.businessName || "Our brand"} on KrishiDukan: our products and stores near you`}
+                    label="Share brand page"
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-outline-variant/40 bg-white px-3 py-1.5 text-xs font-semibold text-primary hover:bg-surface-container transition-colors"
+                  />
+                )}
+                <button type="button" onClick={() => setEditMode(true)}
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-outline-variant/40 bg-white px-3 py-1.5 text-xs font-semibold text-on-surface hover:bg-surface-container transition-colors">
+                  <Pencil className="h-3.5 w-3.5" /> {t('editProfileBtn')}
+                </button>
+              </div>
             </div>
 
             {/* Name & info */}

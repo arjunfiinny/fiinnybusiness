@@ -10,7 +10,9 @@ import {
 import Link from "next/link";
 import { cn } from "../../../dashboard/_lib/cn";
 import { PendingSignupPanel, type PendingPanelManufacturer } from "../../_components/pending-signup-panel";
-import { getUsers, getSubscriptions } from "../../_lib/admin-data";
+import { getUsers } from "../../_lib/admin-data";
+import { fetchActiveSubscriptions, fetchSellers, fetchUsersByRoles } from "../../_lib/admin-queries";
+import { getDocsByIds, getDocsWhereIn } from "../../../lib/firestore-by-ids";
 import { subscriptionPlanLabel } from "../../../lib/pricing";
 import { collection, doc, getDocs, query, where, serverTimestamp, writeBatch } from "firebase/firestore";
 
@@ -468,9 +470,8 @@ function PendingSignupFlow() {
   const loadManufacturers = useCallback(async () => {
     setLoadingMfrs(true);
     try {
-      const users = await getUsers();
+      const users = await fetchUsersByRoles(["manufacturer"]);
       const mfrs: ManufacturerOption[] = (users as any[])
-        .filter((u) => u.role === "manufacturer")
         .map((u) => ({
           phone: String(u.id ?? u.phone ?? ""),
           uid: u.uid || undefined,
@@ -592,7 +593,14 @@ function SubscriptionExpiryFlow() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [subs, users] = await Promise.all([getSubscriptions(), getUsers()]);
+      // Only active, unexpired subscriptions, and only their owners' user docs.
+      const subs = await fetchActiveSubscriptions();
+      const ownerDocs = await getDocsByIds(
+        db,
+        "users",
+        subs.map((sub) => String(sub.ownerPhone || sub.ownerId || "")),
+      );
+      const users = Array.from(ownerDocs, ([id, data]) => ({ id, ...data })) as any[];
       const now = Date.now();
 
       const built: ExpiryRow[] = [];
@@ -1064,7 +1072,7 @@ function RetailerSeatPromotionFlow() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const users = await getUsers();
+      const users = await fetchSellers();
       const built: SeatPromoRow[] = [];
       for (const u of users as any[]) {
         const role: string = u.role ?? "";
@@ -1487,25 +1495,65 @@ function NewProductReminderFlow() {
       // dashboard/_lib/subscriptions-firestore.ts — no new fields are introduced.
       // Prior new_product_reminder sends are read from the existing waNotifications
       // history (same source the KYC flows use) — no separate tracking is added.
-      const [users, subs, seatSnap, notifSnap, uidIdxSnap] = await Promise.all([
-        getUsers(),
-        getSubscriptions(),
-        getDocs(collection(db, "retailerSeatListings")),
+      // Scoped to retailers that have an active subscription: their user
+      // docs, their uidIndex entries and their active seat listings, read in
+      // batches of 30 instead of the whole users, uidIndex and
+      // retailerSeatListings collections.
+      const [subs, notifSnap] = await Promise.all([
+        fetchActiveSubscriptions(),
         getDocs(query(collection(db, "waNotifications"), where("template", "==", "new_product_reminder"))),
-        getDocs(collection(db, "uidIndex")),
       ]);
+      const ownerKeys = new Set<string>();
+      for (const sub of subs) for (const k of [sub.ownerPhone, sub.ownerId]) if (k) ownerKeys.add(String(k));
+      // Phones are stored as "+91…" (users ids, uidIndex.phone) but may be
+      // written other ways on subscriptions: look up every form.
+      const phoneForms = (raw: string) => [raw, toE164(raw), `+${toE164(raw)}`];
+      const ownerPhones = Array.from(ownerKeys).filter((k) => isValidIndianPhone(k)).flatMap(phoneForms);
+      // Owners keyed by Auth UID: their phone comes from uidIndex/{uid}.
+      const ownerUids = Array.from(ownerKeys).filter((k) => !isValidIndianPhone(k));
+      const [uidIdxByUid, uidIdxByPhone] = await Promise.all([
+        getDocsByIds(db, "uidIndex", ownerUids),
+        getDocsWhereIn(db, "uidIndex", "phone", ownerPhones),
+      ]);
+      const uidIdxDocs = [
+        ...Array.from(uidIdxByUid, ([id, data]) => ({ id, data: () => data })),
+        ...uidIdxByPhone,
+      ];
+      const indexedPhones = uidIdxDocs
+        .map((d) => String((d.data() as { phone?: string }).phone ?? ""))
+        .filter(isValidIndianPhone)
+        .flatMap(phoneForms);
+      const [phoneUsers, uidUsers] = await Promise.all([
+        getDocsByIds(db, "users", [...Array.from(ownerKeys), ...ownerPhones, ...indexedPhones]),
+        getDocsWhereIn(db, "users", "uid", ownerUids),
+      ]);
+      const userById = new Map<string, any>();
+      phoneUsers.forEach((data, id) => userById.set(id, { id, ...data }));
+      uidUsers.forEach((d) => userById.set(d.id, { id: d.id, ...d.data() }));
+      const users = Array.from(userById.values());
 
       // phone (normalized) → Auth UID. Self-serve seat listings are keyed by
       // ownerId = Auth UID with ownerPhone = null (see inventory-firestore
       // addProductToInventory), so without the UID a retailer's used seats
       // resolve to 0 and every retailer looks 100% vacant. The retailer's own
-      // page avoids this via fetchSeatListingsForOwner's uidIndex lookup; we do
-      // the same in bulk by inverting uidIndex once here.
+      // page avoids this via fetchSeatListingsForOwner's uidIndex lookup.
       const phoneToUid = new Map<string, string>();
-      uidIdxSnap.docs.forEach((d) => {
+      uidIdxDocs.forEach((d) => {
         const phone = (d.data() as { phone?: string }).phone;
         if (phone) phoneToUid.set(toE164(String(phone)), d.id);
       });
+
+      // Every key a retailer's listings may carry: phones, uids, resolved uids.
+      const listingKeys = new Set<string>(ownerKeys);
+      for (const u of users) for (const k of [u.uid, u.phone, u.id]) if (k) listingKeys.add(String(k));
+      phoneToUid.forEach((uid, phone) => { listingKeys.add(uid); listingKeys.add(phone); });
+      const [byOwnerId, byOwnerPhone] = await Promise.all([
+        getDocsWhereIn(db, "retailerSeatListings", "ownerId", listingKeys, where("status", "==", "active")),
+        getDocsWhereIn(db, "retailerSeatListings", "ownerPhone", listingKeys, where("status", "==", "active")),
+      ]);
+      const seatById = new Map<string, Record<string, unknown>>();
+      for (const d of [...byOwnerId, ...byOwnerPhone]) seatById.set(d.id, d.data());
+      const seatSnap = { docs: Array.from(seatById.values(), (data) => ({ data: () => data })) };
 
       // Active seat listings: status "active" AND not yet expired.
       const activeListings = seatSnap.docs
@@ -1513,9 +1561,7 @@ function NewProductReminderFlow() {
         .filter((l) => l.status === "active" && fieldToMs(l.expiresAt) > now);
 
       // Active subscriptions: status "active" AND not yet expired.
-      const activeSubs = (subs as any[]).filter(
-        (s) => s.subscriptionStatus === "active" && fieldToMs(s.expiryDate) > now,
-      );
+      const activeSubs = subs.filter((s) => fieldToMs(s.expiryDate) > now);
 
       // Map normalized phone → most recent SUCCESSFUL send time. A send counts as
       // successful once Meta accepted it (status sent/delivered/read or a
@@ -2075,16 +2121,20 @@ function KycPendingFlow() {
     try {
       // KYC status lives on payoutAccounts/{phone}.status — the exact field the
       // admin Payouts review page reads. No duplicate KYC field is introduced.
-      const [users, payoutSnap] = await Promise.all([
-        getUsers(),
-        getDocs(collection(db, "payoutAccounts")),
-      ]);
+      // Sellers only, and the payout docs of the subscribed ones (by id).
+      const users = await fetchSellers();
+      const subscribedPhones = (users as any[])
+        .filter((u) => u.subscriptionStatus === "active" || u.isPaid === true)
+        .flatMap((u) => [u.phone, u.id].filter(Boolean).map(String))
+        .filter(isValidIndianPhone)
+        .flatMap((p) => [p, `+${toE164(p)}`]);
+      const payouts = await getDocsByIds(db, "payoutAccounts", subscribedPhones);
 
       // Map normalized phone → KYC status. Doc id is the seller phone.
       const kycByPhone = new Map<string, string>();
-      payoutSnap.docs.forEach((d) => {
-        const status = String((d.data() as { status?: string }).status ?? "pending_verification");
-        kycByPhone.set(toE164(d.id), status);
+      payouts.forEach((data, id) => {
+        const status = String((data as { status?: string }).status ?? "pending_verification");
+        kycByPhone.set(toE164(id), status);
       });
 
       const built: KycRow[] = [];
@@ -2569,9 +2619,10 @@ function KycSuccessFlow() {
       // seller's payout KYC succeeded (same field the admin Payouts review reads).
       // Existing kyc_success sends are read from waNotifications so we never send
       // the template to the same retailer twice.
+      // Sellers only, and only verified payout accounts.
       const [users, payoutSnap, sentSnap] = await Promise.all([
-        getUsers(),
-        getDocs(collection(db, "payoutAccounts")),
+        fetchSellers(),
+        getDocs(query(collection(db, "payoutAccounts"), where("status", "==", "verified"))),
         getDocs(query(collection(db, "waNotifications"), where("template", "==", "kyc_success"))),
       ]);
 

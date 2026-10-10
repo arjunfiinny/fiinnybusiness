@@ -152,6 +152,7 @@ import type { CartItem, OrderDoc, OrderItem, OrderStatus, SellerType, StatusHist
 import { generateAndStoreInvoice } from './utils/invoice-storage';
 import { CARDS_COLLECTION, cardToProduct } from './lib/marketplace-cards';
 import { STORE_DIRECTORY, sourcesFromDirectory, type StoreSources } from './lib/store-directory';
+import { MergedPager, type PagerStream } from './lib/merged-pager';
 
 export async function saveRetailerApplication(payload: RetailerApplication) {
   const products = payload.products
@@ -1290,26 +1291,6 @@ export async function fetchDealers(): Promise<any[]> {
   }
 }
 
-export async function fetchRetailerOrders(retailerId: string): Promise<any[]> {
-  try {
-    const q = query(
-      collection(db, 'orders'),
-      where('sellerId', '==', retailerId),
-      where('sellerType', '==', 'retailer')
-    );
-    const snapshot = await getDocs(q);
-    const docs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    return docs.sort((a: any, b: any) => {
-      const ta = a.createdAt?.toMillis?.() ?? 0;
-      const tb = b.createdAt?.toMillis?.() ?? 0;
-      return tb - ta;
-    });
-  } catch (error) {
-    console.error('Error fetching retailer orders:', error);
-    throw error;
-  }
-}
-
 export async function fetchRetailerInventory(retailerId: string): Promise<any[]> {
   try {
     const q = query(collection(db, 'products'), where('retailerId', '==', retailerId));
@@ -1732,6 +1713,52 @@ function sellerIdentityCandidates(sellerId: string, profile?: any): string[] {
  * identify the account uniquely, and mobile orders hardcode
  * sellerType: 'retailer' regardless of the account's actual role.
  */
+/** Every identifier a seller's orders may carry in sellerId / sellerPhone. */
+async function sellerOrderCandidates(sellerId: string, profile?: any): Promise<string[]> {
+  const seed = new Set(sellerIdentityCandidates(sellerId, profile));
+  try {
+    const idxSnap = await getDoc(doc(db, "uidIndex", sellerId));
+    addPhoneForms(seed, idxSnap.data()?.phone);
+  } catch {
+    // Non-fatal: fall through with the identifiers we already have.
+  }
+  if (/^(\+91)?[6-9]\d{9}$/.test(sellerId.replace(/\s/g, ""))) addPhoneForms(seed, sellerId);
+  return Array.from(seed).filter(Boolean);
+}
+
+/**
+ * A seller's incoming orders newest first, `pageSize` at a time (call
+ * next() for each page), across every identity keying like
+ * fetchIncomingOrdersForSeller, optionally one status only. Each
+ * sellerId / sellerPhone "in" query reads one page at a time; one refused by
+ * the rules (a value that isn't the caller's) splits into single values.
+ */
+export async function createSellerOrdersPager(
+  sellerId: string,
+  profile?: any,
+  opts: { status?: string; pageSize?: number } = {},
+): Promise<MergedPager> {
+  const candidates = await sellerOrderCandidates(sellerId, profile);
+  const orders = collection(db, "orders");
+  const statusFilter = opts.status ? [where("status", "==", opts.status)] : [];
+  const streams: PagerStream[] = [];
+  for (const field of ["sellerId", "sellerPhone"]) {
+    for (let i = 0; i < candidates.length; i += 30) {
+      const chunk = candidates.slice(i, i + 30);
+      streams.push({
+        query: query(orders, where(field, "in", chunk), ...statusFilter, orderBy("createdAt", "desc")),
+        split: () => chunk.map((value) =>
+          query(orders, where(field, "==", value), ...statusFilter, orderBy("createdAt", "desc"))),
+      });
+    }
+  }
+  return new MergedPager(
+    streams,
+    opts.pageSize ?? 30,
+    (d) => (d.get("createdAt") as Timestamp | undefined)?.toMillis?.() ?? 0,
+  );
+}
+
 export async function fetchIncomingOrdersForSeller(
   sellerId: string,
   _sellerType: SellerType,
@@ -1803,25 +1830,6 @@ export async function fetchIncomingOrdersForSeller(
   }
 
   return Array.from(byId.values()).sort((a, b) => {
-    const ta = (a.createdAt as any)?.toMillis?.() ?? 0;
-    const tb = (b.createdAt as any)?.toMillis?.() ?? 0;
-    return tb - ta;
-  });
-}
-
-/**
- * Every order on the platform, newest first — backs the admin Orders tab.
- *
- * Deliberately NOT using orderBy("createdAt"): Firestore silently drops
- * documents missing the ordered field, which would hide any legacy order
- * written before createdAt existed — exactly the orders an admin chasing an
- * unexplained Razorpay payment is most likely looking for. Sorting client-side
- * keeps them visible (they sink to the bottom instead of disappearing).
- */
-export async function fetchAllOrdersForAdmin(): Promise<OrderDoc[]> {
-  const snapshot = await getDocs(collection(db, "orders"));
-  const docs = snapshot.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<OrderDoc, "id">) }));
-  return docs.sort((a, b) => {
     const ta = (a.createdAt as any)?.toMillis?.() ?? 0;
     const tb = (b.createdAt as any)?.toMillis?.() ?? 0;
     return tb - ta;
@@ -2190,11 +2198,16 @@ export async function fetchUsersPage(
   pageSize: number,
   cursor?: QueryDocumentSnapshot<DocumentData> | null,
   role: UserRoleFilter = 'all',
+  // Applied by Firestore too: sign-up date bounds and "paid users only".
+  extra: { fromMs?: number | null; toMs?: number | null; paidOnly?: boolean } = {},
 ): Promise<{ users: any[]; lastDoc: QueryDocumentSnapshot<DocumentData> | null; hasMore: boolean }> {
   const serverFilterable = role === 'retailer' || role === 'manufacturer' || role === 'admin';
 
   const constraints = [
     ...(serverFilterable ? [where('role', '==', role)] : []),
+    ...(extra.paidOnly ? [where('isPaid', '==', true)] : []),
+    ...(extra.fromMs != null ? [where('createdAt', '>=', Timestamp.fromMillis(extra.fromMs))] : []),
+    ...(extra.toMs != null ? [where('createdAt', '<=', Timestamp.fromMillis(extra.toMs))] : []),
     orderBy('createdAt', 'desc'),
     ...(cursor ? [startAfter(cursor)] : []),
     limit(pageSize),
@@ -2468,11 +2481,6 @@ export async function adminUpdateUser(uid: string, updates: {
 
 }
 
-export async function fetchAllSubscriptions(): Promise<any[]> {
-  const snapshot = await getDocs(collection(db, 'subscriptions'));
-  return snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-}
-
 // `plans` has a public read rule (see firestore.rules) — writes all go through
 // app/api/admin/plans/* (Admin SDK), so this is read-only client access.
 export async function fetchAllPlans(): Promise<any[]> {
@@ -2609,14 +2617,9 @@ export async function adminManualActivate(
  * the admin needs to see and manage every product doc individually. So this does NO
  * dedup, NO source exclusion, and NO image requirement. Sorted newest-first.
  */
-export async function fetchAllProductsForAdmin(): Promise<MarketplaceProduct[]> {
-  return mapAdminProductDocs(await fetchAllSellerProducts());
-}
-
 /**
- * Pure shape-mapper behind fetchAllProductsForAdmin(). Split out so callers that
- * already hold a cached raw `products` snapshot (see app/admin/_lib/admin-data.ts)
- * can render the admin table without triggering a second collection scan.
+ * Shape-mapper for the admin Products table: raw product docs (or marketplace
+ * cards) to MarketplaceProduct rows, most recently updated first.
  */
 export function mapAdminProductDocs(docs: RawProductDoc[]): MarketplaceProduct[] {
   return docs
@@ -3169,12 +3172,6 @@ function productOwnerKeys(d: RawProductDoc): string[] {
     .map(String);
 }
 
-/** Fetches every product doc once (raw, with ownership fields) for client-side indexing. */
-export async function fetchAllSellerProducts(): Promise<RawProductDoc[]> {
-  const snap = await getDocs(collection(db, 'products'));
-  return snap.docs.map(d => ({ id: d.id, ...(d.data() as Record<string, unknown>) }));
-}
-
 /**
  * Fetches only the admin-assigned copy docs (source === 'admin_assigned') — the small
  * subset of the `products` collection the admin Products tab needs to compute "N sellers
@@ -3584,8 +3581,20 @@ export async function fetchManufacturerNetworkStores(manufacturerPhone: string):
       );
     });
 
-    const profiles = await Promise.all(
-      activeMirrors.map(async (d) => {
+    // Address and location come from the store directory (1-2 docs for every
+    // store, kept current by Cloud Functions) instead of one retailers/{id}
+    // read per retailer; the mirror doc fills anything missing.
+    const retailerById = new Map<string, Record<string, any>>();
+    if (activeMirrors.length > 0) {
+      try {
+        const { retailers } = await fetchStoreSources();
+        for (const rd of retailers.docs) retailerById.set(rd.id, rd.data());
+      } catch {
+        // directory unavailable: use the mirror docs alone
+      }
+    }
+
+    const profiles = activeMirrors.map((d) => {
         const r = d.data();
         const mirrorAddr = r.address || {};
         const mirrorGeo = r.geo || {};
@@ -3597,25 +3606,20 @@ export async function fetchManufacturerNetworkStores(manufacturerPhone: string):
         let lng = 0;
 
         const retailerDocId = String(r.retailerDocId ?? d.id);
-        try {
-          const rSnap = await getDoc(doc(db, 'retailers', retailerDocId));
-          if (rSnap.exists()) {
-            const rd = rSnap.data();
-            const rdAddr = rd.address || {};
-            const rdGeo = rd.geo || {};
+        const rd = retailerById.get(retailerDocId);
+        if (rd) {
+          const rdAddr = rd.address || {};
+          const rdGeo = rd.geo || {};
 
-            addressStr = [
-              rdAddr.line1 || mirrorAddr.line1,
-              rdAddr.city || mirrorAddr.city,
-              rdAddr.state || mirrorAddr.state,
-              rdAddr.pincode || mirrorAddr.pincode
-            ].filter(Boolean).join(', ');
+          addressStr = [
+            rdAddr.line1 || mirrorAddr.line1,
+            rdAddr.city || mirrorAddr.city,
+            rdAddr.state || mirrorAddr.state,
+            rdAddr.pincode || mirrorAddr.pincode
+          ].filter(Boolean).join(', ');
 
-            lat = Number(rdGeo.latitude ?? rdGeo.lat ?? mirrorGeo.latitude ?? mirrorGeo.lat ?? 0);
-            lng = Number(rdGeo.longitude ?? rdGeo.lng ?? mirrorGeo.longitude ?? mirrorGeo.lng ?? 0);
-          }
-        } catch {
-          // ignore and fall back to mirror
+          lat = Number(rdGeo.latitude ?? rdGeo.lat ?? mirrorGeo.latitude ?? mirrorGeo.lat ?? 0);
+          lng = Number(rdGeo.longitude ?? rdGeo.lng ?? mirrorGeo.longitude ?? mirrorGeo.lng ?? 0);
         }
 
         if (!addressStr) {
@@ -3641,8 +3645,7 @@ export async function fetchManufacturerNetworkStores(manufacturerPhone: string):
           lng,
           storePhone: r.retailerPhone || d.id,
         } as RetailerNetworkStore;
-      })
-    );
+      });
     return profiles;
   } catch (error) {
     console.error("Error in fetchManufacturerNetworkStores:", error);
@@ -3701,20 +3704,6 @@ export async function saveContactMessage(
   }).catch((err) => console.error("[support-message] email notification failed:", err));
 
   return ref.id;
-}
-
-export async function fetchContactMessages(): Promise<ContactMessage[]> {
-  try {
-    const q = query(collection(db, 'contactMessages'), orderBy('createdAt', 'desc'));
-    const snapshot = await getDocs(q);
-    return snapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data()
-    })) as ContactMessage[];
-  } catch (error) {
-    console.error('Error fetching contact messages:', error);
-    throw error;
-  }
 }
 
 export async function deleteContactMessage(id: string): Promise<void> {
@@ -3934,25 +3923,6 @@ export async function logFailedPayment(
   } catch (err) {
     console.error('Error logging failed payment:', err);
   }
-}
-
-export async function fetchFailedPayments(): Promise<any[]> {
-  // No orderBy — avoids needing a composite index on failedPayments.
-  // Sort newest-first client-side instead.
-  const snapshot = await getDocs(collection(db, 'failedPayments'));
-  return snapshot.docs
-    .map(d => ({ id: d.id, ...d.data() }))
-    // Product-order failures belong in Admin -> Payments, not here: every row
-    // in this tab offers "Activate Subscription", which is meaningless for a
-    // cart order. Mobile used to write both kinds into this one collection.
-    // Rows predating the `kind` field are left visible rather than hidden,
-    // since an untagged row cannot be proven to be an order.
-    .filter((r: any) => r.kind !== 'cart')
-    .sort((a: any, b: any) => {
-      const ta = a.timestamp?.toMillis?.() ?? a.timestamp?.seconds ?? 0;
-      const tb = b.timestamp?.toMillis?.() ?? b.timestamp?.seconds ?? 0;
-      return tb - ta;
-    });
 }
 
 // ─── Admin profile save (phone-keyed — works before first OTP login) ──────────
@@ -4539,7 +4509,6 @@ export async function resolveWaUserByPhone(phone: string): Promise<WaResolvedUse
     tenDigit,       // "9876543210" — 10-digit for admin-pre-created accounts
   ]));
 
-  console.log(`[WA Resolve] phone="${phone}" candidates:`, candidates);
 
   for (const p of candidates) {
     const userSnap = await getDoc(doc(db, "users", p));
@@ -4551,7 +4520,6 @@ export async function resolveWaUserByPhone(phone: string): Promise<WaResolvedUse
         businessName: d.shopName || d.businessName || "",
         role: normalizeWaRole(rawRole),
       };
-      console.log(`[WA Resolve] HIT users/${p} → name="${result.name}" role="${rawRole}"→"${result.role}"`);
       return result;
     }
   }
@@ -4565,7 +4533,6 @@ export async function resolveWaUserByPhone(phone: string): Promise<WaResolvedUse
         businessName: d.shopName || d.businessName || "",
         role: "retailer",
       };
-      console.log(`[WA Resolve] HIT retailers/${p} → name="${result.name}"`);
       return result;
     }
   }
@@ -4579,12 +4546,10 @@ export async function resolveWaUserByPhone(phone: string): Promise<WaResolvedUse
         businessName: d.businessName || d.shopName || "",
         role: "manufacturer",
       };
-      console.log(`[WA Resolve] HIT manufacturers/${p} → name="${result.name}"`);
       return result;
     }
   }
 
-  console.log(`[WA Resolve] MISS — no document found for any candidate`);
   return null;
 }
 

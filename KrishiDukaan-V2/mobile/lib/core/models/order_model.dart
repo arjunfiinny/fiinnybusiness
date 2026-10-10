@@ -35,6 +35,15 @@ class OrderModel {
   final double total;
   final String status;
   final OrderPaymentModel? payment;
+
+  /// The seller's Razorpay transfer as last reported (server-written; see
+  /// functions/src/payouts/payout-status.ts).
+  final OrderPayoutModel? payout;
+
+  /// When the delivery trigger set the seller's money to release
+  /// (routeRelease.releaseAt), and when it recorded it.
+  final DateTime? releaseAt;
+  final DateTime? releaseRecordedAt;
   final DateTime? createdAt;
 
   /// Status transitions, each `{status, at}` with an ISO timestamp. The
@@ -62,6 +71,9 @@ class OrderModel {
     required this.total,
     required this.status,
     this.payment,
+    this.payout,
+    this.releaseAt,
+    this.releaseRecordedAt,
     this.createdAt,
     this.statusHistory = const [],
     this.invoiceNumber,
@@ -121,7 +133,9 @@ class OrderModel {
     OrderPaymentModel? paymentModel;
     if (rawPayment is Map) {
       try {
-        paymentModel = OrderPaymentModel.fromMap(Map<String, dynamic>.from(rawPayment));
+        paymentModel = OrderPaymentModel.fromMap(
+          Map<String, dynamic>.from(rawPayment),
+        );
       } catch (_) {
         // Ignore malformed payment
       }
@@ -152,24 +166,43 @@ class OrderModel {
       deliveryBreakdown: d['deliveryBreakdown'] is Map
           ? DeliveryBreakdown.fromMap(d['deliveryBreakdown'] as Map)
           : null,
-      customerDeliveryState: (d['customerDeliveryState'] ??
-              (d['deliveryBreakdown'] is Map
-                  ? (d['deliveryBreakdown'] as Map)['customerDeliveryState']
-                  : null))
-          ?.toString(),
-      total: (d['total'] as num?)?.toDouble() ??
+      customerDeliveryState:
+          (d['customerDeliveryState'] ??
+                  (d['deliveryBreakdown'] is Map
+                      ? (d['deliveryBreakdown'] as Map)['customerDeliveryState']
+                      : null))
+              ?.toString(),
+      total:
+          (d['total'] as num?)?.toDouble() ??
           (d['grandTotal'] as num?)?.toDouble() ??
           (d['subtotal'] as num?)?.toDouble() ??
           0.0,
       status: status,
       payment: paymentModel,
+      payout: d['payout'] is Map
+          ? OrderPayoutModel.fromMap(
+              Map<String, dynamic>.from(d['payout'] as Map),
+            )
+          : null,
+      releaseAt: d['routeRelease'] is Map
+          ? anyDate((d['routeRelease'] as Map)['releaseAt'])
+          : null,
+      releaseRecordedAt: d['routeRelease'] is Map
+          ? anyDate(
+              (d['routeRelease'] as Map)['scheduledAt'] ??
+                  (d['routeRelease'] as Map)['recordedAt'],
+            )
+          : null,
       createdAt: createdAtDate,
-      statusHistory: (d['statusHistory'] as List?)
+      statusHistory:
+          (d['statusHistory'] as List?)
               ?.whereType<Map>()
-              .map((e) => {
-                    'status': (e['status'] ?? '').toString(),
-                    'at': (e['at'] ?? '').toString(),
-                  })
+              .map(
+                (e) => {
+                  'status': (e['status'] ?? '').toString(),
+                  'at': (e['at'] ?? '').toString(),
+                },
+              )
               .toList() ??
           const [],
       invoiceNumber: d['invoiceNumber']?.toString(),
@@ -197,22 +230,89 @@ class OrderItemModel {
   double get lineTotal => price * quantity;
 
   factory OrderItemModel.fromMap(Map<String, dynamic> m) => OrderItemModel(
-        catalogId: m['catalogId'] as String? ?? m['productId'] as String? ?? '',
-        name: m['name'] as String? ?? '',
-        image: m['image'] as String?,
-        price: (m['price'] as num?)?.toDouble() ?? 0.0,
-        quantity: (m['quantity'] as num?)?.toInt() ?? (m['qty'] as num?)?.toInt() ?? 1,
-        variantLabel: m['variantLabel'] as String? ?? m['variantUnit'] as String?,
-      );
+    catalogId: m['catalogId'] as String? ?? m['productId'] as String? ?? '',
+    name: m['name'] as String? ?? '',
+    image: m['image'] as String?,
+    price: (m['price'] as num?)?.toDouble() ?? 0.0,
+    quantity:
+        (m['quantity'] as num?)?.toInt() ?? (m['qty'] as num?)?.toInt() ?? 1,
+    variantLabel: m['variantLabel'] as String? ?? m['variantUnit'] as String?,
+  );
 
   Map<String, dynamic> toMap() => {
-        'catalogId': catalogId,
-        'name': name,
-        if (image != null) 'image': image,
-        'price': price,
-        'quantity': quantity,
-        if (variantLabel != null) 'variantLabel': variantLabel,
-      };
+    'catalogId': catalogId,
+    'name': name,
+    if (image != null) 'image': image,
+    'price': price,
+    'quantity': quantity,
+    if (variantLabel != null) 'variantLabel': variantLabel,
+  };
+}
+
+/// Where a seller's money for an order is, in Razorpay Route. Same fields as
+/// the website's OrderPayout (app/dashboard/_lib/seller-earnings.ts).
+/// A date stored as a Firestore Timestamp, ISO string or epoch millis.
+DateTime? anyDate(Object? v) {
+  if (v is Timestamp) return v.toDate();
+  if (v is String) return DateTime.tryParse(v);
+  if (v is num && v > 0) return DateTime.fromMillisecondsSinceEpoch(v.toInt());
+  return null;
+}
+
+class OrderPayoutModel {
+  /// on_hold | scheduled | processing | settled | failed | reversed | not_routed
+  final String? state;
+  final String? via;
+  final String? transferId;
+
+  /// Rupees with the seller after any reversal.
+  final double? amount;
+
+  /// When a held transfer releases.
+  final DateTime? onHoldUntil;
+  final String? settlementId;
+
+  /// First time the transfer was seen settled.
+  final DateTime? settledAt;
+
+  /// Razorpay's settlement time, and the bank reference (UTR) to find the
+  /// money in the seller's bank statement.
+  final DateTime? settlementAt;
+  final String? utr;
+
+  /// When Razorpay processed the transfer.
+  final DateTime? processedAt;
+
+  const OrderPayoutModel({
+    this.state,
+    this.via,
+    this.transferId,
+    this.amount,
+    this.onHoldUntil,
+    this.settlementId,
+    this.settledAt,
+    this.settlementAt,
+    this.utr,
+    this.processedAt,
+  });
+
+  factory OrderPayoutModel.fromMap(Map<String, dynamic> m) {
+    final until = (m['onHoldUntil'] as num?)?.toInt() ?? 0;
+    return OrderPayoutModel(
+      state: m['state'] as String?,
+      via: m['via'] as String?,
+      transferId: m['transferId'] as String?,
+      amount: (m['amount'] as num?)?.toDouble(),
+      onHoldUntil: until > 0
+          ? DateTime.fromMillisecondsSinceEpoch(until)
+          : null,
+      settlementId: m['settlementId'] as String?,
+      settledAt: anyDate(m['settledAt']),
+      settlementAt: anyDate(m['settlementAt']),
+      utr: m['utr'] as String?,
+      processedAt: anyDate(m['processedAt']),
+    );
+  }
 }
 
 class OrderPaymentModel {
@@ -236,11 +336,15 @@ class OrderPaymentModel {
   final String? transferId;
   final String? transferredAt;
 
+  /// What a payout transfer actually sent for this order (rupees).
+  final double? transferredNet;
+
   /// Amount already refunded to the customer. A PARTIAL refund leaves the
   /// order's status unchanged, so this must be subtracted or the seller would
   /// appear owed the full original amount.
   final double? refundedAmount;
   final String? refundId;
+  final DateTime? refundedAt;
 
   const OrderPaymentModel({
     this.razorpayOrderId,
@@ -252,8 +356,10 @@ class OrderPaymentModel {
     this.gatewayTax,
     this.transferId,
     this.transferredAt,
+    this.transferredNet,
     this.refundedAmount,
     this.refundId,
+    this.refundedAt,
   });
 
   factory OrderPaymentModel.fromMap(Map<String, dynamic> m) =>
@@ -267,7 +373,9 @@ class OrderPaymentModel {
         gatewayTax: (m['gatewayTax'] as num?)?.toDouble(),
         transferId: m['transferId'] as String?,
         transferredAt: m['transferredAt'] as String?,
+        transferredNet: (m['transferredNet'] as num?)?.toDouble(),
         refundedAmount: (m['refundedAmount'] as num?)?.toDouble(),
         refundId: m['refundId'] as String?,
+        refundedAt: anyDate(m['refundedAt']),
       );
 }

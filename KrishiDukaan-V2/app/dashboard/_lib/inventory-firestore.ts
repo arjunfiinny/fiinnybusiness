@@ -2,7 +2,6 @@ import {
   arrayUnion,
   collection,
   doc,
-  documentId,
   getDoc,
   getDocs,
   increment,
@@ -17,6 +16,7 @@ import {
 } from "firebase/firestore";
 
 import { db } from "../../firebase";
+import { getDocsByIds } from "../../lib/firestore-by-ids";
 import { updateOwnAvailabilityEntries } from "./own-availability-entries";
 import type {
   BulkDiscountTier,
@@ -345,20 +345,11 @@ async function fetchInventoryForManufacturer(
 
 // ─── Public fetch functions ───────────────────────────────────────────────────
 
-/** Batch-fetch product names by doc IDs. Returns a map of id → name. */
+/** Batch-fetch product names by doc IDs (30 per query, in parallel). Returns a map of id → name. */
 export async function fetchProductNames(productIds: string[]): Promise<Map<string, string>> {
   const map = new Map<string, string>();
-  const unique = Array.from(new Set(productIds.filter(Boolean)));
-  const chunkSize = 10;
-  for (let i = 0; i < unique.length; i += chunkSize) {
-    const chunk = unique.slice(i, i + chunkSize);
-    if (!chunk.length) continue;
-    const q = query(collection(db, "products"), where(documentId(), "in", chunk));
-    const snap = await getDocs(q);
-    snap.docs.forEach((d) => {
-      map.set(d.id, String(d.data().name ?? ""));
-    });
-  }
+  const docs = await getDocsByIds(db, "products", productIds);
+  docs.forEach((data, id) => map.set(id, String(data.name ?? "")));
   return map;
 }
 

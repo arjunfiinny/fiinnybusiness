@@ -30,6 +30,7 @@ export type WaTemplate =
   | "kyc_success"
   | "app_update"
   | "reel_promo_hindi"
+  | "free_seats_assigned"
   | "generic";
 
 /** Dynamic values substituted into the template at render time (for audit/debug). */
