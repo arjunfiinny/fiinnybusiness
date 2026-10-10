@@ -978,6 +978,17 @@ off and waits 6 hours; one transfer for several orders with the exact
 amounts; never pays twice; a leftover claim blocks payment. Timeline: KYC
 wording for seller and admin, routed money unaffected (website and app).
 
+### S18. Two fixes recovered from a local stash
+
+- `firestore.indexes.json`: the `dealerNotes` (dealerId, createdAt) composite
+  index had been added under `fieldOverrides`, where an index with `fields` is
+  not valid, so deploying indexes could fail. Moved to `indexes`.
+- "Create Route account" no longer fails with "missing email" for a seller
+  whose shop record has no email but whose user record does
+  (`app/lib/route-server.ts` reads every one of the seller's records).
+
+**Deploy:** indexes (step 1), website (step 4).
+
 ## Testing on UAT
 
 Needs your usual `.env.uat` file and access to `karan-arjun-uat`.
