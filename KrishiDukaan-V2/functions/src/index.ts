@@ -1363,56 +1363,98 @@ export const notifyOnPromotionSeatAssigned = onDocumentCreated(
 
     const businessName = String(d.businessName ?? "") || phone;
 
-    // Duplicate guard: claim the doc exactly once. Writing waQueued is an
-    // UPDATE, so it does not re-trigger this onCreate handler; a redelivered
-    // create event finds waQueued already true and bails.
-    const claimed = await admin.firestore().runTransaction(async (txn) => {
-      const snap = await txn.get(ref);
-      if (!snap.exists) return false;
-      if (snap.get("waQueued") === true) return false;
-      txn.update(ref, { waQueued: true });
-      return true;
-    });
-    if (!claimed) {
-      logger.info("[notifyOnPromotionSeatAssigned] already queued — skipping", {
-        promotionId: event.params.promotionId,
-        phone,
-      });
-      return;
-    }
+    // Optional marketing template attached to the promotion. Only known
+    // marketing templates are honoured; anything else is ignored (confirmation
+    // still sends). Kept in sync with lib/promotions.ts MARKETING_TEMPLATES.
+    const MARKETING_TEMPLATES = new Set(["navratri_offer_free", "navratri_offer_paid"]);
+    const marketingRaw = String(d.marketingTemplate ?? "");
+    const marketingTemplate = MARKETING_TEMPLATES.has(marketingRaw)
+      ? (marketingRaw as "navratri_offer_free" | "navratri_offer_paid")
+      : null;
 
-    const docId = await queueWaNotification(
-      phone,
-      `आपको ${seats} मुफ़्त सीट${seats === 1 ? "" : "ें"} प्रदान की गई हैं।`,
-      {
-        template: "free_seats_assigned",
-        type: "subscription",
-        payload: { businessName, seats },
-        source: {
-          event: "promotion_seats_assigned",
-          entityType: "promotion",
-          entityId: `${event.params.promotionId}:${phone}`,
-        },
+    // Each message tracks its OWN claim flag on the recipient doc, so the two
+    // are independent: a retry never double-sends, and a failure in one neither
+    // blocks nor re-sends the other. Writing a flag is an UPDATE, so it never
+    // re-triggers this onCreate handler; a redelivered create event finds the
+    // flag already true and skips that message.
+    //   waMarketingQueued — the optional marketing message (Step 2)
+    //   waQueued          — the free_seats_assigned confirmation (Step 3)
+    // Seats are never touched here, so releasing a flag allows a safe message
+    // retry without any risk of re-assigning seats.
+    const claimFlag = (flag: string): Promise<boolean> =>
+      admin.firestore().runTransaction(async (txn) => {
+        const snap = await txn.get(ref);
+        if (!snap.exists) return false;
+        if (snap.get(flag) === true) return false;
+        txn.update(ref, { [flag]: true });
+        return true;
+      });
+
+    // ── Step 2: optional marketing message, queued BEFORE the confirmation. ──
+    if (marketingTemplate) {
+      if (await claimFlag("waMarketingQueued")) {
+        const mktId = await queueWaNotification(phone, "", {
+          template: marketingTemplate,
+          type: "marketing",
+          // Navratri body: {{1}} = businessName, {{2}} = seats (offered slots).
+          // The image header is resolved server-side from the template's media-ID secret.
+          payload: { businessName, name: businessName, seats },
+          source: {
+            event: "promotion_marketing_message",
+            entityType: "promotion",
+            entityId: `${event.params.promotionId}:${phone}`,
+          },
+        });
+        if (!mktId) {
+          await ref.update({ waMarketingQueued: false }).catch(() => {});
+          logger.error("[notifyOnPromotionSeatAssigned] failed to queue marketing message — released claim", {
+            promotionId: event.params.promotionId, phone, marketingTemplate,
+          });
+        } else {
+          logger.info("[notifyOnPromotionSeatAssigned] queued marketing message", {
+            promotionId: event.params.promotionId, phone, marketingTemplate, waDocId: mktId,
+          });
+        }
+      } else {
+        logger.info("[notifyOnPromotionSeatAssigned] marketing already queued — skipping", {
+          promotionId: event.params.promotionId, phone,
+        });
       }
-    );
-
-    if (!docId) {
-      // Queue write failed (queueWaNotification already logged it). Release the
-      // claim so the message can be retried instead of being lost.
-      await ref.update({ waQueued: false }).catch(() => {});
-      logger.error("[notifyOnPromotionSeatAssigned] failed to queue WhatsApp — released claim", {
-        promotionId: event.params.promotionId,
-        phone,
-      });
-      return;
     }
 
-    logger.info("[notifyOnPromotionSeatAssigned] queued free_seats_assigned", {
-      promotionId: event.params.promotionId,
-      phone,
-      seats,
-      waDocId: docId,
-    });
+    // ── Step 3: free_seats_assigned confirmation (default for every grant). ──
+    if (await claimFlag("waQueued")) {
+      const docId = await queueWaNotification(
+        phone,
+        `आपको ${seats} मुफ़्त सीट${seats === 1 ? "" : "ें"} प्रदान की गई हैं।`,
+        {
+          template: "free_seats_assigned",
+          type: "subscription",
+          payload: { businessName, seats },
+          source: {
+            event: "promotion_seats_assigned",
+            entityType: "promotion",
+            entityId: `${event.params.promotionId}:${phone}`,
+          },
+        }
+      );
+      if (!docId) {
+        // Queue write failed (queueWaNotification already logged it). Release the
+        // claim so the confirmation can be retried instead of being lost.
+        await ref.update({ waQueued: false }).catch(() => {});
+        logger.error("[notifyOnPromotionSeatAssigned] failed to queue confirmation — released claim", {
+          promotionId: event.params.promotionId, phone,
+        });
+        return;
+      }
+      logger.info("[notifyOnPromotionSeatAssigned] queued free_seats_assigned", {
+        promotionId: event.params.promotionId, phone, seats, waDocId: docId,
+      });
+    } else {
+      logger.info("[notifyOnPromotionSeatAssigned] confirmation already queued — skipping", {
+        promotionId: event.params.promotionId, phone,
+      });
+    }
   }
 );
 

@@ -10,6 +10,8 @@ export function resolveTemplateLanguage(template: WaTemplate): string {
   switch (template) {
     case "reel_promo_hindi":
     case "free_seats_assigned":
+    case "navratri_offer_free":
+    case "navratri_offer_paid":
       return "hi";
     default:
       return "mr";
@@ -219,6 +221,40 @@ export function resolveTemplateComponents(
       }
       return [
         { type: "header", parameters: [{ type: "image", image: { id: headerImageId } }] },
+      ];
+    }
+
+    case "navratri_offer_free":
+    case "navratri_offer_paid": {
+      // Manual admin Navratri Marketing campaign (Hindi) — never triggered automatically.
+      //   navratri_offer_free → retailers WITHOUT an active paid subscription
+      //   navratri_offer_paid → retailers WITH an active paid subscription
+      //
+      // VERIFIED against the live Meta template definitions (GET
+      // /{WABA_ID}/message_templates?name=…) on 2026-10-10:
+      //   HEADER  : IMAGE  — requires an image component with a media ID.
+      //   BODY    : exactly ONE variable {{1}} = business name. The offer quantity
+      //             (10 for free, 40 for paid) is HARD-CODED in the approved copy,
+      //             NOT a parameter. Sending a second body param → error 132000.
+      //   FOOTER  : static (no parameter).
+      //   BUTTONS : static URL (no parameter → no button component).
+      // So the payload is: image header + a single-parameter body. Any `seats`
+      // value in the payload is intentionally ignored here (it is only a real
+      // variable on free_seats_assigned, which is a separate template).
+      const envVar =
+        template === "navratri_offer_free"
+          ? "WA_NAVRATRI_FREE_HEADER_ID"
+          : "WA_NAVRATRI_PAID_HEADER_ID";
+      const headerImageId = process.env[envVar];
+      if (!headerImageId) {
+        throw new Error(
+          `${envVar} is not set — upload the Navratri header image to the WhatsApp Media API, ` +
+            `store the returned media ID in Secret Manager, add it to the wa-dispatch.ts secrets[] arrays and redeploy`
+        );
+      }
+      return [
+        { type: "header", parameters: [{ type: "image", image: { id: headerImageId } }] },
+        body(p("businessName") || p("shopName") || p("name") || "व्यापारी"),
       ];
     }
 
