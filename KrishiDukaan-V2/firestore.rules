@@ -613,6 +613,61 @@ service cloud.firestore {
       ));
     }
 
+    // Seller-analytics counters, kept off products/{id} and retailers/{phone}
+    // so a shopper's view no longer fires the product Cloud Functions. These
+    // checks need no get()/exists() lookups, so a counter write costs no
+    // extra rule reads.
+    function productStatKeys() {
+      return ['impressions', 'positionSum', 'clicks', 'calls', 'directionRequests',
+              'impressionsByDay', 'clicksByDay', 'callsByDay', 'directionRequestsByDay'];
+    }
+
+    match /productStats/{productId} {
+      allow read: if isAuthed();
+      allow create: if isAuthed() && request.resource.data.keys().hasOnly(productStatKeys());
+      allow update: if isAuthed()
+                       && request.resource.data.diff(resource.data).affectedKeys().hasOnly(productStatKeys());
+      allow delete: if isAdmin();
+    }
+
+    // Merged marketplace cards, built only by Cloud Functions
+    // (functions/src/marketplace/cards.ts). Public like the products they merge.
+    match /marketplaceCards/{cardId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Search tokens for each card, same id, same author.
+    match /marketplaceSearch/{cardId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Product -> card index, used only by Cloud Functions.
+    match /cardMembers/{productId} {
+      allow read, write: if false;
+    }
+
+    // Compact copy of the public retailers/manufacturers/profiles/stores
+    // records and store review totals, built by Cloud Functions
+    // (functions/src/stores/directory.ts).
+    match /storeDirectory/{chunkId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    match /storeDirectoryState/{docId} {
+      allow read, write: if false;
+    }
+
+    match /storeStats/{storePhone} {
+      allow read: if isAuthed();
+      allow create: if isAuthed() && request.resource.data.keys().hasOnly(['storeViews', 'storeViewsByDay']);
+      allow update: if isAuthed()
+                       && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['storeViews', 'storeViewsByDay']);
+      allow delete: if isAdmin();
+    }
+
     match /retailers/{retailerId} {
       allow read: if true;
       allow create: if isAuthed();
