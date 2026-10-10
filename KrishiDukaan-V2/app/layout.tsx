@@ -115,10 +115,7 @@ export const metadata: Metadata = {
   verification: {
     google: "fu8BBFlg3o0TzD7wwKw-nfI46iY2LtuIerejuxCP5jM",
   },
-  icons: {
-    icon: "/images/krishidukan icon.webp",
-    apple: "/images/krishidukan icon.webp",
-  },
+  // Icons come from the file convention in app/: favicon.ico, icon.png, apple-icon.png.
 };
 
 // ─── Structured data (JSON-LD) ──────────────────────────────────────────────
