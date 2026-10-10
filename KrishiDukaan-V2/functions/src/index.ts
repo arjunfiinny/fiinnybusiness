@@ -11,8 +11,10 @@ export { sendWaNotification, retryWaNotifications, webhookReceiver } from "./wa-
 export { transcodeReel } from "./reels/media/transcodeReel";
 export { backfillReelTranscodes } from "./reels/media/backfillReelTranscodes";
 export { backfillReelThumbnails } from "./reels/media/backfillReelThumbnails";
+export { compressOldReels } from "./reels/media/compressOldReels";
 export { releaseTransferOnDelivery } from "./route-release";
 export { syncPayoutStatus, trackPayoutOnOrderWrite, syncPayoutsNow } from "./payouts/payout-status";
+export { payAfterKyc } from "./payouts/pay-after-kyc";
 export {
   notifyOwnerOnReelRepost,
   flushEngagementNotifications,

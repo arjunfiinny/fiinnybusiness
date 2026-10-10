@@ -1,3 +1,5 @@
+// Restored for app/brand/[slug]/page.tsx, which merges one manufacturer's
+// products with this. The Market page itself reads the prebuilt marketplaceCards.
 /**
  * Shared marketplace product mapping + dedup/merge logic.
  *

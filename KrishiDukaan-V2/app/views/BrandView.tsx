@@ -10,7 +10,6 @@ import {
 import { ReviewSection } from '../../components/shared/ReviewSection';
 import type { ManufacturerBrandData, BrandProductSummary, BrandRetailerSummary } from '../dashboard/_lib/brand-page-types';
 import { haversineDistance, formatDistance } from '../utils/haversine';
-import { fetchMarketplaceProducts } from '../firebase';
 import { ShareLinkButton } from '../components/shared/share-link-button';
 import { brandShareUrl } from '../lib/share-links';
 import { useSharedCart } from '../lib/useSharedCart';
