@@ -804,6 +804,56 @@ function change.
 3. As a team member with only Route Payouts, open Seller payments: you see
    Overview and Transfers, with no Release button.
 
+### S15. Old reels that start slowly
+
+**Problem.** Reels posted before server-side compression (mid-September) still
+play the raw phone video: often 50–150 MB at 1080p. They take seconds to
+start on mobile data and make the whole feed feel slow. A function to fix them
+(`backfillReelTranscodes`) existed but nothing ever called it. Also found:
+- A fast encode could finish before the app saved the reel. The update then
+  failed and that reel kept its raw file for good.
+- Reposts copy the reel's video address. Once the original was compressed
+  (and its raw file deleted), older reposts pointed at nothing.
+- The website `/reels` page read the first 120 reels by id, not the newest.
+
+**Fix: compress them, and keep the feed fast meanwhile.**
+- New function **`compressOldReels`** (every 30 minutes):
+  - Re-runs the normal compressor (`transcodeReel`) on 4 old reels per run,
+    so ~200 reels a day without a burst of large machines.
+  - A reel already compressed but never switched over is switched directly
+    (no second encode).
+  - Skips files uploaded in the last hour (their own encode is running).
+  - Gives up on a file after 3 failed tries and logs it.
+  - Progress per reel is kept in `reelCompression/{reelId}` (server only;
+    the rules deny clients by default).
+  - When nothing is left it lists Storage, finds nothing, and ends.
+- `transcodeReel` now waits up to 3 minutes for the reel to be saved, and moves
+  reposts to the compressed file too.
+- **Until a reel is compressed** the feed ranks it lower (score × 0.3, after a
+  day's grace for new uploads) on the app and the website, and never picks it
+  for the "new reel" slot. It still shows; it just isn't first. As each reel is
+  compressed it ranks normally again, so there is no date cut-off to remove
+  later. Rule in `app/reels/lib/ranking/rank.ts` and
+  `mobile/lib/features/reels/domain/reel_ranker.dart`.
+- Website `/reels` now reads the newest reels first (`orderBy createdAt`).
+
+**Deploy:** functions (step 2: `compressOldReels` new, `transcodeReel`
+changed), website (step 4), app (step 5). No index (single-field order).
+Older app versions keep working: they read the same `videoUrl`, which now
+points at the small file.
+
+**Cost:** each old reel is encoded once (2 GiB, about a minute). Storage drops,
+since each raw file is deleted after its compressed copy is in place.
+
+**Check:**
+1. Logs of `compressOldReels`: `[compress-old-reels] run` with `nudged: 4`,
+   then `transcodeReel` runs for those reels.
+2. A day later, the count of reels without `optimizedAt` is going down.
+3. Open an old reel in the app: it starts quickly and its `videoUrl` ends in
+   `video_optimized.mp4`.
+4. Any reel listed under "could not compress" in the logs: open it; if the
+   file is broken, ask the seller to upload it again.
+
 ## Testing on UAT
 
 Needs your usual `.env.uat` file and access to `karan-arjun-uat`.
