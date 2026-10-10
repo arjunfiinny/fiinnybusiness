@@ -854,6 +854,55 @@ since each raw file is deleted after its compressed copy is in place.
 4. Any reel listed under "could not compress" in the logs: open it; if the
    file is broken, ask the seller to upload it again.
 
+### S16. Simpler KYC for sellers
+
+**Problem.** Sellers were asked for five documents (PAN card, cheque, address
+proof, owner photo, licence) plus a long bank form. Many stopped halfway.
+
+**Now (website Payouts page and app Payouts screen), three short steps:**
+1. **Bank account:** account holder name, IFSC, bank name and branch name
+   (filled in automatically from the IFSC), account number typed twice (paste
+   blocked), and a small note: "Please fill carefully and check each digit".
+2. **GST number or PAN:** a GST number contains the PAN, so entering it fills
+   the PAN in. Sellers without GST type their PAN. The GST number's check
+   character is verified, so one wrong character is caught on the form.
+3. **Licence:** one photo. The other documents are optional, under "Other
+   documents (optional)". Anything a seller already uploaded is still shown.
+- A checklist at the top ticks each step; a green note says selling never
+  waits for KYC.
+- Rules in `app/lib/kyc.ts` (website) and `mobile/lib/core/utils/kyc_rules.dart`
+  (app); change them together.
+- New website endpoint **`/api/ifsc?code=…`** (bank and branch from Razorpay's
+  free IFSC directory, cached a day). The app uses it too. If it is down, the
+  seller types bank and branch themselves.
+- **Admin, Bank & KYC:** shows GST number, PAN (and whether it came from GST),
+  bank and branch; "missing" now means bank details, PAN/GST or licence.
+- **Create Route account** now sends the PAN and GST number to Razorpay
+  (`legal_info`), and sets the business type from the PAN (P person →
+  proprietorship, C company → private limited, F firm → partnership, H HUF,
+  T trust). It also records when the account was created (24-hour cooling).
+- **Verify** now also links the seller's shop to the same Razorpay account
+  (if the shop has none), so new orders are split at checkout. If the shop is
+  already linked to a different account, verify refuses and says which.
+- Daily KYC reminder: asks only for what's still missing, in kinder words
+  ("Your money is safe with KrishiDukan and is sent to your bank once this is
+  done"). WhatsApp templates `kyc_pending`/`kyc_success` are approved in Meta
+  and unchanged.
+
+**Old app versions:** keep working; they write the old fields, which the new
+screens and admin still read. Old sellers stay verified.
+
+**Rules:** `linkedAccountId` and `linkedAccountCreatedAt` added to the
+admin-only payout fields (sellers can't write them). Tested on the emulator:
+new website and app save shapes, the old app's shape, licence upload, and
+every forbidden write (14 checks).
+
+**Deploy:** rules (step 1), functions (step 2: `remindIncompletePayoutDetails`
+changed), website (step 4), app (step 5).
+
+**Check:** fill the form on UAT with IFSC `SBIN0001234`: bank and branch fill
+in. Enter a GST number: PAN fills in. Upload a licence: checklist shows 3 of 3.
+
 ## Testing on UAT
 
 Needs your usual `.env.uat` file and access to `karan-arjun-uat`.

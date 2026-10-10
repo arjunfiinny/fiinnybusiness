@@ -800,7 +800,7 @@ service cloud.firestore {
     /// sets it to 'pending_verification' when submitting or editing.
     function payoutProtectedFields() {
       return ['razorpayLinkedAccountId', 'verifiedAt', 'verifiedBy',
-              'rejectionReason'];
+              'rejectionReason', 'linkedAccountId', 'linkedAccountCreatedAt'];
     }
 
     /// A seller may only ever put their payout account INTO review, never

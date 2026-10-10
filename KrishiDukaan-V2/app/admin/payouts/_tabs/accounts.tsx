@@ -7,6 +7,7 @@ import { Banknote, CheckCircle2, Copy, ExternalLink, KeyRound, Loader2, RefreshC
 import { db } from "../../../firebase";
 import { usePagedQuery } from "../../_lib/use-paged-query";
 import { LoadMore } from "../../_components/load-more";
+import { KYC_ITEM_LABEL, kycMissing, panFromGstin } from "../../../lib/kyc";
 
 /**
  * Admin → Seller payments → Bank & KYC tab (and the Payout run tab's panel).
@@ -43,9 +44,12 @@ type PayoutRow = {
   accountNumber?: string;
   ifsc?: string;
   bankName?: string;
+  branchName?: string;
   accountType?: string;
   upiId?: string;
   pan?: string;
+  gstin?: string;
+  panSource?: string;
   status?: PayoutStatus;
   razorpayLinkedAccountId?: string;
   rejectionReason?: string;
@@ -65,15 +69,15 @@ const DOC_LABELS: Record<string, string> = {
   address_proof: "Address proof",
   gst_certificate: "GST certificate",
   owner_photo: "Owner photo",
-  trade_license: "Trade / product license",
+  trade_license: "Licence to sell",
 };
 
-const REQUIRED_DOCS = ["pan_card", "cancelled_cheque", "address_proof", "owner_photo", "trade_license"];
+/** Sellers are asked for one document now (see app/lib/kyc.ts); the others
+ *  are optional and still shown when a seller has sent them. */
+const ALL_DOC_TYPES = ["trade_license", "gst_certificate", "pan_card", "cancelled_cheque", "address_proof", "owner_photo"];
 
-/** All doc types the upload-on-behalf-of-seller control can submit — the
- *  required set plus the optional GST certificate, same list kyc-documents.tsx
- *  offers the seller directly. */
-const ALL_DOC_TYPES = [...REQUIRED_DOCS, "gst_certificate"];
+/** What a seller still has to provide, in words. */
+const missingItems = (row: PayoutRow) => kycMissing(row).map((k) => KYC_ITEM_LABEL[k]);
 
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
 
@@ -214,8 +218,7 @@ function StatusBadge({ status }: { status?: PayoutStatus }) {
 }
 
 function PayoutCard({ row, onOpen }: { row: PayoutRow; onOpen: () => void }) {
-  const submitted = Object.keys(row.documents ?? {});
-  const missing = REQUIRED_DOCS.filter((d) => !submitted.includes(d));
+  const missing = missingItems(row);
 
   return (
     <button
@@ -229,8 +232,7 @@ function PayoutCard({ row, onOpen }: { row: PayoutRow; onOpen: () => void }) {
         <StatusBadge status={row.status} />
         {missing.length > 0 && (
           <span className="inline-flex items-center gap-1 rounded-md bg-surface-container px-2 py-0.5 text-xs font-semibold text-on-surface-variant">
-            <ShieldAlert className="h-3 w-3" /> {missing.length} doc
-            {missing.length === 1 ? "" : "s"} missing
+            <ShieldAlert className="h-3 w-3" /> Missing: {missing.join(", ")}
           </span>
         )}
       </div>
@@ -440,7 +442,9 @@ function ReviewModal({
   // Sourced from the live `docs` fetch (refreshed after every admin upload),
   // not the `row` prop — that only updates once the parent list reloads.
   const submitted = docs.filter((d) => d.url).map((d) => d.type);
-  const missing = REQUIRED_DOCS.filter((d) => !submitted.includes(d));
+  const missing = kycMissing({ ...row, documents: Object.fromEntries(submitted.map((t) => [t, true])) }).map(
+    (k) => KYC_ITEM_LABEL[k],
+  );
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-0 md:items-center md:p-6">
@@ -460,9 +464,14 @@ function ReviewModal({
           <Field label="Account holder" value={row.accountHolderName} />
           <Field label="Account number" value={row.accountNumber} mono />
           <Field label="IFSC" value={row.ifsc} mono />
-          <Field label="Bank" value={row.bankName} />
-          <Field label="Type" value={row.accountType} />
-          <Field label="PAN" value={row.pan} mono />
+          <Field label="Bank" value={[row.bankName, row.branchName].filter(Boolean).join(", ")} />
+          {row.accountType && <Field label="Type" value={row.accountType} />}
+          <Field label="GST number" value={row.gstin} mono />
+          <Field
+            label={row.gstin && panFromGstin(row.gstin) === row.pan ? "PAN (from GST number)" : "PAN"}
+            value={row.pan}
+            mono
+          />
           {row.upiId && <Field label="UPI" value={row.upiId} mono />}
         </div>
 
@@ -508,7 +517,7 @@ function ReviewModal({
 
         {missing.length > 0 && (
           <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900">
-            Still missing: {missing.map((m) => DOC_LABELS[m] ?? m).join(", ")}
+            Still missing: {missing.join(", ")}
           </p>
         )}
 
