@@ -9,6 +9,7 @@ import type { WaTemplate, WaPayload, WaTemplateComponent, WaTextParam } from "./
 export function resolveTemplateLanguage(template: WaTemplate): string {
   switch (template) {
     case "reel_promo_hindi":
+    case "free_seats_assigned":
       return "hi";
     default:
       return "mr";
@@ -220,6 +221,20 @@ export function resolveTemplateComponents(
         { type: "header", parameters: [{ type: "image", image: { id: headerImageId } }] },
       ];
     }
+
+    case "free_seats_assigned":
+      // Automatic — sent to a retailer/manufacturer when an admin promotion
+      // grants them free promotional seats. Hindi (hi).
+      // Body:
+      //   {{1}} = businessName → shopName → name → "व्यापारी" (recipient business)
+      //   {{2}} = seats (number of seats granted to THIS recipient)
+      // CTA (if any) is a static URL button — no button component sent from here.
+      return [
+        body(
+          p("businessName") || p("shopName") || p("name") || "व्यापारी",
+          p("seats"),
+        ),
+      ];
 
     case "generic":
     default:
