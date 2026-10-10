@@ -337,7 +337,7 @@ export const syncSellerProductToCanonical = onDocumentWritten(
  * stock change to the canonical availability[] entry automatically.
  */
 export const decrementStockOnOrder = onDocumentCreated(
-  "orders/{orderId}",
+  { document: "orders/{orderId}", region: "asia-south1" },
   async (event) => {
     const data = event.data?.data() as Record<string, unknown> | undefined;
     if (!data) return;
@@ -677,7 +677,7 @@ async function resolveSellerForOrder(
  * on create), so there is no write loop.
  */
 export const backfillOrderSeller = onDocumentCreated(
-  "orders/{orderId}",
+  { document: "orders/{orderId}", region: "asia-south1" },
   async (event) => {
     const snap = event.data;
     const d = snap?.data() as Record<string, unknown> | undefined;
@@ -725,7 +725,7 @@ export const backfillOrderSeller = onDocumentCreated(
 );
 
 export const notifySellerOnOrder = onDocumentCreated(
-  "orders/{orderId}",
+  { document: "orders/{orderId}", region: "asia-south1" },
   async (event) => {
     const d = event.data?.data() as Record<string, unknown> | undefined;
     if (!d) return;
@@ -872,7 +872,7 @@ export const notifySellerOnOrder = onDocumentCreated(
  * Fires on create too (before doesn't exist → status "placed" → confirmation).
  */
 export const notifyCustomerOnOrderStatus = onDocumentWritten(
-  "orders/{orderId}",
+  { document: "orders/{orderId}", region: "asia-south1" },
   async (event) => {
     const after = event.data?.after;
     if (!after?.exists) return;
@@ -969,7 +969,7 @@ export const notifyCustomerOnOrderStatus = onDocumentWritten(
  * Doc ID = {reelId}_{userId}. We need to look up the reel to get shopOwnerId.
  */
 export const notifyReelOwnerOnLike = onDocumentCreated(
-  "reel_likes/{likeId}",
+  { document: "reel_likes/{likeId}", region: "asia-south1" },
   async (event) => {
     const d = event.data?.data() as Record<string, unknown> | undefined;
     if (!d) return;
@@ -1003,7 +1003,7 @@ export const notifyReelOwnerOnLike = onDocumentCreated(
  * Someone commented on a reel → notify the reel owner.
  */
 export const notifyReelOwnerOnComment = onDocumentCreated(
-  "reels/{reelId}/reel_comments/{commentId}",
+  { document: "reels/{reelId}/reel_comments/{commentId}", region: "asia-south1" },
   async (event) => {
     const d = event.data?.data() as Record<string, unknown> | undefined;
     if (!d) return;
@@ -1062,7 +1062,7 @@ export const notifyReelOwnerOnComment = onDocumentCreated(
  * Doc ID = {followerId}_{shopId}.
  */
 export const notifyShopOwnerOnFollow = onDocumentCreated(
-  "follows/{followId}",
+  { document: "follows/{followId}", region: "asia-south1" },
   async (event) => {
     const d = event.data?.data() as Record<string, unknown> | undefined;
     if (!d) return;
@@ -1099,7 +1099,7 @@ export const notifyShopOwnerOnFollow = onDocumentCreated(
 const REPORT_FLAG_THRESHOLD = 3;
 
 export const flagReelOnReports = onDocumentCreated(
-  "reel_reports/{reportId}",
+  { document: "reel_reports/{reportId}", region: "asia-south1" },
   async (event) => {
     const d = event.data?.data() as Record<string, unknown> | undefined;
     if (!d) return;
@@ -1148,7 +1148,7 @@ export const flagReelOnReports = onDocumentCreated(
 
 /** Manufacturer/admin assigned a product to a retailer → notify the retailer. */
 export const notifyRetailerOnAssignment = onDocumentCreated(
-  "products/{productId}",
+  { document: "products/{productId}", region: "asia-south1" },
   async (event) => {
     const d = event.data?.data() as Record<string, unknown> | undefined;
     if (!d) return;
@@ -1232,7 +1232,7 @@ export const notifyRetailerOnAssignment = onDocumentCreated(
 
 /** Manufacturer added a retailer to their network → notify the retailer. */
 export const notifyRetailerOnNetworkAdd = onDocumentCreated(
-  "manufacturerRetailers/{docId}",
+  { document: "manufacturerRetailers/{docId}", region: "asia-south1" },
   async (event) => {
     const d = event.data?.data() as Record<string, unknown> | undefined;
     if (!d) return;
@@ -1291,7 +1291,7 @@ export const notifyRetailerOnNetworkAdd = onDocumentCreated(
  * Fires on both admin-created and payment-created subscriptions.
  */
 export const notifyOnSubscriptionCreated = onDocumentCreated(
-  "subscriptions/{subscriptionId}",
+  { document: "subscriptions/{subscriptionId}", region: "asia-south1" },
   async (event) => {
     const d = event.data?.data() as Record<string, unknown> | undefined;
     if (!d) return;
@@ -1343,7 +1343,7 @@ export const notifyOnSubscriptionCreated = onDocumentCreated(
  * separate trigger).
  */
 export const notifyOnPromotionSeatAssigned = onDocumentCreated(
-  "promotions/{promotionId}/recipients/{recipientId}",
+  { document: "promotions/{promotionId}/recipients/{recipientId}", region: "asia-south1" },
   async (event) => {
     const ref = event.data?.ref;
     const d = event.data?.data() as Record<string, unknown> | undefined;

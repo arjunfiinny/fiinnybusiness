@@ -307,7 +307,7 @@ service cloud.firestore {
               (request.resource.data.ownerPhone is string && request.resource.data.ownerPhone == myPhone()) ||
               request.resource.data.ownerId == request.auth.uid
             )
-            && request.resource.data.isPromotional != true
+            && request.resource.data.get('isPromotional', false) != true
           )
         );
       allow update, delete: if isAdmin();
