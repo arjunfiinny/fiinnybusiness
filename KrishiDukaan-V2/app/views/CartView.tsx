@@ -378,7 +378,7 @@ function OfflineStoresModal({
           <div className="flex items-start justify-between gap-3">
             <div className="flex items-center gap-3 min-w-0">
               {product.image && (
-                <img src={product.image} alt={product.name} className="w-12 h-12 rounded-xl object-cover shrink-0 bg-surface-container-low" />
+                <img loading="lazy" decoding="async" src={product.image} alt={product.name} className="w-12 h-12 rounded-xl object-cover shrink-0 bg-surface-container-low" />
               )}
               <div className="min-w-0">
                 <h3 className="font-black text-on-surface text-base leading-tight truncate">{product.name}</h3>
@@ -633,7 +633,7 @@ function CartItemCard({
   return (
     <div className={`rounded-2xl border bg-white p-4 mb-2 ${isPending ? "border-amber-200" : "border-green-200"}`}>
       <div className="flex gap-4">
-        <img src={item.image} alt={item.name} className="w-20 h-20 rounded-xl object-cover border border-surface-container shrink-0" />
+        <img loading="lazy" decoding="async" src={item.image} alt={item.name} className="w-20 h-20 rounded-xl object-cover border border-surface-container shrink-0" />
         <div className="flex-1 min-w-0">
           <p className="font-bold text-on-surface truncate">{item.name}</p>
           <div className="flex items-center gap-1.5 flex-wrap mt-0.5">

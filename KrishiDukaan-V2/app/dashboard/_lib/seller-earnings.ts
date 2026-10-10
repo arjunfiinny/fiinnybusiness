@@ -71,6 +71,26 @@ export type OrderLike = {
     refundedAmount?: number;
     refundId?: string;
   };
+  /** Razorpay's view of this order's transfer (functions/src/payouts/payout-status.ts). */
+  payout?: OrderPayout;
+};
+
+/** One order's transfer as Razorpay last reported it. */
+export type OrderPayout = {
+  /** on_hold | scheduled | processing | settled | failed | reversed | not_routed */
+  state?: string;
+  via?: "route" | "balance";
+  transferId?: string | null;
+  /** Rupees with the seller after any reversal. */
+  amount?: number;
+  /** Release time of a held transfer, ms. */
+  onHoldUntil?: number | null;
+  settlementId?: string | null;
+  settledAt?: unknown;
+  /** Razorpay's settlement time (ms) and the bank reference (UTR). */
+  settlementAt?: number | null;
+  utr?: string | null;
+  processedAt?: number | null;
 };
 
 export type SellerEarningsRow = {
@@ -83,6 +103,10 @@ export type SellerEarningsRow = {
   state: PayoutState;
   deliveredAt: Date | null;
   releaseOn: Date | null;
+  /** Razorpay's transfer for this order, when there is one. */
+  payout: OrderPayout | null;
+  /** The order itself, for its payment timeline. */
+  order: OrderLike;
 };
 
 export type SellerEarningsSummary = {
@@ -94,6 +118,8 @@ export type SellerEarningsSummary = {
   awaitingDelivery: number;
   /** Already transferred out. */
   paidOut: number;
+  /** Of paidOut, what Razorpay has settled to the seller's bank. */
+  settled: number;
   /** Gateway fees deducted across all counted orders, for transparency. */
   gatewayFees: number;
   /** KrishiDukan commission deducted across all counted orders. */
@@ -176,6 +202,11 @@ export function payoutStateFor(order: OrderLike, now = new Date()): {
   if (order.payment?.transferId) {
     return { state: "transferred", deliveredAt: deliveredAtFor(order), releaseOn: null };
   }
+  // So is a Route transfer Razorpay has released or settled.
+  const payout = order.payout?.state;
+  if (payout === "processing" || payout === "settled") {
+    return { state: "transferred", deliveredAt: deliveredAtFor(order), releaseOn: null };
+  }
 
   const status = (order.status ?? "").toLowerCase();
   if (status === "cancelled" || status === "rejected" || status === "refunded") {
@@ -196,8 +227,10 @@ export function payoutStateFor(order: OrderLike, now = new Date()): {
     return { state: "due", deliveredAt: null, releaseOn: null };
   }
 
-  const releaseOn = new Date(deliveredAt.getTime());
-  releaseOn.setDate(releaseOn.getDate() + PAYOUT_HOLD_DAYS);
+  // A Route transfer set to release (24h after delivery) has its own time.
+  const scheduled = payout === "scheduled" ? Number(order.payout?.onHoldUntil ?? 0) : 0;
+  const releaseOn = scheduled > 0 ? new Date(scheduled) : new Date(deliveredAt.getTime());
+  if (!(scheduled > 0)) releaseOn.setDate(releaseOn.getDate() + PAYOUT_HOLD_DAYS);
 
   return {
     state: releaseOn.getTime() <= now.getTime() ? "due" : "on_hold",
@@ -215,6 +248,7 @@ export function computeSellerEarnings(
   let onHold = 0;
   let awaitingDelivery = 0;
   let paidOut = 0;
+  let settled = 0;
   let gatewayFees = 0;
   let platformFees = 0;
   let nextReleaseOn: Date | null = null;
@@ -229,7 +263,7 @@ export function computeSellerEarnings(
     const { gatewayFee, platformFee } = feesFor(order);
     const net = netFor(order);
 
-    rows.push({ orderId: order.id, gross, gatewayFee, platformFee, net, state, deliveredAt, releaseOn });
+    rows.push({ orderId: order.id, gross, gatewayFee, platformFee, net, state, deliveredAt, releaseOn, payout: order.payout ?? null, order });
     gatewayFees += gatewayFee;
     platformFees += platformFee;
 
@@ -240,7 +274,10 @@ export function computeSellerEarnings(
         nextReleaseOn = releaseOn;
       }
     } else if (state === "awaiting_delivery") awaitingDelivery += net;
-    else if (state === "transferred") paidOut += net;
+    else if (state === "transferred") {
+      paidOut += net;
+      if (order.payout?.state === "settled") settled += net;
+    }
   }
 
   // Newest activity first.
@@ -250,5 +287,62 @@ export function computeSellerEarnings(
     return bv - av;
   });
 
-  return { due, onHold, awaitingDelivery, paidOut, gatewayFees, platformFees, nextReleaseOn, rows };
+  return { due, onHold, awaitingDelivery, paidOut, settled, gatewayFees, platformFees, nextReleaseOn, rows };
+}
+
+/** One state's totals in sellerStats.earnings (functions/src/stats/seller-stats.ts). */
+type EarningsBucket = { net?: number; webNet?: number; platformFee?: number };
+
+/** sellerStats/{key}.earnings, summed over the seller's keys. */
+export type EarningsStats = {
+  orders?: number;
+  gatewayFees?: number;
+  platformFees?: number;
+  awaiting?: EarningsBucket;
+  delivered?: EarningsBucket;
+  transferred?: EarningsBucket;
+  /** Part of transferred: settled to the seller's bank. */
+  settled?: EarningsBucket;
+};
+
+/** A delivered, not yet transferred order from a sellerDailyStats hold entry.
+ *  releaseAtMs: the Route transfer's own release time, when it has one. */
+export type EarningsHold = { net: number; webNet: number; deliveredAtMs: number; releaseAtMs?: number };
+
+/**
+ * The summary computeSellerEarnings gives, from the server-kept totals
+ * instead of every order: lifetime totals per state, and the holds of the
+ * last few days (anything delivered earlier is past its hold and due). Rows
+ * are not included; take them from the newest orders.
+ */
+export function summaryFromStats(
+  stats: EarningsStats,
+  holds: EarningsHold[],
+  now = new Date(),
+): Omit<SellerEarningsSummary, "rows"> & { counted: number } {
+  const webNet = (b?: EarningsBucket) => Number(b?.webNet ?? 0) || 0;
+  let onHold = 0;
+  let nextReleaseOn: Date | null = null;
+  for (const h of holds) {
+    if (!(h.webNet > 0) || !(h.deliveredAtMs > 0)) continue;
+    const releaseOn = new Date(
+      (h.releaseAtMs ?? 0) > 0 ? h.releaseAtMs! : h.deliveredAtMs + PAYOUT_HOLD_DAYS * 24 * 60 * 60 * 1000,
+    );
+    if (releaseOn > now) {
+      onHold += h.webNet;
+      if (!nextReleaseOn || releaseOn < nextReleaseOn) nextReleaseOn = releaseOn;
+    }
+  }
+  const round = (n: number) => Math.round(n * 100) / 100;
+  return {
+    due: round(Math.max(0, webNet(stats.delivered) - onHold)),
+    onHold: round(onHold),
+    awaitingDelivery: round(webNet(stats.awaiting)),
+    paidOut: round(webNet(stats.transferred)),
+    settled: round(Math.min(webNet(stats.settled), webNet(stats.transferred))),
+    gatewayFees: round(Number(stats.gatewayFees ?? 0) || 0),
+    platformFees: round(Number(stats.platformFees ?? 0) || 0),
+    nextReleaseOn,
+    counted: Number(stats.orders ?? 0) || 0,
+  };
 }

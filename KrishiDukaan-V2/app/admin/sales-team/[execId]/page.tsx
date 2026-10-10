@@ -25,7 +25,8 @@ import { ArrowLeft, Contact, Eye, MapPin, Store, CalendarDays, Route, Clock } fr
 import { fetchAllSessions, type DaySession } from "../../../sales/day-session-service";
 import { fetchAllVisitsForExec, fetchVisitsForDate, type DealerVisit } from "../../../sales/dealers/dealer-visit-service";
 import { fetchDealersByExec, type Dealer } from "../../../sales/dealers/dealers-service";
-import { getUsers } from "../../_lib/admin-data";
+import { doc, getDoc, getDocs, collection, query, where, limit } from "firebase/firestore";
+import { db } from "../../../firebase";
 import DaySessionCard from "../../../../components/sales/DaySessionCard";
 import SessionSummary from "../../../../components/sales/SessionSummary";
 import VisitTimeline from "../../../../components/sales/VisitTimeline";
@@ -44,6 +45,14 @@ const RouteMap = dynamic(() => import("../../../../components/sales/RouteMap"), 
 type PageState = "loading" | "ready" | "error";
 
 /** Groups all visits by their IST date string (YYYY-MM-DD) — same logic as /sales/day-sessions. */
+/** The exec's own user doc: users/{uid} (email accounts), else the doc whose uid matches. */
+async function fetchExecUser(execId: string): Promise<Record<string, any> | null> {
+  const direct = await getDoc(doc(db, "users", execId));
+  if (direct.exists()) return direct.data();
+  const byUid = await getDocs(query(collection(db, "users"), where("uid", "==", execId), limit(1)));
+  return byUid.empty ? null : byUid.docs[0].data();
+}
+
 function buildVisitCountByDate(visits: DealerVisit[]): Map<string, number> {
   const map = new Map<string, number>();
   for (const v of visits) {
@@ -109,14 +118,13 @@ export default function AdminSalesExecActivityPage() {
       setPageState("loading");
       setLoadError("");
       try {
-        const [users, allSessions, allVisits, execDealers] = await Promise.all([
-          getUsers().catch(() => [] as any[]),
+        const [exec, allSessions, allVisits, execDealers] = await Promise.all([
+          fetchExecUser(execId).catch(() => null),
           fetchAllSessions(execId),
           fetchAllVisitsForExec(execId),
           fetchDealersByExec(execId),
         ]);
         if (cancelled) return;
-        const exec = users.find((u: any) => String(u.uid || u.id) === execId);
         setExecName(String(exec?.name ?? "").trim());
         setExecEmail(String(exec?.email ?? "").trim());
         setSessions(allSessions);

@@ -150,6 +150,12 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={`${jakarta.variable} font-sans`}>
+        {/* Must stay inside <body>: next/script renders a beforeInteractive
+            script as an inline <script> where it is placed, and a <script>
+            directly under <html> fails hydration, so React discards the server
+            HTML and re-renders the whole page in the browser. Next.js still
+            runs it before hydration from here. */}
+        <OpenAIPixel />
         <OpenAIPixel />
         <script
           type="application/ld+json"

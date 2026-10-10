@@ -1,18 +1,26 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  collection, getCountFromServer, getDocs, orderBy, query, Timestamp, where,
+  type DocumentData, type QueryConstraint,
+} from "firebase/firestore";
 import {
   CreditCard, Search, RefreshCw, ShieldOff, Plus, X, Check,
   ChevronDown, CalendarPlus, AlertTriangle, Pencil, Package, Archive,
   UserPlus, Trash2, Ban,
 } from "lucide-react";
 import {
-  auth,
+  auth, db,
   adminRevokeSubscription, adminExtendSubscription, adminSetSubscriptionExpiry, adminManualActivate,
-  adminUpdateSubscriptionSeats, fetchFailedPayments
+  adminUpdateSubscriptionSeats,
 } from "../../firebase";
 import { SearchableDropdown } from "../_components/searchable-dropdown";
-import { getSubscriptions, getUsers, getPlans, invalidateUsers, invalidateSubscriptions } from "../_lib/admin-data";
+import { getPlans, invalidateUsers, invalidateSubscriptions } from "../_lib/admin-data";
+import { fetchSellers, searchUsers, type AdminUser } from "../_lib/admin-queries";
+import { usePagedQuery } from "../_lib/use-paged-query";
+import { LoadMore } from "../_components/load-more";
+import { getDocsByIds, getDocsWhereIn } from "../../lib/firestore-by-ids";
 import { PLAN_FEATURE_CATALOG, featureLabel } from "../_lib/plan-features";
 import { FinanceOverview } from "../_components/analytics/finance-overview";
 import { subscriptionPlanLabel } from "../../lib/pricing";
@@ -184,14 +192,28 @@ function DateFilterControl({ value, onChange, customFrom, customTo, onCustomFrom
   );
 }
 
+/** Phone forms a subscription's ownerPhone may be stored in. */
+function phoneForms(raw: string): string[] {
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length < 10 || digits.length > 12) return [];
+  const ten = digits.slice(-10);
+  return [`+91${ten}`, ten, `91${ten}`];
+}
+
 export default function AdminSubscriptionsPage() {
-  const [subs, setSubs] = useState<any[]>([]);
+  // Only the users this page shows: owners of loaded subscriptions and failed
+  // payments, search results, and sellers once the assign wizard opens.
   const [users, setUsers] = useState<any[]>([]);
+  const mergeUsers = (more: AdminUser[]) => {
+    if (!more.length) return;
+    setUsers((prev) => {
+      const byId = new Map(prev.map((u) => [u.id, u]));
+      for (const u of more) byId.set(u.id, u);
+      return Array.from(byId.values());
+    });
+  };
   const [plans, setPlans] = useState<any[]>([]);
-  const [failedPayments, setFailedPayments] = useState<any[]>([]);
   const [activeTab, setActiveTab] = useState<'subscriptions' | 'plans' | 'failedPayments' | 'finance'>('subscriptions');
-  const [loading, setLoading] = useState(true);
-  const [failedPaymentsError, setFailedPaymentsError] = useState<string | null>(null);
   const [failedPaymentsSearch, setFailedPaymentsSearch] = useState("");
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -268,32 +290,137 @@ export default function AdminSubscriptionsPage() {
     };
   }, [anyModalOpen]);
 
+  // Subscriptions: status and dates run in the query, 50 at a time.
+  const subDateRange = dateRangeFor(subDateFilter, subCustomFrom, subCustomTo);
+  const subsBase = useMemo(() => {
+    const c: QueryConstraint[] = [];
+    if (statusFilter !== "all") c.push(where("subscriptionStatus", "==", statusFilter));
+    const dated = subDateRange.from !== null || subDateRange.to !== null;
+    if (subDateRange.from !== null) c.push(where("startDate", ">=", Timestamp.fromMillis(subDateRange.from)));
+    if (subDateRange.to !== null) c.push(where("startDate", "<=", Timestamp.fromMillis(subDateRange.to)));
+    // A date filter needs startDate order; the expiry sort then applies to the loaded rows.
+    c.push(sortMode === "expiry" && !dated ? orderBy("expiryDate", "asc") : orderBy("startDate", "desc"));
+    return query(collection(db, "subscriptions"), ...c);
+  }, [statusFilter, subDateRange.from, subDateRange.to, sortMode]);
+  const subsPaged = usePagedQuery(subsBase, (d) => ({ id: d.id, ...d.data() }));
+  const loading = subsPaged.loading;
+  const [counts, setCounts] = useState({ all: 0, active: 0, unpaid: 0, revoked: 0 });
+  // Subscriptions found by search outside the loaded pages (phone, payment id, owner name).
+  const [searchedSubs, setSearchedSubs] = useState<any[]>([]);
+
+  // Failed subscription payments, newest first, 50 at a time. Product-order
+  // failures belong in Admin -> Payments: every row here offers "Activate
+  // Subscription". Rows predating the `kind` field stay visible.
+  const fpBase = useMemo(() => query(collection(db, "failedPayments"), orderBy("timestamp", "desc")), []);
+  const fpPaged = usePagedQuery(fpBase, (d) => ({ id: d.id, ...d.data() }) as any, { keep: (r: any) => r.kind !== "cart" });
+  const failedPayments = fpPaged.rows;
+  const failedPaymentsError = fpPaged.error
+    ? (fpPaged.error || 'Could not load failed payments. Check Firestore rules for the failedPayments collection.')
+    : null;
+
+  const loadCounts = async () => {
+    const col = collection(db, "subscriptions");
+    const count = async (status?: string) =>
+      (await getCountFromServer(status ? query(col, where("subscriptionStatus", "==", status)) : col)).data().count;
+    try {
+      const [all, active, unpaid, revoked] = await Promise.all([count(), count("active"), count("unpaid"), count("revoked")]);
+      setCounts({ all, active, unpaid, revoked });
+    } catch {
+      // counts are informational
+    }
+  };
+
   /**
-   * `force` bypasses the shared admin cache — used by the Refresh buttons and after
-   * every write on this tab. A plain mount reuses the cached users/subscriptions
-   * snapshot the other admin tabs may already have paid for.
+   * Reloads the visible pages, counts and plans. `force` also refreshes the
+   * cached plans and drops cached users (used after every write on this tab).
    */
   const load = async (force = false) => {
     if (force) { invalidateUsers(); invalidateSubscriptions(); }
-    setLoading(true);
-    setFailedPaymentsError(null);
-    try {
-      const [subsData, usersData, plansData] = await Promise.all([
-        getSubscriptions({ force }), getUsers({ force }), getPlans({ force }),
-      ]);
-      setSubs(subsData);
-      setUsers(usersData);
-      setPlans(plansData);
-    } finally {
-      setLoading(false);
-    }
-    // Load failed payments separately so a rules error doesn't block the whole page
-    fetchFailedPayments()
-      .then(setFailedPayments)
-      .catch(err => setFailedPaymentsError(err?.message || 'Could not load failed payments. Check Firestore rules for the failedPayments collection.'));
+    await Promise.all([
+      subsPaged.reload(),
+      fpPaged.reload(),
+      loadCounts(),
+      getPlans({ force }).then(setPlans).catch(() => {}),
+    ]);
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    void loadCounts();
+    getPlans().then(setPlans).catch(() => {});
+  }, []);
+
+  // Owners of the loaded subscriptions and failed payments: their user docs by id.
+  const ownerKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const sub of [...subsPaged.rows, ...searchedSubs]) {
+      for (const k of [sub.ownerPhone, sub.ownerId]) if (k) keys.add(String(k));
+    }
+    for (const fp of failedPayments) {
+      for (const k of [fp.userPhone, fp.userId, fp.userUid]) if (k) keys.add(String(k));
+    }
+    return Array.from(keys).sort();
+  }, [subsPaged.rows, searchedSubs, failedPayments]);
+  useEffect(() => {
+    const known = new Set(users.flatMap((u) => [u.id, u.uid, u.phone].filter(Boolean)));
+    const missing = ownerKeys.filter((k) => !known.has(k));
+    if (!missing.length) return;
+    Promise.all([
+      getDocsByIds(db, "users", missing),
+      getDocsWhereIn(db, "users", "uid", missing),
+    ]).then(([byId, byUid]) => {
+      mergeUsers([
+        ...Array.from(byId, ([id, data]) => ({ id, ...data })),
+        ...byUid.map((d) => ({ id: d.id, ...d.data() })),
+      ]);
+    }).catch(() => {});
+  }, [ownerKeys]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Search also finds subscriptions that aren't loaded: by owner phone,
+  // Razorpay payment id, or the owner's name/email (via searchUsers).
+  useEffect(() => {
+    setSearchedSubs([]);
+    const q = search.trim();
+    if (q.length < 2) return;
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      const subsCol = collection(db, "subscriptions");
+      const found: Array<{ id: string } & DocumentData> = [];
+      const add = (docs: { id: string; data: () => DocumentData }[]) => {
+        for (const d of docs) found.push({ id: d.id, ...d.data() });
+      };
+      try {
+        const people = await searchUsers(q);
+        mergeUsers(people);
+        const keys = new Set<string>(phoneForms(q));
+        for (const u of people) for (const k of [u.phone, u.id, u.uid]) if (k) keys.add(String(k));
+        const [byPhone, byOwnerId, byPayment] = await Promise.all([
+          getDocsWhereIn(db, "subscriptions", "ownerPhone", keys),
+          getDocsWhereIn(db, "subscriptions", "ownerId", keys),
+          q.startsWith("pay_") ? getDocs(query(subsCol, where("razorpayPaymentId", "==", q))).then((s) => s.docs) : Promise.resolve([]),
+        ]);
+        add([...byPhone, ...byOwnerId, ...byPayment]);
+      } catch {
+        // search is best effort
+      }
+      if (!cancelled) setSearchedSubs(found);
+    }, 350);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [search]);
+
+  // Manual activation picker: users found by its search box.
+  useEffect(() => {
+    const q = userSearch.trim();
+    if (q.length < 2) return;
+    let cancelled = false;
+    const t = setTimeout(() => { searchUsers(q).then((us) => { if (!cancelled) mergeUsers(us); }); }, 300);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [userSearch]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Assign wizard: its customer picker lists sellers.
+  useEffect(() => {
+    if (!showAssign) return;
+    fetchSellers().then(mergeUsers).catch(() => {});
+  }, [showAssign]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const getUserName = (sub: any) => {
     const phone = sub.ownerPhone || sub.ownerId;
@@ -330,8 +457,9 @@ export default function AdminSubscriptionsPage() {
       .some((v) => String(v).toLowerCase().includes(q));
   });
 
-  const subDateRange = dateRangeFor(subDateFilter, subCustomFrom, subCustomTo);
-  const filtered = subs
+  const subsById = new Map<string, any>();
+  for (const sub of [...searchedSubs, ...subsPaged.rows]) subsById.set(sub.id, sub);
+  const filtered = Array.from(subsById.values())
     .filter(s => {
       const q = search.toLowerCase();
       const phone = s.ownerPhone || s.ownerId || "";
@@ -358,12 +486,6 @@ export default function AdminSubscriptionsPage() {
       return bMs - aMs;
     });
 
-  const counts = {
-    all: subs.length,
-    active: subs.filter(s => s.subscriptionStatus === "active").length,
-    unpaid: subs.filter(s => s.subscriptionStatus === "unpaid").length,
-    revoked: subs.filter(s => s.subscriptionStatus === "revoked").length,
-  };
 
   const fmt = (ts: any): string => {
     if (!ts) return "—";
@@ -426,7 +548,8 @@ export default function AdminSubscriptionsPage() {
 
   const filteredUsers = users.filter(u =>
     u.role !== "admin" &&
-    (!userSearch || [u.name, u.email, u.phone, u.id].join(" ").toLowerCase().includes(userSearch.toLowerCase()))
+    userSearch.trim().length >= 2 &&
+    [u.name, u.email, u.phone, u.id, u.shopName, u.businessName].join(" ").toLowerCase().includes(userSearch.trim().toLowerCase())
   );
 
   const handleSaveSeats = async (sub: any) => {
@@ -676,7 +799,7 @@ export default function AdminSubscriptionsPage() {
           Failed Payments
           {failedPayments.length > 0 && (
             <span className="inline-flex items-center justify-center rounded-full bg-red-100 text-red-600 text-[10px] font-black px-1.5 py-0.5 min-w-[1.25rem]">
-              {failedPayments.length}
+              {failedPayments.length}{fpPaged.hasMore ? "+" : ""}
             </span>
           )}
         </button>
@@ -780,7 +903,7 @@ export default function AdminSubscriptionsPage() {
         {(["all", "active", "unpaid", "revoked"] as const).map(s => (
           <button key={s} onClick={() => setStatusFilter(s)}
             className={`px-3 sm:px-4 py-1.5 rounded-full text-[11px] sm:text-xs font-bold transition-all whitespace-nowrap shrink-0 ${statusFilter === s ? "bg-primary text-white" : "bg-surface-container text-on-surface-variant hover:bg-surface-container-high"}`}>
-            {s.charAt(0).toUpperCase() + s.slice(1)} ({counts[s as keyof typeof counts] ?? subs.length})
+            {s.charAt(0).toUpperCase() + s.slice(1)} ({counts[s as keyof typeof counts] ?? counts.all})
           </button>
         ))}
       </div>
@@ -1037,6 +1160,7 @@ export default function AdminSubscriptionsPage() {
               </div>
             );
           })}
+          <LoadMore hasMore={subsPaged.hasMore} loading={subsPaged.loadingMore} onClick={() => void subsPaged.loadMore()} label="Load more subscriptions" />
         </div>
       )}
 
@@ -1319,6 +1443,7 @@ export default function AdminSubscriptionsPage() {
               })}
             </div>
           )}
+          <LoadMore hasMore={fpPaged.hasMore} loading={fpPaged.loadingMore} onClick={() => void fpPaged.loadMore()} label="Load older failed payments" />
         </div>
       )}
     </div>

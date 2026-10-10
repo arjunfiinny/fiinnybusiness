@@ -275,21 +275,25 @@ export async function getProductsByCategory(
   }
 }
 
-/** Active canonical products for the sitemap. Returns [] on failure. */
+/**
+ * Active canonical products for the sitemap. Returns [] on failure.
+ *
+ * Read from marketplaceCards rather than every products doc: each card lists
+ * the member docs that pass isListable() (functions/src/marketplace/cards.ts
+ * mirrors it), so this reads one doc per product name instead of ~32.
+ */
 export async function getAllListableProductsForSitemap(
   max = 5000,
 ): Promise<{ id: string; name: string; updatedAt: unknown }[]> {
   try {
     const db = getClientDb();
-    const snap = await getDocs(query(collection(db, "products"), limit(max)));
-    return snap.docs
-      .map((d) => ({ id: d.id, data: d.data() as Record<string, unknown> }))
-      .filter(({ data }) => isListable(data))
-      .map(({ id, data }) => ({
-        id,
-        name: str(data.name),
-        updatedAt: data.updatedAt ?? data.createdAt ?? null,
-      }));
+    const snap = await getDocs(collection(db, "marketplaceCards"));
+    const out: { id: string; name: string; updatedAt: unknown }[] = [];
+    for (const card of snap.docs) {
+      const listable = (card.data().listable ?? []) as { id: string; name: string; updatedAtMs?: number }[];
+      for (const p of listable) out.push({ id: p.id, name: p.name, updatedAt: p.updatedAtMs || null });
+    }
+    return out.slice(0, max);
   } catch (err) {
     console.warn("[seo/products-server] sitemap products failed:", err);
     return [];

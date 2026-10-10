@@ -13,6 +13,7 @@ import {
   writeBatch,
 } from "firebase/firestore";
 import { db } from "../../firebase";
+import { CARDS_COLLECTION } from "../../lib/marketplace-cards";
 import type { RetailerSeatListing } from "../_types/subscriptions";
 import {
   addSeatListingToBatch,
@@ -352,74 +353,77 @@ export async function toggleProductActive(productId: string, isActive: boolean):
   await updateDoc(doc(db, "products", productId), { isActive, updatedAt: serverTimestamp() });
 }
 
-/**
- * Search all products in the catalogue by name (prefix/contains match, client-side).
- * Returns up to 10 results sorted by name.
- */
-export async function searchProductsByName(term: string): Promise<Array<{
+export type ProductSearchResult = {
   id: string; name: string; category: string; unit: string; price: number;
   description: string; image: string; images: string[]; variants: { unit: string; price: number }[];
+  categoryInfo?: Record<string, string | string[]>;
   nitrogen?: string; phosphorus?: string; potassium?: string; applicationDesc?: string; dosage?: string; bestForCrops?: string[];
-}>> {
-  if (!term.trim()) return [];
-  const snap = await getDocs(query(collection(db, "products"), orderBy("name")));
-  const lower = term.toLowerCase();
-  const rankProduct = (raw: Record<string, unknown>) => {
-    const source = String(raw.source ?? "");
-    if (source === "manufacturer_inventory") return 5;
-    if (source === "retailer_inventory") return 4;
-    if (!source) return 3;
-    if (source === "retailer_inventory_copy") return 2;
-    if (source === "manufacturer_assigned") return 1;
-    return 0;
+};
+
+/** The fields the add-product form autofills, from a product doc or a marketplace card. */
+function toSearchResult(id: string, r: Record<string, unknown>): ProductSearchResult {
+  return {
+    id,
+    name: String(r.name ?? ""),
+    category: String(r.category ?? ""),
+    unit: String(r.unit ?? ""),
+    price: Number(r.price ?? 0),
+    description: String(r.description ?? ""),
+    image: String(r.image ?? ""),
+    images: Array.isArray(r.images) ? r.images.filter((v): v is string => typeof v === "string") : [],
+    variants: Array.isArray(r.variants) ? r.variants : [],
+    categoryInfo: (r.categoryInfo && typeof r.categoryInfo === "object" && !Array.isArray(r.categoryInfo))
+      ? r.categoryInfo as Record<string, string | string[]>
+      : undefined,
+    nitrogen: r.nitrogen ? String(r.nitrogen) : "",
+    phosphorus: r.phosphorus ? String(r.phosphorus) : "",
+    potassium: r.potassium ? String(r.potassium) : "",
+    applicationDesc: r.applicationDesc ? String(r.applicationDesc) : "",
+    dosage: r.dosage ? String(r.dosage) : "",
+    bestForCrops: Array.isArray(r.bestForCrops) ? r.bestForCrops : [],
   };
+}
 
-  const products = snap.docs
-    .map((d) => {
-      const r = d.data() as Record<string, unknown>;
-      return {
-        id: d.id,
-        name: String(r.name ?? ""),
-        category: String(r.category ?? ""),
-        unit: String(r.unit ?? ""),
-        price: Number(r.price ?? 0),
-        description: String(r.description ?? ""),
-        image: String(r.image ?? ""),
-        images: Array.isArray(r.images) ? r.images.filter((v): v is string => typeof v === "string") : [],
-        variants: Array.isArray(r.variants) ? r.variants : [],
-        source: String(r.source ?? ""),
-        manufacturerProductId: String(r.manufacturerProductId ?? ""),
-        originalProductId: String(r.originalProductId ?? ""),
-        score: rankProduct(r),
-        categoryInfo: (r.categoryInfo && typeof r.categoryInfo === "object" && !Array.isArray(r.categoryInfo))
-          ? r.categoryInfo as Record<string, string | string[]>
-          : undefined,
-        nitrogen: r.nitrogen ? String(r.nitrogen) : "",
-        phosphorus: r.phosphorus ? String(r.phosphorus) : "",
-        potassium: r.potassium ? String(r.potassium) : "",
-        applicationDesc: r.applicationDesc ? String(r.applicationDesc) : "",
-        dosage: r.dosage ? String(r.dosage) : "",
-        bestForCrops: Array.isArray(r.bestForCrops) ? r.bestForCrops : [],
-      };
-    })
-    .filter((p) => p.name.toLowerCase().includes(lower))
-    .filter((p) => p.source !== "manufacturer_assigned");
-
-  const deduped = new Map<string, typeof products[number]>();
-  for (const product of products) {
-    const key = (
-      product.originalProductId ||
-      product.manufacturerProductId ||
-      `${product.name.trim().toLowerCase()}|${product.category.trim().toLowerCase()}|${product.unit.trim().toLowerCase()}`
-    );
-    const existing = deduped.get(key);
-    if (!existing || product.score > existing.score) {
-      deduped.set(key, product);
-    }
-  }
-
-  return Array.from(deduped.values())
+/**
+ * Existing products whose name CONTAINS `term`, for the add-product form's
+ * suggestions: at most 10, sorted by name.
+ *
+ * Matching is a substring scan (name.includes(term)), the original production
+ * behavior. It reads the merged marketplace cards (one doc per product name,
+ * built by Cloud Functions) instead of the whole `products` collection — far
+ * fewer docs, keeping the "don't read every product" improvement — and a
+ * card's own `id` field is the product its merge chose as canonical (the
+ * manufacturer_inventory product when one exists), so the chosen id (the new
+ * copy's originalProductId) follows the same source ranking as before.
+ *
+ * NOTE: this intentionally does NOT use findCardsByName's indexed prefix/token
+ * query. That query only surfaced names STARTING WITH the term (plus whole
+ * single-token matches), so a search like "urea" missed "IFFCO Urea 50kg" and
+ * only a couple of products appeared — the regression this restores.
+ *
+ * Cards merge variants across sellers; call fetchProductForAutofill with the
+ * chosen id to autofill from that product's own doc.
+ */
+export async function searchProductsByName(term: string): Promise<ProductSearchResult[]> {
+  const lower = term.trim().toLowerCase();
+  if (!lower) return [];
+  const snap = await getDocs(query(collection(db, CARDS_COLLECTION), orderBy("nameKey")));
+  return snap.docs
+    // nameKey is the lowercased product name — substring match, as production did.
+    .filter((d) => String(d.get("nameKey") ?? "").includes(lower))
+    // The card's `id` field is the canonical product's id; the card doc's
+    // own id is a hash of the name.
+    .map((d) => toSearchResult(String((d.data() as Record<string, unknown>).id ?? ""), d.data() as Record<string, unknown>))
+    .filter((p) => p.id)
     .sort((a, b) => a.name.localeCompare(b.name))
-    .slice(0, 10)
-    .map(({ source: _source, manufacturerProductId: _manufacturerProductId, originalProductId: _originalProductId, score: _score, ...product }) => product);
+    .slice(0, 10);
+}
+
+/**
+ * The chosen suggestion's own product doc (1 read, once per pick), for the
+ * exact variants and fields to autofill. Null if it no longer exists.
+ */
+export async function fetchProductForAutofill(productId: string): Promise<ProductSearchResult | null> {
+  const snap = await getDoc(doc(db, "products", productId));
+  return snap.exists() ? toSearchResult(snap.id, snap.data()) : null;
 }

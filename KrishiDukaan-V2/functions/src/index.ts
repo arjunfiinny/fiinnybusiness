@@ -12,6 +12,7 @@ export { transcodeReel } from "./reels/media/transcodeReel";
 export { backfillReelTranscodes } from "./reels/media/backfillReelTranscodes";
 export { backfillReelThumbnails } from "./reels/media/backfillReelThumbnails";
 export { releaseTransferOnDelivery } from "./route-release";
+export { syncPayoutStatus, trackPayoutOnOrderWrite, syncPayoutsNow } from "./payouts/payout-status";
 export {
   notifyOwnerOnReelRepost,
   flushEngagementNotifications,
@@ -22,6 +23,21 @@ export {
   notifyLowStock,
 } from "./notifications/inventory";
 export { sendStoreAnalyticsDigest } from "./notifications/digest";
+export {
+  syncMarketplaceCardOnProductWrite,
+  syncMarketplaceCardOnReviewWrite,
+  recomputeDueMarketplaceCards,
+  reconcileMarketplaceCards,
+} from "./marketplace/cards";
+export { syncMaxDiscountOnProductWrite } from "./marketplace/max-discount";
+export {
+  markStoreDirectoryDirtyOnRetailer,
+  markStoreDirectoryDirtyOnManufacturer,
+  markStoreDirectoryDirtyOnProfile,
+  markStoreDirectoryDirtyOnStore,
+  markStoreDirectoryDirtyOnStoreReview,
+  rebuildStoreDirectoryIfDirty,
+} from "./stores/directory";
 export { raiseAbandonedCheckoutEnquiries } from "./notifications/enquiries";
 export { notifySellerOfOrderOffer, expireOrderReassignments } from "./notifications/reassignment";
 export { generateInvoiceForNewOrder, sweepMissingInvoices } from "./orders/invoices";
@@ -41,6 +57,15 @@ export {
   redeemErpHandoffCode,
 } from "./erp-bridge";
 export { onActiveUserPresence } from "./analytics/activity";
+export {
+  platformStatsOnOrderWrite,
+  platformStatsOnSubscriptionWrite,
+  platformStatsOnPaymentAttemptWrite,
+  platformStatsOnUserWrite,
+  platformStatsOnProductCreate,
+  platformStatsOnProductDelete,
+} from "./stats/platform-daily";
+export { sellerStatsOnOrderWrite } from "./stats/seller-stats";
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -1272,6 +1297,13 @@ export const notifyOnSubscriptionCreated = onDocumentCreated(
     // Only welcome on active subscriptions; skip free/trial/expired docs
     if (String(d.subscriptionStatus ?? "") !== "active") return;
 
+    // Promotional grants (admin Promotions campaigns) reuse the subscriptions
+    // collection but are NOT purchases — they must not trigger the purchase-
+    // style Marathi subscription_welcome message. They carry their own
+    // free_seats_assigned notification instead. Real purchases and manual
+    // admin activations are never isPromotional, so they still get welcomed.
+    if (d.isPromotional === true) return;
+
     const ownerPhone = firstPhone(d.ownerPhone, d.ownerId);
     if (!ownerPhone) return;
 
@@ -1291,6 +1323,96 @@ export const notifyOnSubscriptionCreated = onDocumentCreated(
         },
       }
     );
+  }
+);
+
+/**
+ * Promotional seats assigned → send the Hindi free_seats_assigned WhatsApp to
+ * the recipient. Fires on each promotions/{promotionId}/recipients/{recipientId}
+ * document, which the admin Promotions API writes only after a seat grant has
+ * committed — so the message is triggered automatically after a SUCCESSFUL
+ * assignment, with no dependency on any frontend env flag.
+ *
+ * This is the SOLE trigger for the promotional notification (the Next.js route
+ * no longer queues it), so there is no risk of double-sending with the app.
+ * Cloud Functions deliver at-least-once, so a redelivered create event is
+ * guarded by a transactional `waQueued` flag on the recipient doc. Does not
+ * touch the purchase / manual-activation welcome flow (separate template,
+ * separate trigger).
+ */
+export const notifyOnPromotionSeatAssigned = onDocumentCreated(
+  "promotions/{promotionId}/recipients/{recipientId}",
+  async (event) => {
+    const ref = event.data?.ref;
+    const d = event.data?.data() as Record<string, unknown> | undefined;
+    if (!ref || !d) return;
+
+    const phone = String(d.userPhone ?? "").trim();
+    if (!phone) {
+      logger.warn("[notifyOnPromotionSeatAssigned] skipping — no userPhone", {
+        recipientId: event.params.recipientId,
+      });
+      return;
+    }
+
+    const seats = Number(d.seatsGranted) || 0;
+    if (seats <= 0) {
+      logger.warn("[notifyOnPromotionSeatAssigned] skipping — non-positive seats", { phone, seats });
+      return;
+    }
+
+    const businessName = String(d.businessName ?? "") || phone;
+
+    // Duplicate guard: claim the doc exactly once. Writing waQueued is an
+    // UPDATE, so it does not re-trigger this onCreate handler; a redelivered
+    // create event finds waQueued already true and bails.
+    const claimed = await admin.firestore().runTransaction(async (txn) => {
+      const snap = await txn.get(ref);
+      if (!snap.exists) return false;
+      if (snap.get("waQueued") === true) return false;
+      txn.update(ref, { waQueued: true });
+      return true;
+    });
+    if (!claimed) {
+      logger.info("[notifyOnPromotionSeatAssigned] already queued — skipping", {
+        promotionId: event.params.promotionId,
+        phone,
+      });
+      return;
+    }
+
+    const docId = await queueWaNotification(
+      phone,
+      `आपको ${seats} मुफ़्त सीट${seats === 1 ? "" : "ें"} प्रदान की गई हैं।`,
+      {
+        template: "free_seats_assigned",
+        type: "subscription",
+        payload: { businessName, seats },
+        source: {
+          event: "promotion_seats_assigned",
+          entityType: "promotion",
+          entityId: `${event.params.promotionId}:${phone}`,
+        },
+      }
+    );
+
+    if (!docId) {
+      // Queue write failed (queueWaNotification already logged it). Release the
+      // claim so the message can be retried instead of being lost.
+      await ref.update({ waQueued: false }).catch(() => {});
+      logger.error("[notifyOnPromotionSeatAssigned] failed to queue WhatsApp — released claim", {
+        promotionId: event.params.promotionId,
+        phone,
+      });
+      return;
+    }
+
+    logger.info("[notifyOnPromotionSeatAssigned] queued free_seats_assigned", {
+      promotionId: event.params.promotionId,
+      phone,
+      seats,
+      waDocId: docId,
+    });
   }
 );
 

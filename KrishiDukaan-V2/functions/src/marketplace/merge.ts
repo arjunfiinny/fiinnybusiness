@@ -1,24 +1,22 @@
 /**
- * Shared marketplace product mapping + dedup/merge logic.
+ * Marketplace product mapping + dedup/merge logic.
  *
- * This is the SINGLE source of truth for how raw `products` docs become the
- * merged marketplace cards farmers see. Both paths use it so their output is
- * identical by construction:
- *   - app/firebase.ts   fetchMarketplaceProducts()  — client, full-collection read
- *   - app/api/marketplace/products/route.ts          — server, cursor-paginated
+ * This is the source of truth for how raw `products` docs become the merged
+ * marketplace cards farmers see: marketplaceCards/{id} is built from it (see
+ * cards.ts), and the web and app read those cards instead of merging raw docs
+ * themselves. Copied verbatim from the web's former app/lib/marketplace-merge.ts
+ * so card output matches what the storefront rendered before.
  *
  * The merge dedups by product NAME (case-insensitive): manufacturer, retailer
  * and admin copies of the same name collapse into one canonical card, with each
  * copy's price/availability/discount/variants/reviews folded in. Because the
- * dedup key is the name, the paginated route can feed this function one page of
- * COMPLETE name-groups at a time and get the same result as merging the whole
- * collection.
+ * dedup key is the name, merging one complete name-group at a time gives the
+ * same result as merging the whole collection.
  *
- * IMPORTANT: keep this pure (no Firestore SDK imports). It receives already
- * read+mapped data so it runs identically on the client and in Node.
+ * IMPORTANT: keep this pure (no Firestore SDK imports).
  */
-import type { MarketplaceProduct } from "../../types/product";
-import { getActiveDiscountPct } from "../utils/discount";
+import type { MarketplaceProduct } from "./product-types";
+import { getActiveDiscountPct } from "./discount";
 
 type RatingAgg = Map<string, { sum: number; count: number }>;
 

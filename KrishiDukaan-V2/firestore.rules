@@ -270,12 +270,38 @@ service cloud.firestore {
         resource.data.ownerId == request.auth.uid ||
         isAdmin() || teamHas('users')
       );
-      allow create: if isAuthed() && (
-        (request.resource.data.ownerPhone is string && request.resource.data.ownerPhone == myPhone()) ||
-        request.resource.data.ownerId == request.auth.uid ||
-        isAdmin()
-      ) && request.resource.data.ownerType in ['retailer', 'manufacturer'];
+      // A client may only create its OWN non-promotional subscription.
+      // Promotional grants (isPromotional:true) are issued exclusively by the
+      // admin Promotions API (Admin SDK, which bypasses these rules), so a
+      // seller cannot forge one to self-grant promotional seats.
+      allow create: if isAuthed()
+        && request.resource.data.ownerType in ['retailer', 'manufacturer']
+        && (
+          isAdmin() ||
+          (
+            (
+              (request.resource.data.ownerPhone is string && request.resource.data.ownerPhone == myPhone()) ||
+              request.resource.data.ownerId == request.auth.uid
+            )
+            && request.resource.data.isPromotional != true
+          )
+        );
       allow update, delete: if isAdmin();
+    }
+
+    // ─── promotions ────────────────────────────────────────────────────────────
+    // Admin-granted promotional subscription campaigns + their per-recipient
+    // assignment history (recipients subcollection). The UI reads these through
+    // /api/admin/promotions/* (Admin SDK) and all writes go through that same
+    // server path, so direct client access is denied outright — only a full
+    // admin can read, and nobody writes from a client.
+    match /promotions/{promotionId} {
+      allow read: if isAdmin();
+      allow write: if false;
+      match /recipients/{recipientId} {
+        allow read: if isAdmin();
+        allow write: if false;
+      }
     }
 
     // ─── plans ───────────────────────────────────────────────────────────────

@@ -1,3 +1,4 @@
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -113,7 +114,12 @@ class _ReelTile extends StatelessWidget {
           Container(
             color: AppColors.surfaceVariant,
             child: reel.thumbnailUrl != null
-                ? Image.network(reel.thumbnailUrl!, fit: BoxFit.cover)
+                ? CachedNetworkImage(
+                    imageUrl: reel.thumbnailUrl!,
+                    fit: BoxFit.cover,
+                    memCacheWidth: 400,
+                    errorWidget: (_, _, _) => const SizedBox.shrink(),
+                  )
                 : const Icon(Icons.videocam_outlined,
                     size: 32, color: AppColors.onSurfaceVariant),
           ),

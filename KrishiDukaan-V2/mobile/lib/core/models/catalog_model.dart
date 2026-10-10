@@ -312,8 +312,64 @@ class CatalogModel {
   }
 
   factory CatalogModel.fromFirestore(DocumentSnapshot doc) {
-    final d = doc.data() as Map<String, dynamic>;
+    return CatalogModel._fromData(
+      doc.id,
+      doc.reference.parent.id,
+      doc.data() as Map<String, dynamic>,
+    );
+  }
 
+  /// A marketplace card (marketplaceCards/{id}): one product name with every
+  /// seller's copy merged in by Cloud Functions
+  /// (functions/src/marketplace/cards.ts). The card's own `id` field is the
+  /// canonical product doc id, which is what the rest of the app keys on.
+  factory CatalogModel.fromCard(Map<String, dynamic> d) {
+    final id = (d['id'] ?? '').toString();
+    final base = CatalogModel._fromData(id, 'products', d);
+    final lowestPrice = (d['lowestPrice'] as num?)?.toDouble();
+    final createdAtMs = (d['createdAtMs'] as num?)?.toInt() ?? 0;
+    return base.copyWith(
+      price: lowestPrice,
+      lowestPrice: lowestPrice,
+      reviewCount: (d['totalReviews'] as num?)?.toInt(),
+      createdAt: createdAtMs > 0
+          ? DateTime.fromMillisecondsSinceEpoch(createdAtMs)
+          : null,
+      updatedAt: (d['builtAt'] as Timestamp?)?.toDate(),
+      sellerDiscounts: _phoneKeyedDiscounts(d['sellerDiscounts']),
+      mergedProductIds:
+          (d['mergedProductIds'] as List?)?.map((e) => e.toString()).toList() ??
+              [id],
+    );
+  }
+
+  /// Card discounts are keyed by seller uid and by phone as stored. The
+  /// product page looks stores up by 10-digit and +91 phone, so phone keys
+  /// are stored in both forms.
+  static Map<String, double> _phoneKeyedDiscounts(dynamic raw) {
+    final out = <String, double>{};
+    if (raw is! Map) return out;
+    raw.forEach((key, value) {
+      final pct = (value as num?)?.toDouble() ?? 0.0;
+      if (pct <= 0) return;
+      final k = key.toString();
+      final digits = k.replaceAll(RegExp(r'\D'), '');
+      if (RegExp(r'^\+?\d{10,12}$').hasMatch(k)) {
+        final local = digits.substring(digits.length - 10);
+        out[local] = pct;
+        out['+91$local'] = pct;
+      } else {
+        out[k] = pct;
+      }
+    });
+    return out;
+  }
+
+  factory CatalogModel._fromData(
+    String id,
+    String collectionPath,
+    Map<String, dynamic> d,
+  ) {
     // Handle both new schema (images: []) and legacy schema (image: "url")
     List<String> imgs;
     final rawImages = d['images'];
@@ -450,8 +506,8 @@ class CatalogModel {
         : (rawUpdatedAt is String ? DateTime.tryParse(rawUpdatedAt) : null);
 
     return CatalogModel(
-      id: doc.id,
-      collectionPath: doc.reference.parent.id,
+      id: id,
+      collectionPath: collectionPath,
       name: d['name'] as String? ?? d['fullName'] as String? ?? '',
       nameSearch: nameSearch,
       category: d['category'] as String? ?? 'general',
