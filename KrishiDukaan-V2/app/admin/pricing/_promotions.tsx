@@ -12,10 +12,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { auth } from "../../firebase";
 import {
   ELIGIBILITY_OPTIONS,
+  MARKETING_TEMPLATES,
   ROLE_OPTIONS,
   STATUS_LABEL,
   type CandidateRecipient,
   type EligibilityFilter,
+  type MarketingTemplateId,
   type PromotionRecipientRecord,
   type PromotionSummary,
   type PromotionTargetRole,
@@ -215,6 +217,8 @@ function CreatePromotionModal({
   const [startDate, setStartDate] = useState(todayInput());
   const [endDate, setEndDate] = useState("");
   const [notes, setNotes] = useState("");
+  // Optional WhatsApp marketing message ("" = none → confirmation-only, default).
+  const [marketingTemplate, setMarketingTemplate] = useState<MarketingTemplateId | "">("");
 
   // Recipient table
   const [search, setSearch] = useState("");
@@ -338,6 +342,7 @@ function CreatePromotionModal({
           startDate,
           endDate: endDate || null,
           notes: notes.trim() || null,
+          marketingTemplate: marketingTemplate || null,
           recipients,
           clientRequestId: requestId,
         }),
@@ -419,6 +424,47 @@ function CreatePromotionModal({
               className="mt-1 w-full rounded-xl border border-surface-container bg-surface-container-low px-3 py-2 text-sm text-on-surface"
             />
           </label>
+
+          {/* Optional WhatsApp marketing message — sent to each recipient BEFORE
+              the free_seats_assigned confirmation. Leaving it as "None" keeps the
+              current behaviour (confirmation only). */}
+          <label className="sm:col-span-2">
+            <span className="text-xs font-bold text-on-surface-variant">WhatsApp Marketing Message (optional)</span>
+            <select
+              value={marketingTemplate}
+              onChange={(e) => setMarketingTemplate(e.target.value as MarketingTemplateId | "")}
+              className="mt-1 w-full rounded-xl border border-surface-container bg-surface-container-low px-3 py-2 text-sm text-on-surface"
+            >
+              <option value="">None — send confirmation only</option>
+              {MARKETING_TEMPLATES.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          {marketingTemplate && (() => {
+            const tpl = MARKETING_TEMPLATES.find((t) => t.id === marketingTemplate)!;
+            return (
+              <div className="sm:col-span-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 space-y-1.5">
+                <p className="text-xs font-bold text-amber-800">
+                  Message preview · <span className="font-mono">{tpl.id}</span> ({tpl.language.toUpperCase()})
+                </p>
+                {tpl.hasImageHeader && (
+                  <p className="text-xs text-amber-700">🖼️ Header: static campaign image (resolved server-side from its media ID).</p>
+                )}
+                <p className="whitespace-pre-line rounded-lg bg-white/70 px-3 py-2 text-sm text-on-surface">
+                  {tpl.previewBody("[Business name]")}
+                </p>
+                <p className="text-[11px] text-amber-700">
+                  Only the business name ({"{{1}}"}) is dynamic per recipient. The {tpl.offerQuantity}-product
+                  offer is fixed in the approved template copy. Sent after seats are assigned, before the
+                  confirmation message.
+                </p>
+              </div>
+            );
+          })()}
         </div>
 
         {/* ── Targeting + recipient table ── */}

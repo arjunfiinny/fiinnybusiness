@@ -31,6 +31,8 @@ export type WaTemplate =
   | "app_update"
   | "reel_promo_hindi"
   | "free_seats_assigned"
+  | "navratri_offer_free"
+  | "navratri_offer_paid"
   | "generic";
 
 /** Dynamic values substituted into the template at render time (for audit/debug). */
