@@ -220,7 +220,12 @@ export default function App() {
       view !== 'subscription' &&
       view !== 'login' &&
       view !== 'signup' &&
-      view !== 'help'
+      view !== 'help' &&
+      // Shop by Category (market) and Shop by Crop (hub) are open to everyone —
+      // guests, farmers and unpaid sellers alike — so browsing them is never
+      // gated behind a subscription. Other paid surfaces stay gated.
+      view !== 'market' &&
+      view !== 'hub'
     ) {
       return 'subscription';
     }
@@ -767,8 +772,13 @@ export default function App() {
           // Paywall: only block if not paid AND not an invited retailer.
           // Invited retailers have isPaid set to true by the backfill; if it hasn't
           // propagated yet (race), also allow if they have a retailerDocId (invited).
+          // Exception: Shop by Category (market) and Shop by Crop (hub) are open to
+          // everyone, so landing on (or deep-linking to) one of those views must not
+          // be bumped to the subscription pitch — matching resolveViewForAccess.
+          const landingView = new URLSearchParams(window.location.search).get('view');
+          const isPublicBrowseView = landingView === 'market' || landingView === 'hub';
           const isInvitedRetailer = profileData.role === 'retailer' && !!(profileData as any).retailerDocId;
-          if ((profileData.role === 'retailer' || profileData.role === 'manufacturer') && !isPaid && !isInvitedRetailer) {
+          if ((profileData.role === 'retailer' || profileData.role === 'manufacturer') && !isPaid && !isInvitedRetailer && !isPublicBrowseView) {
             setCurrentView('subscription');
           }
 
@@ -921,6 +931,33 @@ export default function App() {
     }
   };
 
+  // Signup is NOT the same as login. On a fresh registration the profile was
+  // just created, so two things that work for login fail here:
+  //   1. The SPA auth listener's getUserProfile can race the just-written
+  //      uidIndex and return null, so it never routes the seller.
+  //   2. Routing through the in-app navigate('subscription') (as handleAuthSuccess
+  //      does) runs resolveViewForAccess with a still-default userRole — React
+  //      hasn't flushed setUserRole yet — which rewrites 'subscription' → 'home'
+  //      for a role that reads as 'customer'. That stale-closure rewrite is why
+  //      new sellers were landing on the homepage.
+  // So send a newly registered, unpaid seller straight to the dedicated upgrade
+  // route. SignupView awaits saveUserProfile before calling this, so the profile
+  // (and role) are already in Firestore, and the dashboard guard now admits an
+  // unpaid seller on /dashboard/upgrade. A full-page navigation sidesteps the
+  // SPA guards entirely, so nothing can override it.
+  const handleSignupSuccess = (firebaseUser: any, profile: any) => {
+    const role = profile?.role;
+    const isSeller = role === 'retailer' || role === 'manufacturer';
+    const isPaid = profile?.isPaid || false;
+    if (isSeller && !isPaid && !readPendingReferral()) {
+      window.location.href = '/dashboard/upgrade';
+      return;
+    }
+    // Paid (invited) sellers, sales-referral signups, and customers keep the
+    // existing post-auth routing unchanged.
+    handleAuthSuccess(firebaseUser, profile);
+  };
+
   const handleSubscriptionSuccess = async () => {
     if (user) {
       const profileData = await getUserProfile(user.uid);
@@ -934,7 +971,7 @@ export default function App() {
           productCount: profileData.productCount || 0,
         });
         if (profileData.role === 'retailer' || profileData.role === 'manufacturer') {
-          window.location.href = '/dashboard';
+          window.location.href = '/success';
           return;
         }
       } else {
@@ -945,7 +982,7 @@ export default function App() {
     }
 
     if (userRole === 'retailer' || userRole === 'manufacturer') {
-      window.location.href = '/dashboard';
+      window.location.href = '/success';
     } else {
       navigate('profile', { replace: true });
     }
@@ -2123,7 +2160,7 @@ export default function App() {
             }}
             onBack={() => navigate('home', { clearInvite: true })}
             onNavigateToLogin={() => navigate('login')}
-            onSuccess={handleAuthSuccess}
+            onSuccess={handleSignupSuccess}
           />
         );
       case 'subscription':

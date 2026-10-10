@@ -6,6 +6,7 @@ import { useFeaturePermissions } from '../hooks/useFeaturePermissions';
 import DigitalKhataPage from './DigitalKhataPage';
 import CustomersPage from './CustomersPage';
 import OrderHistoryPage from './OrderHistoryPage';
+import SalesReturnsPage from './SalesReturnsPage';
 // 'Link' was only used by the Returns quick-access link, now disabled below (2026-07-03).
 // import { Link } from 'react-router-dom';
 import {
@@ -240,14 +241,15 @@ function ProductSearchDropdown({ anchorRef, children }: { anchorRef: React.RefOb
 const FRESH_BILL_ROW_COUNT = 10;
 const EDIT_BILL_ROW_COUNT = 6;
 
-type PosModuleTab = 'billing' | 'khata' | 'customers' | 'order-history';
+type PosModuleTab = 'billing' | 'khata' | 'customers' | 'order-history' | 'sales-returns';
 const POS_MODULE_TABS: { id: PosModuleTab; label: string }[] = [
     { id: 'billing',       label: 'POS Billing' },
     { id: 'khata',         label: 'Khata (Udhari)' },
     { id: 'customers',     label: 'Customers' },
     { id: 'order-history', label: 'Order History' },
+    { id: 'sales-returns', label: 'Sales Returns' },
 ];
-const VALID_POS_TABS: readonly PosModuleTab[] = ['billing', 'khata', 'customers', 'order-history'];
+const VALID_POS_TABS: readonly PosModuleTab[] = ['billing', 'khata', 'customers', 'order-history', 'sales-returns'];
 
 // Feature-permission id per sub-tab (Super Admin → Feature Permissions).
 const TAB_PERM: Record<PosModuleTab, string> = {
@@ -255,6 +257,7 @@ const TAB_PERM: Record<PosModuleTab, string> = {
     khata:           'posBilling.khata.view',
     customers:       'posBilling.customers.view',
     'order-history': 'posBilling.orderHistory.view',
+    'sales-returns': 'posBilling.salesReturns.view',
 };
 
 export default function POSPage() {
@@ -1416,6 +1419,7 @@ export default function POSPage() {
         {activeAllowed && posModuleTab === 'khata'         && <DigitalKhataPage fullWidth />}
         {activeAllowed && posModuleTab === 'customers'     && <CustomersPage fullWidth />}
         {activeAllowed && posModuleTab === 'order-history' && <OrderHistoryPage fullWidth />}
+        {activeAllowed && posModuleTab === 'sales-returns' && <SalesReturnsPage fullWidth />}
 
         {/* Bill print portal — rendered directly on <body> so body.pos-printing CSS
             can hide everything else (sidebar, nav, app wrapper) without any className
