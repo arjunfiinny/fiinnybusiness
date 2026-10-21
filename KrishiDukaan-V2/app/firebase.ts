@@ -3424,6 +3424,90 @@ export async function duplicateBanner(banner: Banner): Promise<string> {
   });
 }
 
+// ─── About Page Content ───────────────────────────────────────────────────────
+// Doc: siteContent/about
+//
+// Admin-managed blocks on the About page (web AboutView.tsx + the app's
+// about_screen.dart): the animated "brands connected with us" orbit and the
+// "presence across India" image. Everything lives in ONE doc so the About
+// page costs a single read — the presence block is a static image the admin
+// uploads, deliberately not a live map over retailers/stores.
+export type AboutPartner = {
+  /** Stable client-generated id (React key / reorder), not a Firestore doc id. */
+  id: string;
+  name: string;
+  logoUrl: string;
+  /** Optional link opened when the logo is tapped. */
+  website?: string;
+};
+
+export type AboutPageContent = {
+  partnersEnabled: boolean;
+  /** Blank -> the localized default heading. */
+  partnersTitle?: string;
+  partnersSubtitle?: string;
+  /** Logo in the middle of the orbit; blank -> the bundled KrishiDukan icon. */
+  centerLogoUrl?: string;
+  partners: AboutPartner[];
+  presenceEnabled: boolean;
+  /** Blank -> "Trusted by farmers and agri businesses across India." */
+  presenceTitle?: string;
+  presenceSubtitle?: string;
+  presenceImageUrl?: string;
+  updatedAt?: any;
+};
+
+export const EMPTY_ABOUT_CONTENT: AboutPageContent = {
+  partnersEnabled: false,
+  partners: [],
+  presenceEnabled: false,
+};
+
+function toAboutContent(d: Record<string, any> | undefined): AboutPageContent {
+  if (!d) return { ...EMPTY_ABOUT_CONTENT };
+  return {
+    partnersEnabled: d.partnersEnabled === true,
+    partnersTitle: d.partnersTitle || undefined,
+    partnersSubtitle: d.partnersSubtitle || undefined,
+    centerLogoUrl: d.centerLogoUrl || undefined,
+    partners: Array.isArray(d.partners)
+      ? d.partners.filter((p: any) => p && typeof p.logoUrl === 'string' && p.logoUrl)
+      : [],
+    presenceEnabled: d.presenceEnabled === true,
+    presenceTitle: d.presenceTitle || undefined,
+    presenceSubtitle: d.presenceSubtitle || undefined,
+    presenceImageUrl: d.presenceImageUrl || undefined,
+    updatedAt: d.updatedAt,
+  };
+}
+
+// Memoized for the tab's lifetime: About is a client view in the SPA, so
+// switching away and back must not re-read the doc.
+let aboutContentPromise: Promise<AboutPageContent> | null = null;
+
+export function fetchAboutContent(opts: { fresh?: boolean } = {}): Promise<AboutPageContent> {
+  if (!aboutContentPromise || opts.fresh) {
+    aboutContentPromise = getDoc(doc(db, 'siteContent', 'about'))
+      .then(snap => toAboutContent(snap.data()))
+      .catch(err => {
+        aboutContentPromise = null;
+        throw err;
+      });
+  }
+  return aboutContentPromise;
+}
+
+export async function saveAboutContent(content: AboutPageContent): Promise<void> {
+  const { updatedAt, ...rest } = content;
+  // Full overwrite (no merge) so clearing an optional field really removes it.
+  await setDoc(doc(db, 'siteContent', 'about'), {
+    ...stripUndefined({ ...rest, partners: undefined }),
+    partners: rest.partners.map(p => stripUndefined({ ...p })),
+    updatedAt: serverTimestamp(),
+  });
+  aboutContentPromise = null;
+}
+
 // ─── Company Pages (Brand Pages) ──────────────────────────────────────────────
 // Collection: companyPages/{companyId}
 // Products:   companyProducts/{productId}  (field: companyId)

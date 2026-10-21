@@ -1,9 +1,11 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { ICONS } from '../constants';
 import { motion } from 'framer-motion';
 import { useI18n } from '../i18n/I18nContext';
-import { saveContactMessage } from '../firebase';
+import { saveContactMessage, fetchAboutContent } from '../firebase';
+import type { AboutPageContent } from '../firebase';
+import { AboutPartnersSection, AboutPresenceSection } from '../components/AboutNetworkSections';
 import { PLAY_STORE_URL, APP_STORE_URL, androidLive, iosLive } from '../lib/store-links';
 
 export default function AboutView() {
@@ -13,6 +15,17 @@ export default function AboutView() {
   const [message, setMessage] = useState('');
   const [status, setStatus] = useState<'idle' | 'sending' | 'success' | 'error'>('idle');
   const [errorMessage, setErrorMessage] = useState('');
+  // Admin > About page (siteContent/about). Optional enhancement: both
+  // blocks stay hidden until it loads, and if it fails the page is unchanged.
+  const [content, setContent] = useState<AboutPageContent | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchAboutContent()
+      .then(c => { if (!cancelled) setContent(c); })
+      .catch(err => console.warn('Failed to load About page content:', err));
+    return () => { cancelled = true; };
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -109,6 +122,16 @@ export default function AboutView() {
         </div>
       </section>
 
+      {content?.partnersEnabled && content.partners.length > 0 && (
+        <AboutPartnersSection
+          label={t('aboutPartnersLabel')}
+          title={content.partnersTitle || t('aboutPartnersTitle')}
+          subtitle={content.partnersSubtitle}
+          partners={content.partners}
+          centerLogoUrl={content.centerLogoUrl}
+        />
+      )}
+
       {/* Mission */}
       <section className="px-4 md:px-10 max-w-7xl mx-auto w-full py-16">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-12 items-center">
@@ -135,6 +158,16 @@ export default function AboutView() {
           </div>
         </div>
       </section>
+
+      {content?.presenceEnabled && content.presenceImageUrl && (
+        <AboutPresenceSection
+          label={t('aboutPresenceLabel')}
+          title={content.presenceTitle || t('aboutPresenceTitle')}
+          subtitle={content.presenceSubtitle}
+          imageUrl={content.presenceImageUrl}
+          imageAlt={t('aboutPresenceImageAlt')}
+        />
+      )}
 
       {/* Values */}
       <section className="bg-surface-container-low border-y border-surface-container py-16">

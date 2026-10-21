@@ -591,6 +591,14 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
+    // ─── siteContent ─────────────────────────────────────────────────────────
+    // Admin-managed public page content (siteContent/about: partner logos +
+    // presence image on the About page). Public read, admin-only write.
+    match /siteContent/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
     // ─── adminLogs ───────────────────────────────────────────────────────────
     match /adminLogs/{docId} {
       allow read: if isAdmin();
