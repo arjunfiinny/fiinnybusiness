@@ -333,7 +333,7 @@ export default function AdminAboutPage() {
           </div>
           <div>
             <label className={labelCls}>Sub-heading (optional)</label>
-            <input value={c.presenceSubtitle ?? ""} placeholder="e.g. Retailers in 25+ districts and growing"
+            <input value={c.presenceSubtitle ?? ""} placeholder="e.g. 275+ agri stores and 35+ manufacturers on KrishiDukan"
               onChange={e => update({ presenceSubtitle: e.target.value })} className={inputCls} />
           </div>
         </div>

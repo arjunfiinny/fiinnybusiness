@@ -49,10 +49,10 @@ export default function AboutView() {
     }
   };
   const stats = [
-    { value: '500+', label: t('aboutStatLocalStores') },
-    { value: '10K+', label: t('aboutStatFarmersServed') },
-    { value: '25+', label: t('aboutStatDistrictsCovered') },
-    { value: '98%', label: t('aboutStatSatisfactionRate') }
+    { value: '2,800+', label: t('aboutStatUsers') },
+    { value: '275+', label: t('aboutStatRetailers') },
+    { value: '35+', label: t('aboutStatManufacturers') },
+    { value: '145+', label: t('aboutStatProducts') }
   ];
 
   const values = [

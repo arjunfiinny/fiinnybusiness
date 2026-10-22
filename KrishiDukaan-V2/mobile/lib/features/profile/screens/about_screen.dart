@@ -80,10 +80,10 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
     final content = ref.watch(aboutContentProvider).value;
 
     final stats = [
-      ('500+', isHindi ? 'स्थानीय दुकानें' : 'Local Stores'),
-      ('10K+', isHindi ? 'सेवा प्राप्त किसान' : 'Farmers Served'),
-      ('25+', isHindi ? 'कवर किए गए जिले' : 'Districts Covered'),
-      ('98%', isHindi ? 'संतुष्टि दर' : 'Satisfaction Rate'),
+      ('2,800+', isHindi ? 'पंजीकृत उपयोगकर्ता' : 'Registered Users'),
+      ('275+', isHindi ? 'कृषि दुकानें' : 'Retail Stores'),
+      ('35+', isHindi ? 'निर्माता कंपनियाँ' : 'Manufacturers'),
+      ('145+', isHindi ? 'सूचीबद्ध उत्पाद' : 'Products Listed'),
     ];
 
     final values = [
