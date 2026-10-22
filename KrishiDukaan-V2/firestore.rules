@@ -599,6 +599,14 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
+    // ─── searchStats ─────────────────────────────────────────────────────────
+    // Daily search/category aggregates (searchStats/{YYYY-MM-DD}), written only
+    // by /api/analytics/search through the Admin SDK. Admin > Search insights.
+    match /searchStats/{day} {
+      allow read: if isAdmin() || teamHas('analytics');
+      allow write: if false;
+    }
+
     // ─── adminLogs ───────────────────────────────────────────────────────────
     match /adminLogs/{docId} {
       allow read: if isAdmin();

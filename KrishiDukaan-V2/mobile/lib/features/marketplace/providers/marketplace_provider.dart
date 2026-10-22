@@ -10,6 +10,7 @@ import '../../../core/models/review_model.dart';
 import '../../../core/models/store_model.dart';
 import '../../../core/models/listing_model.dart';
 import '../../../core/providers/location_provider.dart';
+import '../../../core/services/search_analytics_service.dart';
 import '../../../core/utils/geo_utils.dart';
 import '../data/catalog_repository.dart';
 import '../data/listing_repository.dart';
@@ -193,6 +194,10 @@ class MarketplaceNotifier extends StateNotifier<MarketplaceState> {
       }
 
       _applyDistanceFilter();
+      // Admin > Search insights: what shoppers look for, and what finds nothing.
+      if (refresh && state.searchQuery.trim().isNotEmpty && seller == null) {
+        SearchAnalyticsService.instance.scheduleSearch(state.searchQuery, _all.length);
+      }
       final firstPage = _all.take(_pageSize).toList();
       state = state.copyWith(
         products: firstPage,
@@ -259,6 +264,7 @@ class MarketplaceNotifier extends StateNotifier<MarketplaceState> {
   void setCategory(String? category) {
     if (state.category == category) return;
     state = state.copyWith(category: () => category, searchQuery: '');
+    SearchAnalyticsService.instance.logCategory(category);
     loadProducts(refresh: true);
   }
 

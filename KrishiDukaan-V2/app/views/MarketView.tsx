@@ -6,6 +6,7 @@ import { ICONS } from '../constants';
 import { motion, AnimatePresence } from 'framer-motion';
 import { HelperIcon, HelperTooltip } from '../../components/helpers';
 import { trackProductImpression } from '../firebase';
+import { logCategoryBrowse, scheduleSearchLog } from '../lib/search-analytics';
 import { useI18n } from '../i18n/I18nContext';
 import type { CartItem } from '../../types/order';
 import { Tag } from 'lucide-react';
@@ -269,6 +270,12 @@ export default function MarketView({
       if (gen !== requestGenRef.current) {
         console.debug('[market] discarding stale response', { reset, gen, current: requestGenRef.current });
         return;
+      }
+
+      // Admin > Search insights: what shoppers look for, and which searches find nothing.
+      if (reset) {
+        if (searchParam) scheduleSearchLog(searchParam, json.products.length);
+        else if (categoryParam) logCategoryBrowse(categoryParam);
       }
 
       pagesRequestedRef.current += 1;
