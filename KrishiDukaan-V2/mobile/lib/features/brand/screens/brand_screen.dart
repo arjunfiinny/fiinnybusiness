@@ -163,6 +163,17 @@ class BrandScreen extends ConsumerWidget {
                           const <CatalogModel>[])
                         if (p.imageUrl.isNotEmpty) p.imageUrl,
                     ].take(3).toList(),
+                    // Numbers for the poster — both lists are already loaded above.
+                    productCount: ref
+                            .watch(_brandProductsProvider(manufacturerPhone))
+                            .value
+                            ?.length ??
+                        0,
+                    dealerCount: ref
+                            .watch(_brandRetailersProvider(manufacturerPhone))
+                            .value
+                            ?.length ??
+                        0,
                   ),
                   SliverToBoxAdapter(
                     child: _BrandStatsHeader(
@@ -216,10 +227,14 @@ class _BrandHero extends StatelessWidget {
   /// Non-null only for the owner viewing their own page.
   final VoidCallback? onEdit;
   final List<String> productPhotos;
+  final int productCount;
+  final int dealerCount;
   const _BrandHero({
     required this.brand,
     this.onEdit,
     this.productPhotos = const [],
+    this.productCount = 0,
+    this.dealerCount = 0,
   });
 
   BrandPosterData? _poster() {
@@ -239,6 +254,10 @@ class _BrandHero extends StatelessWidget {
         ...brand.certifications,
       ],
       link: link.replaceFirst(RegExp(r'^https?://'), ''),
+      stats: [
+        if (productCount > 0) (posterCount(productCount), 'Products'),
+        if (dealerCount > 0) (posterCount(dealerCount), 'Dealers'),
+      ],
     );
   }
 
