@@ -170,7 +170,7 @@ export function Navbar({
         const profileData = await getUserProfile(firebaseUser.uid);
         if (profileData) {
           setLocalUserRole(profileData.role);
-          setLocalUserProfile({ isPaid: profileData.isPaid || false });
+          setLocalUserProfile({ isPaid: profileData.isPaid || false, shopStaff: !!(profileData as any).shopStaff });
         }
       } else {
         setLocalUser(null);
@@ -273,7 +273,9 @@ export function Navbar({
     { id: 'hub', label: t('hub') },
     { id: 'map', label: t('stores') }
   ];
-  const canAccessDashboard = (userRole === 'retailer' || userRole === 'manufacturer') && !!user && !isDashboard;
+  // Shop helpers (app/lib/shop-team.ts) open the shop's dashboard too.
+  const canAccessDashboard =
+    (userRole === 'retailer' || userRole === 'manufacturer' || !!userProfile?.shopStaff) && !!user && !isDashboard;
   // "team" accounts (limited-access admin-portal staff, created from the
   // admin Team tab) log into /admin same as full admins — without this they
   // matched none of the branches below (not retailer/manufacturer, not

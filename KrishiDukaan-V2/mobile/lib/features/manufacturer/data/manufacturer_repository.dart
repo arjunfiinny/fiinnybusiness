@@ -9,6 +9,7 @@ import '../../../core/models/network_retailer_model.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import '../../../core/utils/phone_utils.dart';
+import '../../../core/session/shop_session.dart';
 
 // A freshly assigned product used to start at 0 stock / not-available, which
 // meant it was immediately unsellable until the retailer noticed and edited
@@ -29,7 +30,7 @@ class ManufacturerRepository {
   Future<List<Map<String, dynamic>>> fetchActiveAssignedListings(
     String manufacturerPhone,
   ) async {
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final uid = ShopSession.sellerUid();
     final owners = <String>{
       if (manufacturerPhone.isNotEmpty) manufacturerPhone,
       if (uid.isNotEmpty) uid,
@@ -72,7 +73,7 @@ class ManufacturerRepository {
   /// Auth UID. One OR query, so a link carrying both is read once (two
   /// listeners used to read it twice).
   Query<Map<String, dynamic>>? _networkQuery(String manufacturerPhone) {
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final uid = ShopSession.sellerUid();
     final matches = <Filter>[
       if (manufacturerPhone.isNotEmpty)
         Filter('manufacturerPhone', isEqualTo: manufacturerPhone),
@@ -139,7 +140,7 @@ class ManufacturerRepository {
     String? pincode,
     GeoPoint? geo,
   }) async {
-    final manufacturerId = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final manufacturerId = ShopSession.sellerUid();
     final code = _generateInviteCode();
     final normalizedRetailerPhone = PhoneUtils.normalize(retailerPhone);
     final batch = _db.batch();
@@ -320,7 +321,7 @@ class ManufacturerRepository {
   Future<void> updateRetailerStatus(
       String retailerPhone, String status) async {
     // Legacy support: call the appropriate specific methods
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final uid = ShopSession.sellerUid();
     // Since we only have retailerPhone and status, search for the inviteDocId
     final snap = await _db
         .collection('manufacturerRetailers')
@@ -350,7 +351,7 @@ class ManufacturerRepository {
   }
 
   Future<void> removeRetailer(String retailerPhone) async {
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final uid = ShopSession.sellerUid();
     final snap = await _db
         .collection('manufacturerRetailers')
         .where('retailerPhone', isEqualTo: retailerPhone)
@@ -549,7 +550,7 @@ class ManufacturerRepository {
       throw Exception('This invite was sent to a different phone number.');
     }
 
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final uid = ShopSession.sellerUid();
     await doc.reference.update({
       'status': 'active',
       'retailerPhone': userPhone,
@@ -586,7 +587,7 @@ class ManufacturerRepository {
 
   Stream<List<CatalogModel>> watchManufacturerCatalog(
       String manufacturerPhone) {
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final uid = ShopSession.sellerUid();
 
     // Query all sources: legacy catalog collection, products by phone
     // (scoped to ownerType=='manufacturer'), and products by ownerId (web
@@ -672,7 +673,7 @@ class ManufacturerRepository {
     String? videoUrl,
   }) async {
     final nameSearch = _buildNameSearch(name);
-    final uid = FirebaseAuth.instance.currentUser?.uid;
+    final uid = ShopSession.sellerUidOrNull();
     // `products` — NOT `catalog`. This used to write to `catalog`, which the
     // entire website never reads: not the seller dashboard, not admin, not
     // the marketplace (see app/dashboard/_lib/inventory-firestore.ts, which
@@ -756,7 +757,7 @@ class ManufacturerRepository {
     required String manufacturerPhone,
     required double price,
   }) async {
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final uid = ShopSession.sellerUid();
     final now = FieldValue.serverTimestamp();
 
     // 1. Resolve manufacturer's active subscription expiry for seat lifetime
@@ -1097,7 +1098,7 @@ class ManufacturerRepository {
 
   Future<Map<String, int>> fetchAnalytics(
       String manufacturerPhone) async {
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final uid = ShopSession.sellerUid();
 
     final futures = <Future<AggregateQuerySnapshot>>[
       _db
@@ -1249,7 +1250,7 @@ class ManufacturerRepository {
     required String ownerName,
     String? email,
   }) async {
-    final manufacturerId = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final manufacturerId = ShopSession.sellerUid();
     final normalized = PhoneUtils.normalize(retailerPhone);
     final batch = _db.batch();
     final now = FieldValue.serverTimestamp();

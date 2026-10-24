@@ -51,7 +51,7 @@ class InventoryScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final userAsync = ref.watch(currentUserProvider);
+    final userAsync = ref.watch(sellerUserProvider);
     return userAsync.when(
       loading: () =>
           const Scaffold(body: Center(child: CircularProgressIndicator())),
@@ -838,7 +838,7 @@ class _AddListingSheetState extends ConsumerState<_AddListingSheet> {
 
   Future<void> _refreshAccountDelivery() async {
     final isManufacturer =
-        ref.read(currentUserProvider).value?.isManufacturer ?? false;
+        ref.read(sellerUserProvider).value?.isManufacturer ?? false;
     final enabled = await DashboardRepository().fetchAccountOnlineDelivery(
       widget.sellerPhone,
       isManufacturer: isManufacturer,
