@@ -76,7 +76,7 @@ class _RetailerBrandEditorScreenState
   }
 
   Future<void> _load() async {
-    final user = ref.read(currentUserProvider).value;
+    final user = ref.read(sellerUserProvider).value;
     final phone = WebLinks.sharePhone(user?.phone ?? '');
     if (phone == null) {
       setState(() {

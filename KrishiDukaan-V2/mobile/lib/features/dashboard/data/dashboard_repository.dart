@@ -4,7 +4,6 @@ import 'dart:io';
 
 
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 
 import '../../../core/data/paged_feed.dart';
@@ -12,6 +11,7 @@ import '../../../core/models/listing_model.dart';
 import '../../../core/models/order_model.dart';
 import '../../../core/models/subscription_model.dart';
 import 'seller_earnings.dart';
+import '../../../core/session/shop_session.dart';
 
 class SeatStats {
   final int totalPurchased;
@@ -109,7 +109,7 @@ class DashboardRepository {
   }
 
   Future<Map<String, int>> fetchStats(String sellerPhone) async {
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final uid = ShopSession.sellerUid();
 
     // Products: phone, retailerId (legacy), and ownerId (web new schema).
     //
@@ -202,7 +202,7 @@ class DashboardRepository {
   /// retailerId and ownerId) is read once, not once per listener. The legacy
   /// `listings` collection keeps its own listener.
   Stream<List<ListingModel>> watchMyListings(String sellerPhone) {
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final uid = ShopSession.sellerUid();
 
     final productFilter = _myProductsFilter(sellerPhone, uid);
 
@@ -308,7 +308,7 @@ class DashboardRepository {
     List<Map<String, String>>? customFields,
     String? videoUrl,
   }) async {
-    final uid = FirebaseAuth.instance.currentUser?.uid;
+    final uid = ShopSession.sellerUidOrNull();
     final now = DateTime.now();
 
     // ── 1. Subscription & Seat Limit Enforcement ────────────────────────────
@@ -574,8 +574,7 @@ class DashboardRepository {
               (pData['retailerPhone'] ?? pData['ownerPhone'] ?? '') as String;
           final uid = (pData['ownerId'] ??
               pData['retailerId'] ??
-              FirebaseAuth.instance.currentUser?.uid ??
-              '') as String;
+              ShopSession.sellerUid()) as String;
 
           if (!prevActive && newActive) {
             // Reactivating: verify seat availability
@@ -1188,7 +1187,7 @@ class DashboardRepository {
   /// orders). `sellerId == phone` is not queried: the rules only allow
   /// `sellerId == uid`, so that listener was always refused.
   PagedFeed<OrderModel> sellerOrdersFeed(String sellerPhone) {
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final uid = ShopSession.sellerUid();
     final orders = _db.collection('orders');
     return PagedFeed<OrderModel>(
       queries: [
@@ -1206,7 +1205,7 @@ class DashboardRepository {
     DateTime start, [
     DateTime? end,
   ]) async {
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final uid = ShopSession.sellerUid();
     final orders = _db.collection('orders');
     Query<Map<String, dynamic>> windowed(Query<Map<String, dynamic>> q) {
       var out = q.where('createdAt', isGreaterThanOrEqualTo: Timestamp.fromDate(start));
@@ -1325,7 +1324,7 @@ class DashboardRepository {
   /// The keys a seller's orders are filed under in sellerStats: the phone as
   /// +91 and 10 digits, and the Auth UID.
   List<String> _sellerKeys(String sellerPhone) {
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final uid = ShopSession.sellerUid();
     final digits = sellerPhone.replaceAll(RegExp(r'\D'), '');
     return <String>{
       if (digits.length >= 10) '+91${digits.substring(digits.length - 10)}',
@@ -1438,7 +1437,7 @@ class DashboardRepository {
   ///   activeUsed     = count of seat listings with status=active & expiresAt > now
   ///   available      = max(0, totalPurchased - activeUsed)
   Future<SeatStats> fetchSeatStats(String ownerPhone) async {
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final uid = ShopSession.sellerUid();
     final now = DateTime.now();
 
     // Fetch subscriptions — try by phone and by uid in parallel
@@ -1542,7 +1541,7 @@ class DashboardRepository {
   Future<List<SubscriptionModel>> fetchSubscriptionHistory(
     String ownerPhone,
   ) async {
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final uid = ShopSession.sellerUid();
 
     Future<List<QueryDocumentSnapshot>> byField(String field, String value) async {
       try {
@@ -1585,7 +1584,7 @@ class DashboardRepository {
   Future<List<SeatListingModel>> fetchActiveSeatListings(
     String ownerPhone,
   ) async {
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final uid = ShopSession.sellerUid();
 
     Future<List<QueryDocumentSnapshot>> byField(String field, String value) async {
       try {

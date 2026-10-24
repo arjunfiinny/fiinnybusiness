@@ -23,7 +23,7 @@ class DashboardReelsScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final user = ref.watch(currentUserProvider).value;
+    final user = ref.watch(sellerUserProvider).value;
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
@@ -276,7 +276,7 @@ class _EditReelSheetState extends ConsumerState<_EditReelSheet> {
   @override
   Widget build(BuildContext context) {
     final bottomPad = MediaQuery.of(context).viewInsets.bottom;
-    final user = ref.watch(currentUserProvider).value;
+    final user = ref.watch(sellerUserProvider).value;
     final listingsAsync = user != null
         ? ref.watch(shopListingsProvider(user.phone))
         : const AsyncValue<List<ListingModel>>.data([]);
