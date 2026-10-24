@@ -3302,17 +3302,21 @@ export function collapseUserProductDocs(docs: RawProductDoc[]): UserProduct[] {
   return Array.from(groups.values()).sort((a, b) => a.name.localeCompare(b.name));
 }
 
+// Optional fields (iconImage) arrive as undefined when left empty. Firestore
+// rejects a literal undefined, so a hub saved without an icon used to fail
+// outright; on update it must also DELETE the old value — dropping the key
+// would leave the previous icon showing on Home's Shop by Crop forever.
 export async function saveHub(hub: Omit<Hub, 'id'>): Promise<string> {
   const id = hub.name.toLowerCase().trim().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
   await setDoc(doc(db, 'hubs', id), {
-    ...hub,
+    ...stripUndefined({ ...hub }),
     createdAt: serverTimestamp()
   });
   return id;
 }
 
 export async function updateHub(hubId: string, hub: Partial<Omit<Hub, 'id'>>): Promise<void> {
-  await setDoc(doc(db, 'hubs', hubId), { ...hub, updatedAt: serverTimestamp() }, { merge: true });
+  await setDoc(doc(db, 'hubs', hubId), undefinedToDeleteField({ ...hub, updatedAt: serverTimestamp() }), { merge: true });
 }
 
 export async function deleteHub(hubId: string): Promise<void> {
