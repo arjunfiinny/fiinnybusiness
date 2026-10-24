@@ -59,6 +59,8 @@ type UserProfile = {
   isPaid?: boolean;
   totalSeats?: number;
   productCount?: number;
+  /** A shop helper (app/lib/shop-team.ts) — gets the Dashboard link. */
+  shopStaff?: boolean;
 };
 
 const VALID_VIEWS: View[] = ['home', 'market', 'hub', 'product', 'map', 'about', 'profile', 'orders', 'login', 'signup', 'subscription', 'cart', 'brand', 'become-retailer', 'help'];
@@ -753,6 +755,7 @@ export default function App() {
           setUserRole(profileData.role as UserRole);
           const isPaid = profileData.isPaid || false;
           setUserProfile({
+            shopStaff: !!(profileData as any).shopStaff,
             name: profileData.name || '',
             email: profileData.email || firebaseUser.email || '',
             phone: profileData.phone || '',
@@ -904,6 +907,7 @@ export default function App() {
     setUserRole(profile.role);
     const isPaid = profile.isPaid || false;
     setUserProfile({
+      shopStaff: !!(profile as any).shopStaff,
       name: profile.name,
       email: profile.email,
       phone: profile.phone || '',
@@ -923,7 +927,10 @@ export default function App() {
       return;
     }
 
-    if ((profile.role === 'retailer' || profile.role === 'manufacturer') && !isPaid) {
+    // A shop helper logs in to run the shop: straight to its dashboard.
+    if (profile.role !== 'retailer' && profile.role !== 'manufacturer' && profile.shopStaff) {
+      window.location.href = '/dashboard';
+    } else if ((profile.role === 'retailer' || profile.role === 'manufacturer') && !isPaid) {
       navigate('subscription', { replace: true });
     } else if ((profile.role === 'retailer' || profile.role === 'manufacturer') && isPaid) {
       window.location.href = '/dashboard';
@@ -964,6 +971,7 @@ export default function App() {
       const profileData = await getUserProfile(user.uid);
       if (profileData) {
         setUserProfile({
+          shopStaff: !!(profileData as any).shopStaff,
           name: profileData.name || '',
           email: profileData.email || user.email || '',
           phone: profileData.phone || '',
