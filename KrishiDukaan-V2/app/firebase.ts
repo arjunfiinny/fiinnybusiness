@@ -987,6 +987,9 @@ export async function updateSubscriptionStatus(
         razorpayOrderId: paymentDetails?.orderId ?? null,
         razorpayPaymentId: paymentDetails?.paymentId ?? null,
         subscriptionStatus: 'active',
+        // Genuine (gateway-paid) subscription, not a promotional grant. Written
+        // explicitly so the admin status filters can query non-promotional subs.
+        isPromotional: false,
         // Promo attribution — written only when a gateway-verified code was
         // used. Absent field = no promo, so usage queries filter on presence.
         ...(normalizedPromo ? { promoCode: normalizedPromo } : {}),
@@ -2601,6 +2604,9 @@ export async function adminManualActivate(
     razorpayOrderId: orderId || null,
     razorpayPaymentId: paymentId,
     subscriptionStatus: 'active',
+    // Genuine admin activation, not a promotional grant — see the status filters
+    // on /admin/subscriptions, which query isPromotional === false.
+    isPromotional: false,
     startDate: Timestamp.fromDate(now),
     expiryDate: Timestamp.fromDate(expiry),
     activatedByAdmin: true,
@@ -2640,6 +2646,8 @@ export function mapAdminProductDocs(docs: RawProductDoc[]): MarketplaceProduct[]
         store: String(data.store || ''),
         distance: String(data.distance || 'Nearby'),
         source: data.source ? String(data.source) : undefined,
+        // Admin certification flag — carried so the edit form prefills the toggle.
+        organicCertified: data.organicCertified === true ? true : undefined,
         _sort: ts?.toMillis?.() ?? 0,
       } as MarketplaceProduct & { _sort: number };
     })
@@ -2665,6 +2673,23 @@ export async function adminCreateProduct(product: Omit<MarketplaceProduct, 'id'>
 export async function adminUpdateProduct(productId: string, product: Partial<MarketplaceProduct>): Promise<void> {
   const clean = Object.fromEntries(Object.entries(product).filter(([, v]) => v !== undefined));
   await setDoc(doc(db, 'products', productId), { ...clean, updatedAt: serverTimestamp() }, { merge: true });
+}
+
+/**
+ * Admin: set ONLY the Organic Certified flag on the canonical product document.
+ *
+ * Deliberately a single-field merge write — it never touches variants, price,
+ * stock, availability or any other field. The full product-edit save rebuilds
+ * the variant array from the form, so routing a mere badge toggle through it
+ * could alter variants/stock; this keeps the toggle isolated to the boolean the
+ * public product page reads (see types/product.ts organicCertified).
+ */
+export async function adminSetOrganicCertified(productId: string, value: boolean): Promise<void> {
+  await setDoc(
+    doc(db, 'products', productId),
+    { organicCertified: value === true, updatedAt: serverTimestamp() },
+    { merge: true },
+  );
 }
 
 export async function adminDeleteProduct(productId: string): Promise<void> {

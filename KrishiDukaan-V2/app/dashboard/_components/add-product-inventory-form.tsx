@@ -4,7 +4,7 @@ import { normalizeUnit } from "../../utils/weight";
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import {
   Loader2, PackagePlus, Plus, X, Upload,
-  Tag, ImageIcon, AlignLeft, Layers, Search, ChevronDown, CheckCircle2, Receipt, Youtube,
+  Tag, ImageIcon, AlignLeft, Layers, Search, ChevronDown, CheckCircle2, Receipt, Youtube, Leaf,
 } from "lucide-react";
 import {
   PRODUCT_CATEGORIES, isStandardCategory, CATEGORY_FIELDS, CHIPS_FIELDS,
@@ -15,7 +15,7 @@ import { CompositionEditor, COMPOSITION_CATEGORIES, type CompositionEntry } from
 import { CustomFieldsEditor, type CustomFieldEntry } from "../_components/custom-fields-editor";
 import Link from "next/link";
 import { ref as storageRef, uploadBytes, getDownloadURL } from "firebase/storage";
-import { storage, fetchAllMarketplaceProducts, adminCreateProduct, adminUpdateProduct } from "../../firebase";
+import { storage, fetchAllMarketplaceProducts, adminCreateProduct, adminUpdateProduct, adminSetOrganicCertified } from "../../firebase";
 import { compressImage, imageUploadMetadata } from "../../utils/compressImage";
 import { createManufacturerProduct, fetchProductForAutofill, searchProductsByName, type ProductSearchResult } from "../_lib/manufacturer-products-firestore";
 import { createProductAndInventory, retailerHasProduct } from "../_lib/inventory-firestore";
@@ -138,6 +138,7 @@ type AdminProductPayload = {
   isActive: true; source: "admin";
   categoryInfo?: Record<string, string | string[]>;
   gstApplicable: boolean; gstRate: number;
+  organicCertified: boolean;
   sellMode: "online_delivery" | "offline_store_only"; isOnline: boolean;
   editProductId: string | null;
   videoUrl?: string;
@@ -520,6 +521,13 @@ export function AddProductInventoryForm({
   const [gstApplicable, setGstApplicable] = useState(false);
   const [gstRate,       setGstRate]       = useState<GstRate>(0);
 
+  // Admin-only: "Organic Certified" badge flag on the canonical product doc.
+  const [organicCertified, setOrganicCertified] = useState(false);
+  // Status of the isolated organic-only write when editing an existing product.
+  const [organicSaving, setOrganicSaving] = useState(false);
+  const [organicSaved, setOrganicSaved] = useState(false);
+  const [organicError, setOrganicError] = useState<string | null>(null);
+
   // New products default to offline; seller opts in when account delivery is enabled
   const [sellMode, setSellMode] = useState<"online_delivery" | "offline_store_only">("offline_store_only");
 
@@ -563,6 +571,8 @@ export function AddProductInventoryForm({
     setImages(urls.length ? urls.map((u: string) => ({ mode: "url" as const, url: u, uploading: false, error: "" })) : [newSlot()]);
     setGstApplicable(!!p.gstApplicable);
     setGstRate(p.gstRate ?? 0);
+    setOrganicCertified(p.organicCertified === true);
+    setOrganicSaved(false); setOrganicError(null); setOrganicSaving(false);
     setSellMode(p.sellMode === "offline_store_only" ? "offline_store_only" : "online_delivery");
     setVideoUrl((p as any).videoUrl ?? "");
     setComposition(Array.isArray((p as any).composition) ? (p as any).composition : []);
@@ -778,6 +788,7 @@ export function AddProductInventoryForm({
           isActive: true, source: "admin",
           categoryInfo: Object.keys(savedCategoryInfo).length ? savedCategoryInfo : undefined,
           gstApplicable: effectiveGstApplicable, gstRate: effectiveGstApplicable ? gstRate : 0,
+          organicCertified,
           sellMode: effectiveSellMode, isOnline: effectiveSellMode === "online_delivery",
           editProductId: initialProduct?.id ?? null,
           videoUrl: videoUrl.trim() || undefined,
@@ -796,7 +807,7 @@ export function AddProductInventoryForm({
           setName(""); setCategory(CATEGORIES[0]); setCustomCategory(""); setDescription("");
           setAutofilled(false); setExistingProductId(null); setAlreadyListed(false);
           setCategoryInfo({}); setShowAdditionalData(false);
-          setGstApplicable(false); setGstRate(0); setSellMode("offline_store_only");
+          setGstApplicable(false); setGstRate(0); setOrganicCertified(false); setSellMode("offline_store_only");
           setVariants([newVariant()]); setImages([newSlot()]); setCustomFields([]);
         }
         await onCreated();
@@ -857,6 +868,31 @@ export function AddProductInventoryForm({
       setMessage({ type: "err", text: err instanceof Error ? err.message : "Failed to create product." });
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  /**
+   * Organic Certified toggle. For an existing product it persists on its own —
+   * a single-field merge write to the canonical doc (adminSetOrganicCertified)
+   * — so flipping the badge never runs the full product save that rebuilds the
+   * variant array. For a new product it only updates local state and is written
+   * once by the create payload. It never creates/edits variants, price, stock
+   * or availability.
+   */
+  const toggleOrganic = async (next: boolean) => {
+    setOrganicCertified(next);
+    setOrganicSaved(false);
+    setOrganicError(null);
+    if (!adminMode || !initialProduct?.id) return; // new product → saved by create payload
+    setOrganicSaving(true);
+    try {
+      await adminSetOrganicCertified(initialProduct.id, next);
+      setOrganicSaved(true);
+    } catch (err) {
+      setOrganicCertified(!next); // revert the UI so it matches what's stored
+      setOrganicError(err instanceof Error ? err.message : "Could not save. Try again.");
+    } finally {
+      setOrganicSaving(false);
     }
   };
 
@@ -1222,6 +1258,44 @@ export function AddProductInventoryForm({
             </>
           )}
         </div>
+
+        {/* ── Admin-only: Organic Certified ─────────────────────────────────── */}
+        {adminMode && (
+          <div className="rounded-2xl border border-outline-variant/20 bg-surface-container-low/40 p-4 flex flex-col gap-4">
+            <div className="flex items-center gap-2 text-sm font-semibold text-on-surface">
+              <Leaf className="h-4 w-4 text-primary" /> Certification
+            </div>
+            <div className="flex items-center justify-between rounded-xl border border-outline-variant/25 bg-white px-4 py-3">
+              <div>
+                <p className="text-sm font-medium text-on-surface">Organic Certified</p>
+                <p className="text-xs text-on-surface-variant mt-0.5">
+                  Shows the &ldquo;Organic Certified&rdquo; badge on this product. Enable only for products with a verified organic certification.
+                </p>
+                {initialProduct?.id && (
+                  <p className="mt-1 text-[11px] font-medium">
+                    {organicSaving ? (
+                      <span className="inline-flex items-center gap-1 text-on-surface-variant"><Loader2 className="h-3 w-3 animate-spin" /> Saving…</span>
+                    ) : organicError ? (
+                      <span className="text-red-600">{organicError}</span>
+                    ) : organicSaved ? (
+                      <span className="text-green-700">Saved — only the certification flag was changed.</span>
+                    ) : null}
+                  </p>
+                )}
+              </div>
+              <label className="inline-flex items-center cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  className="sr-only peer"
+                  disabled={isDisabled || organicSaving}
+                  checked={organicCertified}
+                  onChange={(e) => void toggleOrganic(e.target.checked)}
+                />
+                <span className="relative h-6 w-11 rounded-full bg-outline-variant/40 peer-checked:bg-primary transition-colors peer-disabled:opacity-50 after:absolute after:top-0.5 after:left-0.5 after:h-5 after:w-5 after:rounded-full after:bg-white after:transition-transform peer-checked:after:translate-x-5" />
+              </label>
+            </div>
+          </div>
+        )}
 
         {/* Submit + inline success */}
         <div className="flex flex-wrap items-center gap-3">
