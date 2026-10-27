@@ -648,7 +648,7 @@ service cloud.firestore {
         && request.resource.data.sellerType in ['retailer', 'manufacturer']
         // Who-gets-paid fields are the server's (payout: Razorpay's transfer
         // status, functions/src/payouts/payout-status.ts).
-        && !request.resource.data.keys().hasAny(['payout', 'routeRelease', 'routeTransfer', 'reassignment', 'adminReassignment'])
+        && !request.resource.data.keys().hasAny(['payout', 'routeRelease', 'routeTransfer', 'reassignment'])
         && noProtectedPaymentKeys(request.resource.data.get('payment', null));
 
       // teamHas('users') covers the admin "view seller's dashboard" link.
