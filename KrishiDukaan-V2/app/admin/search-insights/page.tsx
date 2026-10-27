@@ -2,14 +2,17 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { collection, documentId, getDocs, query, where } from "firebase/firestore";
-import { Search, RefreshCw, Download, SearchX, LayoutGrid } from "lucide-react";
+import { Search, RefreshCw, Download, SearchX, LayoutGrid, MapPin, Package } from "lucide-react";
 import { db } from "../../firebase";
 
 /**
  * Admin > Search insights: what shoppers search for and browse, from the
  * daily aggregate docs searchStats/{YYYY-MM-DD} written by
- * /api/analytics/search. One read per day in range (≤ 90).
+ * /api/analytics/search. One read per day in range (≤ 90). Picking a state
+ * re-slices the same docs (no extra reads).
  */
+
+type Nested = Record<string, Record<string, number>>;
 
 type DayDoc = {
   date: string;
@@ -20,7 +23,19 @@ type DayDoc = {
   terms?: Record<string, number>;
   zeroResults?: Record<string, number>;
   categories?: Record<string, number>;
+  /** Main product category of each search's results. */
+  termCategories?: Record<string, number>;
+  /** Searches whose shopper's location was known. */
+  locatedTotal?: number;
+  states?: Record<string, number>;
+  stateTerms?: Nested;
+  stateZero?: Nested;
+  stateCategories?: Nested;
+  stateDistricts?: Nested;
+  stateBrowse?: Nested;
 };
+
+const ALL = "";
 
 const RANGES = [7, 30, 90] as const;
 const TOP_N = 25;
@@ -33,6 +48,17 @@ function addInto(target: Map<string, number>, src: Record<string, number> | unde
   if (!src) return;
   for (const [k, v] of Object.entries(src)) target.set(k, (target.get(k) ?? 0) + (Number(v) || 0));
 }
+
+function addNested(target: Map<string, Map<string, number>>, src: Nested | undefined) {
+  if (!src) return;
+  for (const [outer, inner] of Object.entries(src)) {
+    const m = target.get(outer) ?? new Map<string, number>();
+    addInto(m, inner);
+    target.set(outer, m);
+  }
+}
+
+const EMPTY = new Map<string, number>();
 
 function top(map: Map<string, number>, n = TOP_N): [string, number][] {
   return Array.from(map.entries()).sort((a, b) => b[1] - a[1]).slice(0, n);
@@ -58,12 +84,16 @@ function Tile({ label, value, hint }: { label: string; value: string; hint?: str
   );
 }
 
-function RankedList({ title, icon: Icon, rows, empty, note }: {
+function RankedList({ title, icon: Icon, rows, empty, note, onSelect, extra }: {
   title: string;
   icon: typeof Search;
   rows: [string, number][];
   empty: string;
   note?: string;
+  /** Makes each row a button (e.g. pick that state). */
+  onSelect?: (key: string) => void;
+  /** Small text under a row's name (e.g. a state's top product). */
+  extra?: (key: string) => string | undefined;
 }) {
   const max = rows[0]?.[1] ?? 1;
   return (
@@ -77,16 +107,35 @@ function RankedList({ title, icon: Icon, rows, empty, note }: {
         <p className="py-8 text-center text-sm text-on-surface-variant">{empty}</p>
       ) : (
         <ol className="space-y-1.5 mt-3">
-          {rows.map(([term, count], i) => (
-            <li key={term} className="grid grid-cols-[1.5rem_minmax(0,9rem)_1fr_3rem] items-center gap-2 text-sm" title={`${term}: ${count}`}>
-              <span className="text-xs text-on-surface-variant tabular-nums">{i + 1}</span>
-              <span className="truncate font-semibold text-on-surface">{term}</span>
-              <span className="h-2 rounded-r bg-surface-container">
-                <span className="block h-2 rounded-r bg-primary" style={{ width: `${Math.max(4, (count / max) * 100)}%` }} />
-              </span>
-              <span className="text-right tabular-nums text-on-surface-variant">{count.toLocaleString("en-IN")}</span>
-            </li>
-          ))}
+          {rows.map(([term, count], i) => {
+            const sub = extra?.(term);
+            const row = (
+              <>
+                <span className="text-xs text-on-surface-variant tabular-nums">{i + 1}</span>
+                <span className="min-w-0">
+                  <span className="block truncate font-semibold text-on-surface">{term}</span>
+                  {sub && <span className="block truncate text-[11px] text-on-surface-variant">{sub}</span>}
+                </span>
+                <span className="h-2 rounded-r bg-surface-container">
+                  <span className="block h-2 rounded-r bg-primary" style={{ width: `${Math.max(4, (count / max) * 100)}%` }} />
+                </span>
+                <span className="text-right tabular-nums text-on-surface-variant">{count.toLocaleString("en-IN")}</span>
+              </>
+            );
+            const grid = "grid grid-cols-[1.5rem_minmax(0,9rem)_1fr_3rem] items-center gap-2 text-sm";
+            return (
+              <li key={term} title={`${term}: ${count}`}>
+                {onSelect ? (
+                  <button type="button" onClick={() => onSelect(term)}
+                    className={`${grid} w-full text-left rounded-lg px-1 -mx-1 py-0.5 hover:bg-surface-container`}>
+                    {row}
+                  </button>
+                ) : (
+                  <div className={grid}>{row}</div>
+                )}
+              </li>
+            );
+          })}
         </ol>
       )}
     </section>
@@ -95,6 +144,7 @@ function RankedList({ title, icon: Icon, rows, empty, note }: {
 
 export default function AdminSearchInsightsPage() {
   const [range, setRange] = useState<(typeof RANGES)[number]>(30);
+  const [region, setRegion] = useState<string>(ALL);
   const [days, setDays] = useState<DayDoc[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -119,34 +169,96 @@ export default function AdminSearchInsightsPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(load, [range]);
 
+  // All of India, summed over the range.
   const agg = useMemo(() => {
     const terms = new Map<string, number>();
     const zero = new Map<string, number>();
     const cats = new Map<string, number>();
+    const termCats = new Map<string, number>();
     const sources = new Map<string, number>();
-    let total = 0, zeroTotal = 0, categoryTotal = 0;
+    const states = new Map<string, number>();
+    const stateTerms = new Map<string, Map<string, number>>();
+    const stateZero = new Map<string, Map<string, number>>();
+    const stateCats = new Map<string, Map<string, number>>();
+    const stateDistricts = new Map<string, Map<string, number>>();
+    const stateBrowse = new Map<string, Map<string, number>>();
+    let total = 0, zeroTotal = 0, categoryTotal = 0, locatedTotal = 0;
     for (const d of days) {
       total += d.total ?? 0;
       zeroTotal += d.zeroTotal ?? 0;
       categoryTotal += d.categoryTotal ?? 0;
+      locatedTotal += d.locatedTotal ?? 0;
       addInto(terms, d.terms);
       addInto(zero, d.zeroResults);
       addInto(cats, d.categories);
+      addInto(termCats, d.termCategories);
       addInto(sources, d.sources);
+      addInto(states, d.states);
+      addNested(stateTerms, d.stateTerms);
+      addNested(stateZero, d.stateZero);
+      addNested(stateCats, d.stateCategories);
+      addNested(stateDistricts, d.stateDistricts);
+      addNested(stateBrowse, d.stateBrowse);
     }
-    const byDay = new Map(days.map(d => [d.date, d.total ?? 0]));
+    return {
+      terms, zero, cats, termCats, sources, states, stateTerms, stateZero, stateCats, stateDistricts, stateBrowse,
+      total, zeroTotal, categoryTotal, locatedTotal,
+    };
+  }, [days]);
+
+  // What the lists show: all of India, or the picked state.
+  const view = useMemo(() => {
+    const sum = (m: Map<string, number>) => Array.from(m.values()).reduce((a, b) => a + b, 0);
+    const perDay = (d: DayDoc) => (region ? d.states?.[region] ?? 0 : d.total ?? 0);
+    const byDay = new Map(days.map(d => [d.date, perDay(d)]));
     const daily = Array.from({ length: range }, (_, i) => {
       const key = istDayKey(range - 1 - i);
       return { day: key, count: byDay.get(key) ?? 0 };
     });
-    return { terms, zero, cats, sources, total, zeroTotal, categoryTotal, daily };
-  }, [days, range]);
+    if (!region) {
+      return {
+        terms: agg.terms, zero: agg.zero, termCats: agg.termCats, browse: agg.cats,
+        total: agg.total, zeroTotal: agg.zeroTotal, browseTotal: agg.categoryTotal, daily,
+      };
+    }
+    const zero = agg.stateZero.get(region) ?? EMPTY;
+    const browse = agg.stateBrowse.get(region) ?? EMPTY;
+    return {
+      terms: agg.stateTerms.get(region) ?? EMPTY,
+      zero,
+      termCats: agg.stateCats.get(region) ?? EMPTY,
+      browse,
+      total: agg.states.get(region) ?? 0,
+      zeroTotal: sum(zero),
+      browseTotal: sum(browse),
+      daily,
+    };
+  }, [agg, days, range, region]);
 
-  const topTerms = top(agg.terms);
-  const topZero = top(agg.zero);
-  const topCats = top(agg.cats, 15);
-  const dailyMax = Math.max(1, ...agg.daily.map(d => d.count));
-  const pct = (n: number) => (agg.total ? `${Math.round((n / agg.total) * 100)}%` : "—");
+  const stateRows = top(agg.states, 40);
+  const topOf = (m: Map<string, number> | undefined) => (m ? top(m, 1)[0]?.[0] : undefined);
+  const topTerms = top(view.terms);
+  const topZero = top(view.zero);
+  const topTermCats = top(view.termCats, 15);
+  const topBrowse = top(view.browse, 15);
+  const topDistricts = region ? top(agg.stateDistricts.get(region) ?? EMPTY, 30) : [];
+  const dailyMax = Math.max(1, ...view.daily.map(d => d.count));
+  const pct = (n: number, of = agg.total) => (of ? `${Math.round((n / of) * 100)}%` : "—");
+  const place = region || "India";
+
+  const exportCsv = () => {
+    const rows: (string | number)[][] = [["region", "term", "searches", "searches_with_no_results"]];
+    const add = (label: string, terms: Map<string, number>, zero: Map<string, number>) => {
+      for (const [t, c] of Array.from(terms.entries()).sort((a, b) => b[1] - a[1])) rows.push([label, t, c, zero.get(t) ?? 0]);
+    };
+    if (region) {
+      add(region, view.terms, view.zero);
+    } else {
+      add("All India", agg.terms, agg.zero);
+      for (const [st] of stateRows) add(st, agg.stateTerms.get(st) ?? EMPTY, agg.stateZero.get(st) ?? EMPTY);
+    }
+    downloadCsv(`search-terms-${region ? region.replace(/\W+/g, "-").toLowerCase() + "-" : ""}${range}d.csv`, rows);
+  };
 
   return (
     <div className="space-y-6">
@@ -157,7 +269,7 @@ export default function AdminSearchInsightsPage() {
             <h1 className="text-2xl font-black text-on-surface">Search insights</h1>
           </div>
           <p className="text-sm text-on-surface-variant ml-9">
-            What farmers and shoppers search for and browse on the website and app. A search counts once it settles, once per visitor session.
+            What farmers and shoppers search for and browse on the website and app, and where they are. A search counts once it settles, once per visitor session.
           </p>
         </div>
         <div className="flex items-center gap-2 shrink-0">
@@ -169,16 +281,21 @@ export default function AdminSearchInsightsPage() {
               </button>
             ))}
           </div>
+          <select value={region} onChange={e => setRegion(e.target.value)} aria-label="Region"
+            className="rounded-xl border border-outline-variant bg-surface-container-lowest px-3 py-2 text-sm font-bold text-on-surface max-w-[11rem]">
+            <option value={ALL}>All India</option>
+            {/* Keep a picked state listed even if the new range has none. */}
+            {(region && !agg.states.has(region) ? [[region, 0] as [string, number], ...stateRows] : stateRows).map(([st, n]) => (
+              <option key={st} value={st}>{st} ({n.toLocaleString("en-IN")})</option>
+            ))}
+          </select>
           <button onClick={load} disabled={loading} title="Refresh"
             className="p-2.5 rounded-xl border border-outline-variant hover:bg-surface-container disabled:opacity-50">
             <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
           </button>
           <button
-            onClick={() => downloadCsv(`search-terms-${range}d.csv`, [
-              ["term", "searches", "searches_with_no_results"],
-              ...Array.from(agg.terms.entries()).sort((a, b) => b[1] - a[1]).map(([t, c]) => [t, c, agg.zero.get(t) ?? 0]),
-            ])}
-            disabled={agg.terms.size === 0}
+            onClick={exportCsv}
+            disabled={view.terms.size === 0}
             className="flex items-center gap-2 border border-outline-variant text-sm font-bold px-3 py-2 rounded-xl hover:bg-surface-container disabled:opacity-50">
             <Download className="h-4 w-4" /> CSV
           </button>
@@ -194,17 +311,29 @@ export default function AdminSearchInsightsPage() {
       ) : (
         <>
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-            <Tile label="Searches" value={agg.total.toLocaleString("en-IN")}
-              hint={`Web ${pct(agg.sources.get("web") ?? 0)} · App ${pct(agg.sources.get("app") ?? 0)}`} />
-            <Tile label="Unique terms" value={agg.terms.size.toLocaleString("en-IN")} />
-            <Tile label="No results" value={agg.zeroTotal.toLocaleString("en-IN")} hint={`${pct(agg.zeroTotal)} of searches found nothing`} />
-            <Tile label="Category browses" value={agg.categoryTotal.toLocaleString("en-IN")} />
+            {region ? (
+              <Tile label={`Searches · ${region}`} value={view.total.toLocaleString("en-IN")}
+                hint={`${pct(view.total, agg.locatedTotal)} of searches with a known location`} />
+            ) : (
+              <Tile label="Searches" value={agg.total.toLocaleString("en-IN")}
+                hint={`Web ${pct(agg.sources.get("web") ?? 0)} · App ${pct(agg.sources.get("app") ?? 0)}`} />
+            )}
+            <Tile label="Unique terms" value={view.terms.size.toLocaleString("en-IN")} />
+            <Tile label="No results" value={view.zeroTotal.toLocaleString("en-IN")}
+              hint={`${pct(view.zeroTotal, view.total)} of searches found nothing`} />
+            {region ? (
+              <Tile label="Districts" value={topDistricts.length.toLocaleString("en-IN")}
+                hint={topDistricts[0] ? `Most searches: ${topDistricts[0][0]}` : undefined} />
+            ) : (
+              <Tile label="Location known" value={pct(agg.locatedTotal)}
+                hint={`${agg.locatedTotal.toLocaleString("en-IN")} searches from ${agg.states.size} states`} />
+            )}
           </div>
 
           <section className="rounded-3xl border border-outline-variant/30 bg-surface-container-lowest p-5">
-            <h2 className="text-sm font-black text-on-surface mb-4">Searches per day</h2>
+            <h2 className="text-sm font-black text-on-surface mb-4">Searches per day{region ? ` · ${region}` : ""}</h2>
             <div className="flex items-end gap-[2px] h-32" role="img" aria-label="Searches per day">
-              {agg.daily.map(d => (
+              {view.daily.map(d => (
                 <div key={d.day} className="group relative flex-1 h-full flex items-end">
                   <div className="w-full rounded-t bg-primary/80 group-hover:bg-primary" style={{ height: `${(d.count / dailyMax) * 100}%`, minHeight: d.count ? 2 : 0 }} />
                   <div className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1 hidden group-hover:block whitespace-nowrap rounded-lg bg-on-surface px-2 py-1 text-[11px] font-bold text-white">
@@ -214,20 +343,42 @@ export default function AdminSearchInsightsPage() {
               ))}
             </div>
             <div className="mt-2 flex justify-between text-[11px] text-on-surface-variant">
-              <span>{agg.daily[0]?.day}</span>
-              <span>{agg.daily[agg.daily.length - 1]?.day}</span>
+              <span>{view.daily[0]?.day}</span>
+              <span>{view.daily[view.daily.length - 1]?.day}</span>
             </div>
           </section>
 
+          {region ? (
+            <RankedList title={`Districts in ${region}`} icon={MapPin} rows={topDistricts}
+              note="Districts use 2011 census boundaries, so a newer district shows under the one it was carved from."
+              empty="No district recorded yet." />
+          ) : (
+            <RankedList title="Searches by state" icon={MapPin} rows={stateRows}
+              note="Where shoppers search from — only those who allowed location (web or app). Tap a state to see its searches."
+              onSelect={setRegion}
+              extra={st => {
+                const term = topOf(agg.stateTerms.get(st));
+                const cat = topOf(agg.stateCats.get(st));
+                return [term && `Top: ${term}`, cat].filter(Boolean).join(" · ") || undefined;
+              }}
+              empty="No locations recorded yet. Locations are recorded from this update onwards." />
+          )}
+
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-            <RankedList title="Top searches" icon={Search} rows={topTerms}
+            <RankedList title={`Top searches · ${place}`} icon={Search} rows={topTerms}
               empty="No searches recorded in this period yet." />
-            <RankedList title="Searches with no results" icon={SearchX} rows={topZero}
+            <RankedList title={`Searches with no results · ${place}`} icon={SearchX} rows={topZero}
               note="Products people want that the marketplace doesn't list yet — good candidates to source or onboard."
               empty="Every search found something." />
           </div>
-          <RankedList title="Categories browsed" icon={LayoutGrid} rows={topCats}
-            empty="No category browsing recorded in this period yet." />
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+            <RankedList title={`Product categories searched · ${place}`} icon={Package} rows={topTermCats}
+              note="The main category of what each search found, e.g. “urea” counts as Fertilizers."
+              empty="No categorised searches yet. Recorded from this update onwards." />
+            <RankedList title={`Categories browsed · ${place}`} icon={LayoutGrid} rows={topBrowse}
+              note={region ? "Category taps from shoppers in this state." : undefined}
+              empty="No category browsing recorded in this period yet." />
+          </div>
         </>
       )}
     </div>

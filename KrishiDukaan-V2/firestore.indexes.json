@@ -2113,6 +2113,61 @@
       "collectionGroup": "marketplaceCards",
       "fieldPath": "listable",
       "indexes": []
+    },
+    {
+      "collectionGroup": "searchStats",
+      "fieldPath": "terms",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "searchStats",
+      "fieldPath": "zeroResults",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "searchStats",
+      "fieldPath": "categories",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "searchStats",
+      "fieldPath": "termCategories",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "searchStats",
+      "fieldPath": "sources",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "searchStats",
+      "fieldPath": "states",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "searchStats",
+      "fieldPath": "stateTerms",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "searchStats",
+      "fieldPath": "stateDistricts",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "searchStats",
+      "fieldPath": "stateCategories",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "searchStats",
+      "fieldPath": "stateZero",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "searchStats",
+      "fieldPath": "stateBrowse",
+      "indexes": []
     }
   ]
 }

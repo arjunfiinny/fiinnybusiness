@@ -1,14 +1,20 @@
 import { NextResponse } from "next/server";
 import { FieldValue } from "firebase-admin/firestore";
 import { getAdminDb } from "../../../lib/firebase-admin";
+import { lookupRegion } from "../../../lib/geo/region-lookup";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
  * POST /api/analytics/search
- * Body: { kind: "search", q: string, results?: number, source?: "web" | "app" }
- *    or { kind: "category", category: string, source?: "web" | "app" }
+ * Body: { kind: "search", q: string, results?: number, category?: string, lat?, lng?, source?: "web" | "app" }
+ *    or { kind: "category", category: string, lat?, lng?, source?: "web" | "app" }
+ *
+ * `category` on a search is the main product category of its results.
+ * `lat`/`lng` are sent only when the shopper's device knows a real location
+ * (never the default); they are turned into a state + district here and
+ * never stored — only the per-state/district counts are.
  *
  * Records what shoppers look for, for Admin > Search insights. Each call is
  * ONE merge write into the day's aggregate doc, searchStats/{YYYY-MM-DD}
@@ -52,6 +58,17 @@ function normalizeTerm(raw: unknown): string {
     .trim();
 }
 
+/** Category names come from our own chips/products; keep them verbatim but map-key safe. */
+function categoryKey(raw: unknown): string {
+  const key = String(raw ?? "").trim().slice(0, MAX_TERM).replace(NOT_CATEGORY_CHAR, "").trim();
+  return key.toLowerCase() === "all" ? "" : key;
+}
+
+/** State/district names are map keys too. */
+function placeKey(raw: string | undefined): string {
+  return String(raw ?? "").replace(NOT_CATEGORY_CHAR, "").trim();
+}
+
 function istDayKey(): string {
   return new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
 }
@@ -67,23 +84,50 @@ export async function POST(request: Request) {
   const day = istDayKey();
   const update: Record<string, unknown> = { date: day, updatedAt: FieldValue.serverTimestamp() };
 
+  // Where the shopper is, when their device knows (never stored as coordinates).
+  let state = "";
+  let district = "";
+  const lat = Number(body.lat);
+  const lng = Number(body.lng);
+  if (body.lat != null && body.lng != null && Number.isFinite(lat) && Number.isFinite(lng)) {
+    try {
+      const hit = await lookupRegion(lat, lng);
+      state = placeKey(hit?.state);
+      district = placeKey(hit?.district);
+    } catch (err) {
+      console.error("[analytics/search] region lookup failed", err);
+    }
+  }
+  const one = FieldValue.increment(1);
+
   if (body.kind === "category") {
-    const category = String(body.category ?? "").trim().slice(0, MAX_TERM);
-    // Category names come from our own chip list; keep them verbatim but map-key safe.
-    const key = category.replace(NOT_CATEGORY_CHAR, "").trim();
-    if (!key || key.toLowerCase() === "all") return new NextResponse(null, { status: 204 });
-    update.categoryTotal = FieldValue.increment(1);
-    update.categories = { [key]: FieldValue.increment(1) };
+    const key = categoryKey(body.category);
+    if (!key) return new NextResponse(null, { status: 204 });
+    update.categoryTotal = one;
+    update.categories = { [key]: one };
+    if (state) update.stateBrowse = { [state]: { [key]: one } };
   } else {
     const term = normalizeTerm(body.q);
     if (term.length < 2) return new NextResponse(null, { status: 204 });
     const results = Number(body.results);
-    update.total = FieldValue.increment(1);
-    update.sources = { [source]: FieldValue.increment(1) };
-    update.terms = { [term]: FieldValue.increment(1) };
-    if (Number.isFinite(results) && results === 0) {
-      update.zeroResults = { [term]: FieldValue.increment(1) };
-      update.zeroTotal = FieldValue.increment(1);
+    const noResults = Number.isFinite(results) && results === 0;
+    const category = noResults ? "" : categoryKey(body.category);
+    update.total = one;
+    update.sources = { [source]: one };
+    update.terms = { [term]: one };
+    if (noResults) {
+      update.zeroResults = { [term]: one };
+      update.zeroTotal = one;
+    }
+    // What kind of product was searched for (from the results).
+    if (category) update.termCategories = { [category]: one };
+    if (state) {
+      update.locatedTotal = one;
+      update.states = { [state]: one };
+      update.stateTerms = { [state]: { [term]: one } };
+      if (district) update.stateDistricts = { [state]: { [district]: one } };
+      if (category) update.stateCategories = { [state]: { [category]: one } };
+      if (noResults) update.stateZero = { [state]: { [term]: one } };
     }
   }
 

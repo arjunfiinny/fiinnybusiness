@@ -5,7 +5,13 @@
  * typing "u", "ur", "urea" records just "urea"; each term and category is
  * logged at most once per browser session. Fire-and-forget with keepalive, so
  * it never blocks the UI and survives navigating to a product right away.
+ *
+ * Each event also carries the shopper's last real location, rounded to ~1 km
+ * (the server turns it into a state + district and keeps only counts), and a
+ * search carries the main category of its results.
  */
+
+import { getLastKnownCoords } from "../utils/geolocation";
 
 const SETTLE_MS = 1500;
 const SESSION_KEY = "kd_logged_searches";
@@ -35,12 +41,19 @@ function markLogged(key: string): boolean {
   return true;
 }
 
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
 function send(body: Record<string, unknown>): void {
   try {
+    const at = getLastKnownCoords();
     void fetch("/api/analytics/search", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...body, source: "web" }),
+      body: JSON.stringify({
+        ...body,
+        source: "web",
+        ...(at ? { lat: round2(at.lat), lng: round2(at.lng) } : {}),
+      }),
       keepalive: true,
     }).catch(() => {});
   } catch {
@@ -48,14 +61,35 @@ function send(body: Record<string, unknown>): void {
   }
 }
 
+const GENERIC_CATEGORIES = new Set(["", "all", "general", "other", "others"]);
+
+/** The category most of these results belong to ("urea" -> Fertilizers), or "". */
+export function mainCategory(products: readonly { category?: string | null }[]): string {
+  const counts = new Map<string, { label: string; n: number }>();
+  for (const p of products.slice(0, 30)) {
+    const label = String(p.category ?? "").trim();
+    const key = label.toLowerCase();
+    if (GENERIC_CATEGORIES.has(key)) continue;
+    const c = counts.get(key) ?? { label, n: 0 };
+    c.n += 1;
+    counts.set(key, c);
+  }
+  let best = "";
+  let bestN = 0;
+  counts.forEach(({ label, n }) => {
+    if (n > bestN) { best = label; bestN = n; }
+  });
+  return best;
+}
+
 /** Call when the first page of results for [query] has loaded. */
-export function scheduleSearchLog(query: string, results: number): void {
+export function scheduleSearchLog(query: string, results: number, category = ""): void {
   if (pending) clearTimeout(pending);
   const q = query.trim().toLowerCase();
   if (q.length < 2) return;
   pending = setTimeout(() => {
     pending = null;
-    if (markLogged(`q:${q}`)) send({ kind: "search", q, results });
+    if (markLogged(`q:${q}`)) send({ kind: "search", q, results, ...(category ? { category } : {}) });
   }, SETTLE_MS);
 }
 

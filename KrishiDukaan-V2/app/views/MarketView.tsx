@@ -6,7 +6,7 @@ import { ICONS } from '../constants';
 import { motion, AnimatePresence } from 'framer-motion';
 import { HelperIcon, HelperTooltip } from '../../components/helpers';
 import { trackProductImpression } from '../firebase';
-import { logCategoryBrowse, scheduleSearchLog } from '../lib/search-analytics';
+import { logCategoryBrowse, mainCategory, scheduleSearchLog } from '../lib/search-analytics';
 import { useI18n } from '../i18n/I18nContext';
 import type { CartItem } from '../../types/order';
 import { Tag } from 'lucide-react';
@@ -274,7 +274,7 @@ export default function MarketView({
 
       // Admin > Search insights: what shoppers look for, and which searches find nothing.
       if (reset) {
-        if (searchParam) scheduleSearchLog(searchParam, json.products.length);
+        if (searchParam) scheduleSearchLog(searchParam, json.products.length, mainCategory(json.products));
         else if (categoryParam) logCategoryBrowse(categoryParam);
       }
 

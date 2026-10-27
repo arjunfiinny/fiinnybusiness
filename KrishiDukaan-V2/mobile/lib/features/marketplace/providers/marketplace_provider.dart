@@ -196,7 +196,12 @@ class MarketplaceNotifier extends StateNotifier<MarketplaceState> {
       _applyDistanceFilter();
       // Admin > Search insights: what shoppers look for, and what finds nothing.
       if (refresh && state.searchQuery.trim().isNotEmpty && seller == null) {
-        SearchAnalyticsService.instance.scheduleSearch(state.searchQuery, _all.length);
+        SearchAnalyticsService.instance.scheduleSearch(
+          state.searchQuery,
+          _all.length,
+          category: SearchAnalyticsService.mainCategory(_all.map((p) => p.category)),
+          at: _analyticsLocation(),
+        );
       }
       final firstPage = _all.take(_pageSize).toList();
       state = state.copyWith(
@@ -264,8 +269,20 @@ class MarketplaceNotifier extends StateNotifier<MarketplaceState> {
   void setCategory(String? category) {
     if (state.category == category) return;
     state = state.copyWith(category: () => category, searchQuery: '');
-    SearchAnalyticsService.instance.logCategory(category);
+    SearchAnalyticsService.instance.logCategory(category, at: _analyticsLocation());
     loadProducts(refresh: true);
+  }
+
+  /// Where the shopper is, for Search insights' state/district counts: the
+  /// device position, else the location they picked to browse. Never the
+  /// Pune fallback the location provider returns when GPS fails.
+  LatLng? _analyticsLocation() {
+    final gps = _ref.read(locationProvider).value;
+    if (gps != null && !(gps.lat == AppConfig.defaultLat && gps.lng == AppConfig.defaultLng)) {
+      return gps;
+    }
+    final picked = _ref.read(selectedLocationProvider);
+    return picked == null ? null : LatLng(picked.lat, picked.lng);
   }
 
   void search(String query) {
