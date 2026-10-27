@@ -1,9 +1,8 @@
 'use client';
 
-import { useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion, useInView } from 'framer-motion';
 import type { AboutPartner } from '../firebase';
-import { INDIA_OUTLINE, INDIA_VIEWBOX, PRESENCE_DOTS } from './india-map-data';
 
 /** Logos placed on the orbit; any beyond this go in a row below it. */
 const MAX_ORBIT = 8;
@@ -182,16 +181,24 @@ export function AboutPartnersSection({
   );
 }
 
-/** Every Nth dot also gets a slow pulse once the map has filled in. */
-const PULSE_EVERY = 8;
-/** Gap between dots popping in; 100 dots fill in about 2.5s. */
-const DOT_STAGGER_MS = 25;
+/** Gap between dots popping in; ~620 dots fill in under 3s. */
+const DOT_STAGGER_MS = 4.5;
+/** Dots this big (the busiest towns) keep pulsing after the intro. */
+const PULSE_MIN_RADIUS = 8.5;
+/** Same size as PRESENCE_MAP_SIZE, kept here so the frame can reserve space before the data loads. */
+const MAP_W = 600;
+const MAP_H = 575;
+
+type PresenceMapData = typeof import('./india-map-data');
 
 /**
- * "Presence across India": an animated dot map. Dots are a fixed set
- * (india-map-data.ts), so the About page never reads retailer/store data.
- * CSS-only animation that starts when the map scrolls into view and pauses
- * off-screen; reduced-motion users get the finished map.
+ * "Presence across India": a map of India where presence dots pop up,
+ * rippling out from Maharashtra, then the busiest towns pulse. The dots are
+ * a fixed set (india-map-data.ts), so the About page reads no store data.
+ * The base map is a cached static SVG; dot data loads only when the section
+ * nears the viewport; the dots animate once (CSS) and the pulses are
+ * compositor-only HTML rings, paused off-screen. Reduced motion shows the
+ * finished map.
  */
 export function AboutPresenceSection({
   label, title, subtitle, mapLabel,
@@ -202,14 +209,28 @@ export function AboutPresenceSection({
   mapLabel: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const near = useInView(ref, { once: true, margin: '400px' });
   const seen = useInView(ref, { once: true, amount: 0.3 });
   const visible = useInView(ref, { amount: 0 });
-  const introMs = (PRESENCE_DOTS.length / 2) * DOT_STAGGER_MS + 600;
+  const [data, setData] = useState<PresenceMapData | null>(null);
 
-  const dots: { x: number; y: number; i: number }[] = [];
-  for (let k = 0; k + 1 < PRESENCE_DOTS.length; k += 2) {
-    dots.push({ x: PRESENCE_DOTS[k], y: PRESENCE_DOTS[k + 1], i: k / 2 });
-  }
+  useEffect(() => {
+    if (!near || data) return;
+    let alive = true;
+    import('./india-map-data')
+      .then((m) => { if (alive) setData(m); })
+      .catch(() => { /* the base map still shows */ });
+    return () => { alive = false; };
+  }, [near, data]);
+
+  const dots = useMemo(() => {
+    const out: { x: number; y: number; r: number; i: number }[] = [];
+    const flat = data?.PRESENCE_DOTS ?? [];
+    for (let k = 0; k + 2 < flat.length; k += 3) out.push({ x: flat[k], y: flat[k + 1], r: flat[k + 2], i: k / 3 });
+    return out;
+  }, [data]);
+  const introMs = dots.length * DOT_STAGGER_MS + 550;
+  const pulses = dots.filter((d) => d.r >= PULSE_MIN_RADIUS);
 
   return (
     <section className="bg-white border-y border-surface-container py-16">
@@ -233,59 +254,56 @@ export function AboutPresenceSection({
 
         <div
           ref={ref}
-          className="kd-map md:col-span-3 rounded-3xl border border-surface-container bg-surface-container-low p-6 md:p-10 flex justify-center"
-          data-play={seen ? '' : undefined}
+          role="img"
+          aria-label={mapLabel}
+          className="kd-map md:col-span-3 relative w-full overflow-hidden rounded-3xl border border-surface-container shadow-ambient bg-[#d4ebf5]"
+          style={{ aspectRatio: `${MAP_W} / ${MAP_H}` }}
+          data-play={seen && data ? '' : undefined}
           data-paused={visible ? undefined : ''}
         >
-          <svg
-            viewBox={`0 0 ${INDIA_VIEWBOX.width} ${INDIA_VIEWBOX.height}`}
-            role="img"
-            aria-label={mapLabel}
-            className="w-full max-w-md h-auto text-primary"
-          >
-            <defs>
-              <pattern id="kd-map-grid" width="9" height="9" patternUnits="userSpaceOnUse">
-                <circle cx="4.5" cy="4.5" r="1.4" fill="currentColor" fillOpacity="0.16" />
-              </pattern>
-            </defs>
-            <path d={INDIA_OUTLINE} fill="currentColor" fillOpacity="0.06" />
-            <path
-              d={INDIA_OUTLINE}
-              fill="url(#kd-map-grid)"
-              stroke="currentColor"
-              strokeOpacity="0.28"
-              strokeWidth="1.5"
-              strokeLinejoin="round"
-            />
-            {dots.map(({ x, y, i }) =>
-              i % PULSE_EVERY === 0 ? (
-                <circle
-                  key={`p${i}`}
+          <img
+            src="/images/india-presence-map.svg"
+            alt=""
+            aria-hidden="true"
+            loading="lazy"
+            decoding="async"
+            draggable={false}
+            className="absolute inset-0 w-full h-full select-none"
+          />
+          {data && (
+            <>
+              <svg viewBox={`0 0 ${MAP_W} ${MAP_H}`} aria-hidden="true" className="absolute inset-0 w-full h-full">
+                <g fill="#f0602c" fillOpacity="0.5" stroke="#c43d10" strokeOpacity="0.7" strokeWidth="0.8">
+                  {dots.map(({ x, y, r, i }) => (
+                    <circle key={i} className="kd-map-dot" cx={x} cy={y} r={r} style={{ animationDelay: `${Math.round(i * DOT_STAGGER_MS)}ms` }} />
+                  ))}
+                </g>
+                <g fontSize="9.5" fontWeight="600" fill="#3f4a40" stroke="#fff" strokeWidth="2.6" strokeLinejoin="round" paintOrder="stroke">
+                  {data.PRESENCE_CITIES.map((c) => (
+                    <g key={c.name}>
+                      <circle cx={c.x} cy={c.y} r="1.8" stroke="none" />
+                      <text x={c.left ? c.x - 4 : c.x + 4} y={c.y + 3.2} textAnchor={c.left ? 'end' : 'start'}>{c.name}</text>
+                    </g>
+                  ))}
+                </g>
+              </svg>
+              {pulses.map(({ x, y, r, i }, n) => (
+                <span
+                  key={i}
                   className="kd-map-pulse"
-                  cx={x}
-                  cy={y}
-                  r="7"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  style={{ animationDelay: `${introMs + (i / PULSE_EVERY) * 450}ms` }}
+                  style={{
+                    left: `${((x - r) / MAP_W) * 100}%`,
+                    top: `${((y - r) / MAP_H) * 100}%`,
+                    width: `${((2 * r) / MAP_W) * 100}%`,
+                    animationDelay: `${introMs + n * 380}ms`,
+                  }}
                 />
-              ) : null,
-            )}
-            {dots.map(({ x, y, i }) => (
-              <circle
-                key={i}
-                className="kd-map-dot"
-                cx={x}
-                cy={y}
-                r="6.5"
-                fill="currentColor"
-                stroke="#fff"
-                strokeWidth="2"
-                style={{ animationDelay: `${i * DOT_STAGGER_MS}ms` }}
-              />
-            ))}
-          </svg>
+              ))}
+            </>
+          )}
+          <span className="absolute bottom-1.5 right-3 text-[9px] text-on-surface-variant/70 pointer-events-none">
+            Map data: Natural Earth, DataMeet (CC BY 4.0)
+          </span>
         </div>
       </div>
     </section>

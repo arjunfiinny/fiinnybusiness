@@ -1,5 +1,4 @@
 import 'dart:math' as math;
-import 'dart:ui' show PointMode;
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -342,10 +341,10 @@ class _OrbitPainter extends CustomPainter {
   bool shouldRepaint(_OrbitPainter old) => old.angles != angles || old.radius != radius;
 }
 
-/// "Presence across India": dots pop up across a map of India, then a few
-/// pulse. Same fixed dots as the website (india_map_data.dart), so it costs
-/// no reads. Starts once scrolled into view; reduce-motion shows the
-/// finished map.
+/// "Presence across India": a map of India where presence dots pop up,
+/// rippling out from Maharashtra, then the busiest towns pulse. Same fixed
+/// map and dots as the website (india_map_data.dart), so it costs no reads.
+/// Starts once scrolled into view; reduce-motion shows the finished map.
 class AboutPresenceCard extends StatefulWidget {
   final String label;
   final String title;
@@ -364,20 +363,39 @@ class AboutPresenceCard extends StatefulWidget {
   State<AboutPresenceCard> createState() => _AboutPresenceCardState();
 }
 
-/// Gap between dots popping in, and how long each pop takes.
-const _dotStaggerMs = 25;
+/// Gap between dots popping in (~620 dots fill in under 3s), and pop length.
+const _dotStaggerMs = 4.5;
 const _dotPopMs = 550;
-const _pulseEvery = 8;
+/// Dots this big (the busiest towns) keep pulsing after the intro.
+const _pulseMinRadius = 8.5;
+
+// Map palette (matches public/images/india-presence-map.svg on the web).
+const _mapSea = Color(0xFFD4EBF5);
+const _mapSeaDeep = Color(0xFFBFE0EF);
+const _mapLand = Color(0xFFECEEE6);
+const _mapBorder = Color(0xFFC4C9BD);
+const _mapIndia = Color(0xFFF8F7F0);
+const _mapIndiaEdge = Color(0xFF8FA58F);
+const _mapStates = Color(0xFFCFD5C8);
+const _mapCountryText = Color(0xFF8A9488);
+const _mapSeaText = Color(0xFF6F9FB8);
+const _mapCityText = Color(0xFF3F4A40);
+const _dotFill = Color(0x80F0602C);
+const _dotEdge = Color(0xB3C43D10);
+const _pulseColor = Color(0xFFE25024);
+
+final int _dotCount = kPresenceDots.length ~/ 3;
+final int _introMs = (_dotCount * _dotStaggerMs).round() + _dotPopMs;
 
 class _AboutPresenceCardState extends State<AboutPresenceCard> with TickerProviderStateMixin {
   late final AnimationController _intro = AnimationController(
     vsync: this,
-    duration: Duration(milliseconds: (kPresenceDots.length ~/ 2) * _dotStaggerMs + _dotPopMs),
+    duration: Duration(milliseconds: _introMs),
   )..addStatusListener((status) {
       if (status == AnimationStatus.completed && !_reduced) _pulse.repeat();
     });
   late final AnimationController _pulse =
-      AnimationController(vsync: this, duration: const Duration(milliseconds: 3600));
+      AnimationController(vsync: this, duration: const Duration(milliseconds: 3200));
   ScrollPosition? _scroll;
   bool _reduced = false;
 
@@ -452,25 +470,28 @@ class _AboutPresenceCardState extends State<AboutPresenceCard> with TickerProvid
           Text(widget.subtitle!, style: AppTextStyles.bodySmall.copyWith(color: AppColors.onSurfaceVariant)),
         ],
         const SizedBox(height: 12),
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.all(20),
-          decoration: BoxDecoration(
-            color: AppColors.surfaceVariant.withValues(alpha: 0.5),
+        Semantics(
+          label: widget.mapLabel,
+          image: true,
+          child: ClipRRect(
             borderRadius: BorderRadius.circular(16),
-          ),
-          child: Semantics(
-            label: widget.mapLabel,
-            image: true,
             child: AspectRatio(
-              aspectRatio: kIndiaMapWidth / kIndiaMapHeight,
+              aspectRatio: kPresenceMapWidth / kPresenceMapHeight,
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-                  // Outline + dot grid never change: painted once and cached.
-                  const RepaintBoundary(child: CustomPaint(painter: _IndiaOutlinePainter())),
-                  RepaintBoundary(
-                    child: CustomPaint(painter: _PresenceDotsPainter(_intro, _pulse)),
+                  // Map and labels never change: each painted once and cached.
+                  const RepaintBoundary(child: CustomPaint(painter: _BaseMapPainter())),
+                  RepaintBoundary(child: CustomPaint(painter: _PresenceDotsPainter(_intro))),
+                  RepaintBoundary(child: CustomPaint(painter: _PulsePainter(_pulse))),
+                  const RepaintBoundary(child: CustomPaint(painter: _CityLabelsPainter())),
+                  Positioned(
+                    right: 8,
+                    bottom: 4,
+                    child: Text(
+                      'Map data: Natural Earth, DataMeet (CC BY 4.0)',
+                      style: AppTextStyles.caption.copyWith(fontSize: 7, color: AppColors.onSurfaceVariant),
+                    ),
                   ),
                 ],
               ),
@@ -482,119 +503,228 @@ class _AboutPresenceCardState extends State<AboutPresenceCard> with TickerProvid
   }
 }
 
-/// kIndiaOutline holds only absolute M/L/Z commands; parsed once per run.
-final Path _indiaPath = () {
+/// Map paths hold only absolute M/L/Z commands; each is parsed once per run.
+Path _parseMapPath(String d) {
   final path = Path();
-  final tokens = RegExp(r'[MLZ]|-?\d*\.?\d+(?:e-?\d+)?').allMatches(kIndiaOutline).map((m) => m[0]!).toList();
-  String cmd = 'M';
+  final tokens = RegExp(r'[MLZ]|-?\d*\.?\d+').allMatches(d).map((m) => m[0]!).toList();
+  var cmd = 'M';
   for (var i = 0; i < tokens.length;) {
     final t = tokens[i];
     if (t == 'Z') {
       path.close();
       i++;
-      continue;
-    }
-    if (t == 'M' || t == 'L') {
+    } else if (t == 'M' || t == 'L') {
       cmd = t;
       i++;
-      continue;
-    }
-    if (i + 1 >= tokens.length) break;
-    final x = double.parse(tokens[i]);
-    final y = double.parse(tokens[i + 1]);
-    if (cmd == 'M') {
-      path.moveTo(x, y);
-      cmd = 'L';
     } else {
-      path.lineTo(x, y);
+      if (i + 1 >= tokens.length) break;
+      final x = double.parse(tokens[i]);
+      final y = double.parse(tokens[i + 1]);
+      cmd == 'M' ? path.moveTo(x, y) : path.lineTo(x, y);
+      i += 2;
     }
-    i += 2;
   }
   return path;
-}();
+}
 
-class _IndiaOutlinePainter extends CustomPainter {
-  const _IndiaOutlinePainter();
+final Path _landPath = _parseMapPath(kMapLand);
+final Path _indiaPath = _parseMapPath(kMapIndia);
+final Path _statesPath = _parseMapPath(kMapStates);
+
+/// Map units → screen; labels and dots get a little extra size on phones so
+/// they stay readable when the 600-unit map is ~330px wide.
+double _mapScale(Size size) => size.width / kPresenceMapWidth;
+double _dotBoost(double s) => 1 + 0.4 * (1 - s).clamp(0.0, 1.0);
+
+void _paintLabel(Canvas canvas, String text, Offset at, TextStyle style, {TextAlign align = TextAlign.center, bool halo = false}) {
+  TextPainter painter(TextStyle st) => TextPainter(
+        text: TextSpan(text: text, style: st),
+        textDirection: TextDirection.ltr,
+        textAlign: align,
+      )..layout();
+  final fill = painter(style);
+  final dx = switch (align) {
+    TextAlign.right => -fill.width,
+    TextAlign.left => 0.0,
+    _ => -fill.width / 2,
+  };
+  final pos = at + Offset(dx, -fill.height / 2);
+  if (halo) {
+    // A style can't carry both color and foreground, so the halo is built fresh.
+    painter(TextStyle(
+      fontSize: style.fontSize,
+      fontWeight: style.fontWeight,
+      fontStyle: style.fontStyle,
+      letterSpacing: style.letterSpacing,
+      foreground: Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.6
+        ..strokeJoin = StrokeJoin.round
+        ..color = Colors.white,
+    )).paint(canvas, pos);
+  }
+  fill.paint(canvas, pos);
+}
+
+class _BaseMapPainter extends CustomPainter {
+  const _BaseMapPainter();
 
   @override
   void paint(Canvas canvas, Size size) {
-    final s = size.width / kIndiaMapWidth;
+    final rect = Offset.zero & size;
+    canvas.drawRect(
+      rect,
+      Paint()
+        ..shader = const RadialGradient(
+          center: Alignment(0, 0.7),
+          radius: 1.1,
+          colors: [_mapSeaDeep, _mapSea],
+        ).createShader(rect),
+    );
+    final s = _mapScale(size);
     canvas.save();
     canvas.scale(s);
-    canvas.drawPath(_indiaPath, Paint()..color = _accent.withValues(alpha: 0.06));
-    canvas.save();
-    canvas.clipPath(_indiaPath);
-    const step = 9.0;
-    final grid = <Offset>[
-      for (var y = step / 2; y < kIndiaMapHeight; y += step)
-        for (var x = step / 2; x < kIndiaMapWidth; x += step) Offset(x, y),
-    ];
-    canvas.drawPoints(
-      PointMode.points,
-      grid,
+    canvas.drawPath(_landPath, Paint()..color = _mapLand);
+    canvas.drawPath(
+      _landPath,
       Paint()
-        ..color = _accent.withValues(alpha: 0.16)
-        ..strokeWidth = 2.8
-        ..strokeCap = StrokeCap.round,
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 0.8
+        ..strokeJoin = StrokeJoin.round
+        ..color = _mapBorder,
     );
-    canvas.restore();
+    canvas.drawPath(_indiaPath, Paint()..color = _mapIndia);
+    canvas.drawPath(
+      _statesPath,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 0.7
+        ..strokeJoin = StrokeJoin.round
+        ..color = _mapStates,
+    );
     canvas.drawPath(
       _indiaPath,
       Paint()
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.5
+        ..strokeWidth = 1.2 / s.clamp(0.5, 1.0)
         ..strokeJoin = StrokeJoin.round
-        ..color = _accent.withValues(alpha: 0.28),
+        ..color = _mapIndiaEdge,
     );
     canvas.restore();
+
+    for (final (x, y, text, isSea) in kMapAreaLabels) {
+      _paintLabel(
+        canvas,
+        text,
+        Offset(x * s, y * s),
+        TextStyle(
+          fontSize: isSea ? 10 : 9,
+          fontWeight: isSea ? FontWeight.w400 : FontWeight.w600,
+          fontStyle: isSea ? FontStyle.italic : FontStyle.normal,
+          letterSpacing: isSea ? 0.5 : 0.2,
+          color: isSea ? _mapSeaText : _mapCountryText,
+        ),
+      );
+    }
   }
 
   @override
-  bool shouldRepaint(_IndiaOutlinePainter oldDelegate) => false;
+  bool shouldRepaint(_BaseMapPainter oldDelegate) => false;
 }
 
 class _PresenceDotsPainter extends CustomPainter {
-  final Animation<double> intro;
-  final Animation<double> pulse;
+  final AnimationController intro;
 
-  _PresenceDotsPainter(this.intro, this.pulse) : super(repaint: Listenable.merge([intro, pulse]));
+  _PresenceDotsPainter(this.intro) : super(repaint: intro);
 
-  static final _fill = Paint()..color = _accent;
-  static final _edge = Paint()..color = Colors.white;
-  static final _ring = Paint()
+  static final _fill = Paint()..color = _dotFill;
+  static final _edge = Paint()
     ..style = PaintingStyle.stroke
-    ..strokeWidth = 2;
+    ..strokeWidth = 0.8
+    ..color = _dotEdge;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final s = size.width / kIndiaMapWidth;
-    canvas.save();
-    canvas.scale(s);
-    final introMs = intro.value * (intro as AnimationController).duration!.inMilliseconds;
-    final count = kPresenceDots.length ~/ 2;
-
-    if (pulse.isAnimating) {
-      for (var i = 0; i < count; i += _pulseEvery) {
-        final phase = (pulse.value - (i ~/ _pulseEvery) * 0.125) % 1.0;
-        if (phase > 0.7) continue;
-        final t = Curves.easeOut.transform(phase / 0.7);
-        _ring.color = _accent.withValues(alpha: 0.55 * (1 - t));
-        canvas.drawCircle(Offset(kPresenceDots[i * 2], kPresenceDots[i * 2 + 1]), 7 * (1 + 2.2 * t), _ring);
-      }
-    }
-
-    for (var i = 0; i < count; i++) {
-      final local = ((introMs - i * _dotStaggerMs) / _dotPopMs).clamp(0.0, 1.0);
+    final s = _mapScale(size);
+    final boost = _dotBoost(s);
+    final elapsed = intro.value * _introMs;
+    for (var i = 0; i < _dotCount; i++) {
+      final local = ((elapsed - i * _dotStaggerMs) / _dotPopMs).clamp(0.0, 1.0);
       if (local <= 0) break; // later dots haven't started yet
-      final scale = Curves.easeOutBack.transform(local);
-      final c = Offset(kPresenceDots[i * 2], kPresenceDots[i * 2 + 1]);
-      canvas.drawCircle(c, 7.5 * scale, _edge);
-      canvas.drawCircle(c, 6.5 * scale, _fill);
+      final r = kPresenceDots[i * 3 + 2] * s * boost * Curves.easeOutBack.transform(local);
+      if (r <= 0) continue;
+      final c = Offset(kPresenceDots[i * 3] * s, kPresenceDots[i * 3 + 1] * s);
+      canvas.drawCircle(c, r, _fill);
+      canvas.drawCircle(c, r, _edge);
     }
-    canvas.restore();
   }
 
   @override
-  bool shouldRepaint(_PresenceDotsPainter oldDelegate) =>
-      oldDelegate.intro != intro || oldDelegate.pulse != pulse;
+  bool shouldRepaint(_PresenceDotsPainter oldDelegate) => oldDelegate.intro != intro;
+}
+
+/// Indices of the dots that pulse (computed once).
+final List<int> _pulseDots = [
+  for (var i = 0; i < _dotCount; i++)
+    if (kPresenceDots[i * 3 + 2] >= _pulseMinRadius) i,
+];
+
+class _PulsePainter extends CustomPainter {
+  final AnimationController pulse;
+
+  _PulsePainter(this.pulse) : super(repaint: pulse);
+
+  static final _ring = Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 1.6;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (!pulse.isAnimating) return;
+    final s = _mapScale(size);
+    final boost = _dotBoost(s);
+    for (var n = 0; n < _pulseDots.length; n++) {
+      // Staggered like the web (each ring ~0.38s after the previous).
+      final phase = (pulse.value - n * 0.119) % 1.0;
+      if (phase > 0.7) continue;
+      final t = Curves.easeOut.transform(phase / 0.7);
+      final i = _pulseDots[n];
+      _ring.color = _pulseColor.withValues(alpha: 0.7 * (1 - t));
+      canvas.drawCircle(
+        Offset(kPresenceDots[i * 3] * s, kPresenceDots[i * 3 + 1] * s),
+        kPresenceDots[i * 3 + 2] * s * boost * (1 + 2 * t),
+        _ring,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(_PulsePainter oldDelegate) => oldDelegate.pulse != pulse;
+}
+
+class _CityLabelsPainter extends CustomPainter {
+  const _CityLabelsPainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final s = _mapScale(size);
+    final dot = Paint()..color = _mapCityText;
+    final fontSize = (9.5 * s).clamp(8.0, 11.0);
+    final style = TextStyle(fontSize: fontSize, fontWeight: FontWeight.w600, color: _mapCityText);
+    for (final (x, y, name, left) in kMapCities) {
+      final at = Offset(x * s, y * s);
+      canvas.drawCircle(at, 1.8, dot);
+      _paintLabel(
+        canvas,
+        name,
+        at + Offset(left ? -4 : 4, 0),
+        style,
+        align: left ? TextAlign.right : TextAlign.left,
+        halo: true,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(_CityLabelsPainter oldDelegate) => false;
 }
