@@ -60,6 +60,7 @@ await t('helper cannot read team list', assertFails(getDocs(collection(staff, 's
 console.log('products');
 await t('owner edits own product', assertSucceeds(updateDoc(doc(owner, 'products', 'p1'), { price: 11 })));
 await t('helper edits shop product', assertSucceeds(updateDoc(doc(staff, 'products', 'p1'), { price: 12 })));
+await t('helper cannot change product identity (canonicalId)', assertFails(updateDoc(doc(staff, 'products', 'p1'), { canonicalId: 'other-product' })));
 await t('helper cannot edit other shop product', assertFails(updateDoc(doc(staff, 'products', 'p2'), { price: 1 })));
 await t('stranger cannot edit shop product', assertFails(updateDoc(doc(stranger, 'products', 'p1'), { price: 1 })));
 await t('orders-only helper cannot edit product', assertFails(updateDoc(doc(orders, 'products', 'p1'), { price: 1 })));

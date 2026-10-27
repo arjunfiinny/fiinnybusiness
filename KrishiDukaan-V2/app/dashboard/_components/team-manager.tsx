@@ -18,7 +18,7 @@ import {
  * /api/team; the list loads once when this mounts.
  */
 
-type TeamData = { owner: { phone: string; name: string; role: string }; limit: number; members: TeamMember[] };
+type TeamData = { owner: { phone: string; name: string; role: string }; members: TeamMember[] };
 
 async function teamApi(method: "GET" | "POST", ownerPhone: string | undefined, body?: Record<string, unknown>) {
   const token = await auth.currentUser?.getIdToken();
@@ -81,7 +81,7 @@ function PermissionPicker({ value, onChange }: { value: StaffPermission[]; onCha
   );
 }
 
-export function TeamManager({ ownerPhone, adminMode = false }: { ownerPhone?: string; adminMode?: boolean }) {
+export function TeamManager({ ownerPhone }: { ownerPhone?: string }) {
   const [data, setData] = useState<TeamData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -94,7 +94,6 @@ export function TeamManager({ ownerPhone, adminMode = false }: { ownerPhone?: st
   const [perms, setPerms] = useState<StaffPermission[]>([...STAFF_PRESETS[0].permissions]);
   const [editing, setEditing] = useState<string | null>(null);
   const [editPerms, setEditPerms] = useState<StaffPermission[]>([]);
-  const [limitDraft, setLimitDraft] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -102,7 +101,6 @@ export function TeamManager({ ownerPhone, adminMode = false }: { ownerPhone?: st
     try {
       const d = (await teamApi("GET", ownerPhone)) as TeamData;
       setData(d);
-      setLimitDraft(String(d.limit));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -152,8 +150,6 @@ export function TeamManager({ ownerPhone, adminMode = false }: { ownerPhone?: st
   }
 
   const members = data?.members ?? [];
-  const limit = data?.limit ?? 0;
-  const atLimit = members.length >= limit;
 
   return (
     <div className="space-y-5">
@@ -181,22 +177,15 @@ export function TeamManager({ ownerPhone, adminMode = false }: { ownerPhone?: st
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm font-bold text-on-surface">
           <UsersRound className="mr-1.5 inline h-4 w-4 text-primary" />
-          {members.length} of {limit} helper{limit === 1 ? "" : "s"}
+          {members.length} helper{members.length === 1 ? "" : "s"}
         </p>
         {!adding && (
-          <button type="button" onClick={() => { setAdding(true); setNotice(null); }} disabled={atLimit}
-            title={atLimit ? "Helper limit reached" : undefined}
+          <button type="button" onClick={() => { setAdding(true); setNotice(null); }}
             className="inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-bold text-white hover:opacity-90 disabled:opacity-50">
             <UserPlus className="h-4 w-4" /> Add helper
           </button>
         )}
       </div>
-      {atLimit && !adding && (
-        <p className="text-xs text-on-surface-variant">
-          {limit === 0 ? "Helpers aren't enabled for this shop." : "You've reached the helper limit for this shop."}
-          {!adminMode && " Contact KrishiDukan support if you need more."}
-        </p>
-      )}
 
       {adding && (
         <form onSubmit={submitAdd} className="space-y-4 rounded-2xl border border-outline-variant/40 bg-white p-5">
@@ -300,20 +289,6 @@ export function TeamManager({ ownerPhone, adminMode = false }: { ownerPhone?: st
         </ul>
       )}
 
-      {adminMode && (
-        <div className="flex flex-wrap items-end gap-2 rounded-2xl border border-outline-variant/30 bg-surface-container-low p-4">
-          <label className="block">
-            <span className="mb-1 block text-xs font-bold uppercase tracking-wider text-on-surface-variant">Helper limit for this shop</span>
-            <input type="number" min={0} max={20} value={limitDraft} onChange={(e) => setLimitDraft(e.target.value)}
-              className="w-24 rounded-xl border border-outline-variant/50 bg-white px-3 py-2 text-sm" />
-          </label>
-          <button type="button" disabled={busy === "limit" || limitDraft === String(limit)}
-            onClick={() => run("limit", { action: "setLimit", limit: Number(limitDraft) }, `Helper limit set to ${limitDraft}.`)}
-            className="rounded-xl bg-primary px-4 py-2 text-xs font-bold text-white disabled:opacity-50">
-            {busy === "limit" ? "Saving…" : "Save limit"}
-          </button>
-        </div>
-      )}
     </div>
   );
 }

@@ -38,9 +38,8 @@ class TeamMember {
 
 class TeamData {
   final String shopName;
-  final int limit;
   final List<TeamMember> members;
-  const TeamData({required this.shopName, required this.limit, required this.members});
+  const TeamData({required this.shopName, required this.members});
 }
 
 /// Talks to the website's /api/team endpoints — the only writer of shop
@@ -86,7 +85,6 @@ class TeamService {
     final body = _decode(res);
     return TeamData(
       shopName: ((body['owner'] as Map?)?['name'] ?? '').toString(),
-      limit: (body['limit'] as num?)?.toInt() ?? 0,
       members: [
         for (final m in (body['members'] as List? ?? const []))
           TeamMember.fromJson(Map<String, dynamic>.from(m as Map)),

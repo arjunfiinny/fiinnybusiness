@@ -28,10 +28,6 @@ export const STAFF_PRESETS: { key: string; label: string; permissions: StaffPerm
   { key: "manager", label: "Manager", permissions: [...STAFF_PERMISSIONS] },
 ];
 
-/** Helpers per shop unless an admin sets users/{owner}.teamLimit. */
-export const DEFAULT_TEAM_LIMIT = 2;
-export const MAX_TEAM_LIMIT = 20;
-
 export type StaffStatus = "active" | "paused";
 
 export type TeamMember = {

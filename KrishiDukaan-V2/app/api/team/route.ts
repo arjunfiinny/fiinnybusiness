@@ -2,8 +2,6 @@ import { NextResponse } from "next/server";
 import { FieldValue, type DocumentSnapshot } from "firebase-admin/firestore";
 import { getAdminDb } from "../../lib/firebase-admin";
 import {
-  DEFAULT_TEAM_LIMIT,
-  MAX_TEAM_LIMIT,
   STAFF_PERMISSION_INFO,
   cleanPermissions,
   phoneKey,
@@ -20,7 +18,9 @@ export const dynamic = "force-dynamic";
 
 /**
  * GET  /api/team?owner=+91…   the shop's helpers (owner, or admin for any shop)
- * POST /api/team              { action: "add" | "update" | "remove" | "setLimit", owner?, phone, name?, permissions?, status?, limit? }
+ * POST /api/team              { action: "add" | "update" | "remove", owner?, phone, name?, permissions?, status? }
+ *
+ * A shop may have any number of helpers.
  *
  * The only writer of shopTeams/, staffIndex/ and users/{helper}.shopStaff
  * (firestore.rules deny clients). Owners manage their own shop; admins (and
@@ -32,7 +32,7 @@ const SELLER_ROLES = ["retailer", "manufacturer"];
 // A number that already runs its own shop or works in admin can't be a helper.
 const BLOCKED_HELPER_ROLES = ["retailer", "manufacturer", "admin", "team", "salesExecutive", "salesManager"];
 
-type Owner = { phone: string; uid: string; name: string; role: "retailer" | "manufacturer"; limit: number };
+type Owner = { phone: string; uid: string; name: string; role: "retailer" | "manufacturer" };
 
 function bad(status: number, error: string) {
   return NextResponse.json({ error }, { status });
@@ -54,13 +54,11 @@ async function loadOwner(phone: string): Promise<Owner | null> {
   const snap = await userDoc(phone);
   const d = snap?.data();
   if (!snap || !d || !SELLER_ROLES.includes(String(d.role))) return null;
-  const limit = Number(d.teamLimit);
   return {
     phone: `+91${phoneKey(snap.id)}`,
     uid: String(d.uid ?? "") || "",
     name: String(d.shopName || d.businessName || d.name || "Your shop").trim(),
     role: d.role,
-    limit: Number.isFinite(limit) && limit >= 0 ? Math.min(limit, MAX_TEAM_LIMIT) : DEFAULT_TEAM_LIMIT,
   };
 }
 
@@ -106,7 +104,6 @@ export async function GET(request: Request) {
   const snap = await getAdminDb().collection("shopTeams").doc(owner.phone).collection("members").get();
   return NextResponse.json({
     owner: { phone: owner.phone, name: owner.name, role: owner.role },
-    limit: owner.limit,
     members: snap.docs.map(toMember).sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? "")),
   });
 }
@@ -127,15 +124,6 @@ export async function POST(request: Request) {
   const byAdmin = phoneKey(caller.phone) !== phoneKey(owner.phone);
   const actor = byAdmin ? "KrishiDukan admin" : owner.name;
 
-  if (action === "setLimit") {
-    if (!caller.canManageAnyShop) return bad(403, "Only KrishiDukan admins can change the team limit.");
-    const limit = Math.trunc(Number(body.limit));
-    if (!Number.isFinite(limit) || limit < 0 || limit > MAX_TEAM_LIMIT) return bad(400, `Limit must be 0–${MAX_TEAM_LIMIT}.`);
-    const ownerSnap = await userDoc(owner.phone);
-    await ownerSnap!.ref.update({ teamLimit: limit, updatedAt: FieldValue.serverTimestamp() });
-    return NextResponse.json({ ok: true, limit });
-  }
-
   const staffPhone = toIndianE164(body.phone);
   if (!staffPhone) return bad(400, "Enter a valid 10-digit mobile number.");
   if (phoneKey(staffPhone) === phoneKey(owner.phone)) return bad(400, "That's the shop owner's own number.");
@@ -150,11 +138,10 @@ export async function POST(request: Request) {
     const permissions = cleanPermissions(body.permissions);
     if (permissions.length === 0) return bad(400, "Choose at least one thing the helper can do.");
 
-    const [staffUser, existingRec, memberSnap, countSnap] = await Promise.all([
+    const [staffUser, existingRec, memberSnap] = await Promise.all([
       userDoc(staffPhone),
       getStaffRecord(staffPhone),
       memberRef.get(),
-      teamRef.collection("members").count().get(),
     ]);
     if (memberSnap.exists) return bad(409, "This number is already in the team.");
     const staffRole = String(staffUser?.data()?.role ?? "");
@@ -163,11 +150,6 @@ export async function POST(request: Request) {
     }
     if (existingRec && phoneKey(existingRec.ownerPhone) !== phoneKey(owner.phone)) {
       return bad(409, "This number is already a helper for another shop.");
-    }
-    if (countSnap.data().count >= owner.limit) {
-      return bad(409, owner.limit === 0
-        ? "Team helpers are not enabled for this shop. Contact KrishiDukan support."
-        : `This shop can have up to ${owner.limit} helpers. Remove one, or ask KrishiDukan to raise the limit.`);
     }
 
     const hint: ShopStaffHint = { ownerPhone: owner.phone, ownerName: owner.name, ownerRole: owner.role };
