@@ -160,13 +160,12 @@ export default function AboutView() {
         </div>
       </section>
 
-      {content?.presenceEnabled && content.presenceImageUrl && (
+      {content?.presenceEnabled && (
         <AboutPresenceSection
           label={t('aboutPresenceLabel')}
           title={content.presenceTitle || t('aboutPresenceTitle')}
           subtitle={content.presenceSubtitle}
-          imageUrl={content.presenceImageUrl}
-          imageAlt={t('aboutPresenceImageAlt')}
+          mapLabel={t('aboutPresenceImageAlt')}
         />
       )}
 

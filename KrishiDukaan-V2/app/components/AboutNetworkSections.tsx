@@ -3,6 +3,7 @@
 import { useRef } from 'react';
 import { motion, useInView } from 'framer-motion';
 import type { AboutPartner } from '../firebase';
+import { INDIA_OUTLINE, INDIA_VIEWBOX, PRESENCE_DOTS } from './india-map-data';
 
 /** Logos placed on the orbit; any beyond this go in a row below it. */
 const MAX_ORBIT = 8;
@@ -181,19 +182,35 @@ export function AboutPartnersSection({
   );
 }
 
+/** Every Nth dot also gets a slow pulse once the map has filled in. */
+const PULSE_EVERY = 8;
+/** Gap between dots popping in; 100 dots fill in about 2.5s. */
+const DOT_STAGGER_MS = 25;
+
 /**
- * "Presence across India" — an admin-uploaded image (e.g. a map snapshot)
- * instead of a live map, so the About page never reads retailer/store data.
+ * "Presence across India": an animated dot map. Dots are a fixed set
+ * (india-map-data.ts), so the About page never reads retailer/store data.
+ * CSS-only animation that starts when the map scrolls into view and pauses
+ * off-screen; reduced-motion users get the finished map.
  */
 export function AboutPresenceSection({
-  label, title, subtitle, imageUrl, imageAlt,
+  label, title, subtitle, mapLabel,
 }: {
   label: string;
   title: string;
   subtitle?: string;
-  imageUrl: string;
-  imageAlt: string;
+  mapLabel: string;
 }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const seen = useInView(ref, { once: true, amount: 0.3 });
+  const visible = useInView(ref, { amount: 0 });
+  const introMs = (PRESENCE_DOTS.length / 2) * DOT_STAGGER_MS + 600;
+
+  const dots: { x: number; y: number; i: number }[] = [];
+  for (let k = 0; k + 1 < PRESENCE_DOTS.length; k += 2) {
+    dots.push({ x: PRESENCE_DOTS[k], y: PRESENCE_DOTS[k + 1], i: k / 2 });
+  }
+
   return (
     <section className="bg-white border-y border-surface-container py-16">
       <div className="px-4 md:px-10 max-w-7xl mx-auto w-full grid grid-cols-1 md:grid-cols-5 gap-10 items-center">
@@ -214,21 +231,62 @@ export function AboutPresenceSection({
           {subtitle && <p className="text-on-surface-variant text-base md:text-lg leading-relaxed mt-4">{subtitle}</p>}
         </motion.div>
 
-        <motion.div
-          initial={{ opacity: 0, scale: 0.97 }}
-          whileInView={{ opacity: 1, scale: 1 }}
-          viewport={{ once: true }}
-          transition={{ duration: 0.5 }}
-          className="md:col-span-3 rounded-3xl overflow-hidden border border-surface-container shadow-ambient bg-surface-container-low"
+        <div
+          ref={ref}
+          className="kd-map md:col-span-3 rounded-3xl border border-surface-container bg-surface-container-low p-6 md:p-10 flex justify-center"
+          data-play={seen ? '' : undefined}
+          data-paused={visible ? undefined : ''}
         >
-          <img
-            src={imageUrl}
-            alt={imageAlt}
-            loading="lazy"
-            decoding="async"
-            className="w-full h-auto object-cover"
-          />
-        </motion.div>
+          <svg
+            viewBox={`0 0 ${INDIA_VIEWBOX.width} ${INDIA_VIEWBOX.height}`}
+            role="img"
+            aria-label={mapLabel}
+            className="w-full max-w-md h-auto text-primary"
+          >
+            <defs>
+              <pattern id="kd-map-grid" width="9" height="9" patternUnits="userSpaceOnUse">
+                <circle cx="4.5" cy="4.5" r="1.4" fill="currentColor" fillOpacity="0.16" />
+              </pattern>
+            </defs>
+            <path d={INDIA_OUTLINE} fill="currentColor" fillOpacity="0.06" />
+            <path
+              d={INDIA_OUTLINE}
+              fill="url(#kd-map-grid)"
+              stroke="currentColor"
+              strokeOpacity="0.28"
+              strokeWidth="1.5"
+              strokeLinejoin="round"
+            />
+            {dots.map(({ x, y, i }) =>
+              i % PULSE_EVERY === 0 ? (
+                <circle
+                  key={`p${i}`}
+                  className="kd-map-pulse"
+                  cx={x}
+                  cy={y}
+                  r="7"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  style={{ animationDelay: `${introMs + (i / PULSE_EVERY) * 450}ms` }}
+                />
+              ) : null,
+            )}
+            {dots.map(({ x, y, i }) => (
+              <circle
+                key={i}
+                className="kd-map-dot"
+                cx={x}
+                cy={y}
+                r="6.5"
+                fill="currentColor"
+                stroke="#fff"
+                strokeWidth="2"
+                style={{ animationDelay: `${i * DOT_STAGGER_MS}ms` }}
+              />
+            ))}
+          </svg>
+        </div>
       </div>
     </section>
   );

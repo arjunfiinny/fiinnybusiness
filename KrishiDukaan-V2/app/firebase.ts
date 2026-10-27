@@ -3526,9 +3526,9 @@ export async function duplicateBanner(banner: Banner): Promise<string> {
 //
 // Admin-managed blocks on the About page (web AboutView.tsx + the app's
 // about_screen.dart): the animated "brands connected with us" orbit and the
-// "presence across India" image. Everything lives in ONE doc so the About
-// page costs a single read — the presence block is a static image the admin
-// uploads, deliberately not a live map over retailers/stores.
+// "presence across India" map. Everything lives in ONE doc so the About
+// page costs a single read — the presence map is a built-in animation with
+// fixed dots, deliberately not a live map over retailers/stores.
 export type AboutPartner = {
   /** Stable client-generated id (React key / reorder), not a Firestore doc id. */
   id: string;
@@ -3550,7 +3550,6 @@ export type AboutPageContent = {
   /** Blank -> "Trusted by farmers and agri businesses across India." */
   presenceTitle?: string;
   presenceSubtitle?: string;
-  presenceImageUrl?: string;
   updatedAt?: any;
 };
 
@@ -3573,7 +3572,6 @@ function toAboutContent(d: Record<string, any> | undefined): AboutPageContent {
     presenceEnabled: d.presenceEnabled === true,
     presenceTitle: d.presenceTitle || undefined,
     presenceSubtitle: d.presenceSubtitle || undefined,
-    presenceImageUrl: d.presenceImageUrl || undefined,
     updatedAt: d.updatedAt,
   };
 }

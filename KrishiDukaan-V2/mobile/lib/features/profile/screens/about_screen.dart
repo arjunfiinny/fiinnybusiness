@@ -233,8 +233,7 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
                       ? 'पूरे भारत में किसानों और कृषि व्यवसायों का भरोसा।'
                       : 'Trusted by farmers and agri businesses across India.'),
               subtitle: content.presenceSubtitle,
-              imageUrl: content.presenceImageUrl!,
-              imageAlt: isHindi
+              mapLabel: isHindi
                   ? 'पूरे भारत में कृषीदुकान की उपस्थिति दिखाने वाला नक्शा'
                   : "Map showing KrishiDukan's presence across India",
             ),

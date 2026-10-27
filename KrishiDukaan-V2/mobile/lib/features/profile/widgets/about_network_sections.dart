@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:ui' show PointMode;
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -8,6 +9,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/app_text_styles.dart';
+import 'india_map_data.dart';
 
 /// One brand logo from Admin > About page (`siteContent/about.partners`).
 class AboutPartner {
@@ -43,7 +45,6 @@ class AboutPageContent {
   final bool presenceEnabled;
   final String? presenceTitle;
   final String? presenceSubtitle;
-  final String? presenceImageUrl;
 
   const AboutPageContent({
     required this.partnersEnabled,
@@ -54,7 +55,6 @@ class AboutPageContent {
     required this.presenceEnabled,
     this.presenceTitle,
     this.presenceSubtitle,
-    this.presenceImageUrl,
   });
 
   factory AboutPageContent.fromMap(Map<String, dynamic>? d) {
@@ -75,12 +75,11 @@ class AboutPageContent {
       presenceEnabled: d?['presenceEnabled'] == true,
       presenceTitle: str('presenceTitle'),
       presenceSubtitle: str('presenceSubtitle'),
-      presenceImageUrl: str('presenceImageUrl'),
     );
   }
 
   bool get showPartners => partnersEnabled && partners.isNotEmpty;
-  bool get showPresence => presenceEnabled && presenceImageUrl != null;
+  bool get showPresence => presenceEnabled;
 }
 
 /// A single one-shot read, kept for the app session — About is rarely
@@ -343,27 +342,90 @@ class _OrbitPainter extends CustomPainter {
   bool shouldRepaint(_OrbitPainter old) => old.angles != angles || old.radius != radius;
 }
 
-/// "Presence across India" — an admin-uploaded image, never a live map, so
-/// opening About doesn't read any retailer/store data.
-class AboutPresenceCard extends StatelessWidget {
+/// "Presence across India": dots pop up across a map of India, then a few
+/// pulse. Same fixed dots as the website (india_map_data.dart), so it costs
+/// no reads. Starts once scrolled into view; reduce-motion shows the
+/// finished map.
+class AboutPresenceCard extends StatefulWidget {
   final String label;
   final String title;
   final String? subtitle;
-  final String imageUrl;
-  final String imageAlt;
+  final String mapLabel;
 
   const AboutPresenceCard({
     super.key,
     required this.label,
     required this.title,
     this.subtitle,
-    required this.imageUrl,
-    required this.imageAlt,
+    required this.mapLabel,
   });
 
   @override
+  State<AboutPresenceCard> createState() => _AboutPresenceCardState();
+}
+
+/// Gap between dots popping in, and how long each pop takes.
+const _dotStaggerMs = 25;
+const _dotPopMs = 550;
+const _pulseEvery = 8;
+
+class _AboutPresenceCardState extends State<AboutPresenceCard> with TickerProviderStateMixin {
+  late final AnimationController _intro = AnimationController(
+    vsync: this,
+    duration: Duration(milliseconds: (kPresenceDots.length ~/ 2) * _dotStaggerMs + _dotPopMs),
+  )..addStatusListener((status) {
+      if (status == AnimationStatus.completed && !_reduced) _pulse.repeat();
+    });
+  late final AnimationController _pulse =
+      AnimationController(vsync: this, duration: const Duration(milliseconds: 3600));
+  ScrollPosition? _scroll;
+  bool _reduced = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _reduced = MediaQuery.disableAnimationsOf(context);
+    if (_reduced) {
+      _detach();
+      _pulse.stop();
+      _intro.value = 1;
+      return;
+    }
+    if (_intro.isAnimating || _intro.isCompleted) return;
+    final scroll = Scrollable.maybeOf(context)?.position;
+    if (scroll != _scroll) {
+      _detach();
+      _scroll = scroll?..addListener(_startWhenVisible);
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) => _startWhenVisible());
+  }
+
+  void _startWhenVisible() {
+    if (!mounted || _intro.isAnimating || _intro.isCompleted) return;
+    final box = context.findRenderObject();
+    if (box is! RenderBox || !box.attached || !box.hasSize) return;
+    final top = box.localToGlobal(Offset.zero).dy;
+    if (top < MediaQuery.sizeOf(context).height * 0.85) {
+      _detach();
+      _intro.forward();
+    }
+  }
+
+  void _detach() {
+    _scroll?.removeListener(_startWhenVisible);
+    _scroll = null;
+  }
+
+  @override
+  void dispose() {
+    _detach();
+    _intro.dispose();
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final width = MediaQuery.sizeOf(context).width;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -375,7 +437,7 @@ class AboutPresenceCard extends StatelessWidget {
               decoration: const BoxDecoration(color: _accent, shape: BoxShape.circle),
             ),
             const SizedBox(width: 8),
-            Text(label.toUpperCase(),
+            Text(widget.label.toUpperCase(),
                 style: AppTextStyles.caption.copyWith(
                   color: AppColors.primary,
                   fontWeight: FontWeight.bold,
@@ -384,29 +446,155 @@ class AboutPresenceCard extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 6),
-        Text(title, style: AppTextStyles.heading2),
-        if (subtitle != null) ...[
+        Text(widget.title, style: AppTextStyles.heading2),
+        if (widget.subtitle != null) ...[
           const SizedBox(height: 8),
-          Text(subtitle!, style: AppTextStyles.bodySmall.copyWith(color: AppColors.onSurfaceVariant)),
+          Text(widget.subtitle!, style: AppTextStyles.bodySmall.copyWith(color: AppColors.onSurfaceVariant)),
         ],
         const SizedBox(height: 12),
-        ClipRRect(
-          borderRadius: BorderRadius.circular(16),
-          child: CachedNetworkImage(
-            imageUrl: imageUrl,
-            width: double.infinity,
-            fit: BoxFit.fitWidth,
-            memCacheWidth: (width * MediaQuery.devicePixelRatioOf(context)).round(),
-            placeholder: (_, _) => Container(height: 200, color: AppColors.surfaceVariant),
-            errorWidget: (_, _, _) => const SizedBox.shrink(),
-            imageBuilder: (context, provider) => Semantics(
-              label: imageAlt,
-              image: true,
-              child: Image(image: provider, width: double.infinity, fit: BoxFit.fitWidth),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(
+            color: AppColors.surfaceVariant.withValues(alpha: 0.5),
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: Semantics(
+            label: widget.mapLabel,
+            image: true,
+            child: AspectRatio(
+              aspectRatio: kIndiaMapWidth / kIndiaMapHeight,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  // Outline + dot grid never change: painted once and cached.
+                  const RepaintBoundary(child: CustomPaint(painter: _IndiaOutlinePainter())),
+                  RepaintBoundary(
+                    child: CustomPaint(painter: _PresenceDotsPainter(_intro, _pulse)),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
       ],
     );
   }
+}
+
+/// kIndiaOutline holds only absolute M/L/Z commands; parsed once per run.
+final Path _indiaPath = () {
+  final path = Path();
+  final tokens = RegExp(r'[MLZ]|-?\d*\.?\d+(?:e-?\d+)?').allMatches(kIndiaOutline).map((m) => m[0]!).toList();
+  String cmd = 'M';
+  for (var i = 0; i < tokens.length;) {
+    final t = tokens[i];
+    if (t == 'Z') {
+      path.close();
+      i++;
+      continue;
+    }
+    if (t == 'M' || t == 'L') {
+      cmd = t;
+      i++;
+      continue;
+    }
+    if (i + 1 >= tokens.length) break;
+    final x = double.parse(tokens[i]);
+    final y = double.parse(tokens[i + 1]);
+    if (cmd == 'M') {
+      path.moveTo(x, y);
+      cmd = 'L';
+    } else {
+      path.lineTo(x, y);
+    }
+    i += 2;
+  }
+  return path;
+}();
+
+class _IndiaOutlinePainter extends CustomPainter {
+  const _IndiaOutlinePainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final s = size.width / kIndiaMapWidth;
+    canvas.save();
+    canvas.scale(s);
+    canvas.drawPath(_indiaPath, Paint()..color = _accent.withValues(alpha: 0.06));
+    canvas.save();
+    canvas.clipPath(_indiaPath);
+    const step = 9.0;
+    final grid = <Offset>[
+      for (var y = step / 2; y < kIndiaMapHeight; y += step)
+        for (var x = step / 2; x < kIndiaMapWidth; x += step) Offset(x, y),
+    ];
+    canvas.drawPoints(
+      PointMode.points,
+      grid,
+      Paint()
+        ..color = _accent.withValues(alpha: 0.16)
+        ..strokeWidth = 2.8
+        ..strokeCap = StrokeCap.round,
+    );
+    canvas.restore();
+    canvas.drawPath(
+      _indiaPath,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.5
+        ..strokeJoin = StrokeJoin.round
+        ..color = _accent.withValues(alpha: 0.28),
+    );
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(_IndiaOutlinePainter oldDelegate) => false;
+}
+
+class _PresenceDotsPainter extends CustomPainter {
+  final Animation<double> intro;
+  final Animation<double> pulse;
+
+  _PresenceDotsPainter(this.intro, this.pulse) : super(repaint: Listenable.merge([intro, pulse]));
+
+  static final _fill = Paint()..color = _accent;
+  static final _edge = Paint()..color = Colors.white;
+  static final _ring = Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 2;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final s = size.width / kIndiaMapWidth;
+    canvas.save();
+    canvas.scale(s);
+    final introMs = intro.value * (intro as AnimationController).duration!.inMilliseconds;
+    final count = kPresenceDots.length ~/ 2;
+
+    if (pulse.isAnimating) {
+      for (var i = 0; i < count; i += _pulseEvery) {
+        final phase = (pulse.value - (i ~/ _pulseEvery) * 0.125) % 1.0;
+        if (phase > 0.7) continue;
+        final t = Curves.easeOut.transform(phase / 0.7);
+        _ring.color = _accent.withValues(alpha: 0.55 * (1 - t));
+        canvas.drawCircle(Offset(kPresenceDots[i * 2], kPresenceDots[i * 2 + 1]), 7 * (1 + 2.2 * t), _ring);
+      }
+    }
+
+    for (var i = 0; i < count; i++) {
+      final local = ((introMs - i * _dotStaggerMs) / _dotPopMs).clamp(0.0, 1.0);
+      if (local <= 0) break; // later dots haven't started yet
+      final scale = Curves.easeOutBack.transform(local);
+      final c = Offset(kPresenceDots[i * 2], kPresenceDots[i * 2 + 1]);
+      canvas.drawCircle(c, 7.5 * scale, _edge);
+      canvas.drawCircle(c, 6.5 * scale, _fill);
+    }
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(_PresenceDotsPainter oldDelegate) =>
+      oldDelegate.intro != intro || oldDelegate.pulse != pulse;
 }

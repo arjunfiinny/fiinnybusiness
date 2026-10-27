@@ -166,10 +166,6 @@ export default function AdminAboutPage() {
       alert("Website links must start with http:// or https://");
       return;
     }
-    if (content.presenceEnabled && !content.presenceImageUrl?.trim()) {
-      alert("Upload a presence image, or turn the presence section off.");
-      return;
-    }
     setSaving(true);
     try {
       const clean: AboutPageContent = {
@@ -180,7 +176,6 @@ export default function AdminAboutPage() {
         centerLogoUrl: content.centerLogoUrl?.trim() || undefined,
         presenceTitle: content.presenceTitle?.trim() || undefined,
         presenceSubtitle: content.presenceSubtitle?.trim() || undefined,
-        presenceImageUrl: content.presenceImageUrl?.trim() || undefined,
       };
       await saveAboutContent(clean);
       setContent(clean);
@@ -321,7 +316,7 @@ export default function AdminAboutPage() {
       {/* ── Presence ───────────────────────────────────────────────────── */}
       <section className="rounded-3xl border border-outline-variant/30 bg-surface-container-lowest p-6 space-y-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <h2 className="text-xs font-black uppercase tracking-widest text-primary">Presence across India (image)</h2>
+          <h2 className="text-xs font-black uppercase tracking-widest text-primary">Presence across India (animated map)</h2>
           <Toggle checked={c.presenceEnabled} onChange={v => update({ presenceEnabled: v })} label="Show on About page" />
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -337,12 +332,9 @@ export default function AdminAboutPage() {
               onChange={e => update({ presenceSubtitle: e.target.value })} className={inputCls} />
           </div>
         </div>
-        <ImageField
-          label="Presence image *"
-          value={c.presenceImageUrl ?? ""}
-          onChange={url => update({ presenceImageUrl: url })}
-          hint="A snapshot of our retailer map works well. It is shown as an image — the About page does not load store data."
-        />
+        <p className="text-[10px] text-on-surface-variant">
+          The map is built in: dots pop up across India with a smooth animation. It uses no store data, so it adds no reads.
+        </p>
       </section>
 
       {/* ── Preview ────────────────────────────────────────────────────── */}
@@ -361,15 +353,12 @@ export default function AdminAboutPage() {
           ) : (
             <p className="p-6 text-sm text-on-surface-variant italic">Add a brand logo to preview the orbit.</p>
           )}
-          {c.presenceImageUrl?.trim() && (
-            <AboutPresenceSection
-              label="Our Presence"
-              title={c.presenceTitle?.trim() || DEFAULT_PRESENCE_TITLE}
-              subtitle={c.presenceSubtitle?.trim() || undefined}
-              imageUrl={c.presenceImageUrl.trim()}
-              imageAlt="Presence across India"
-            />
-          )}
+          <AboutPresenceSection
+            label="Our Presence"
+            title={c.presenceTitle?.trim() || DEFAULT_PRESENCE_TITLE}
+            subtitle={c.presenceSubtitle?.trim() || undefined}
+            mapLabel="Presence across India"
+          />
         </div>
       </section>
     </div>
