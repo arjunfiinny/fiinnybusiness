@@ -817,7 +817,8 @@ service cloud.firestore {
       // own entry in another seller's availability list. Tried before the
       // owner clause: that one alone nearly fills the 1000-expression budget.
       function staffProductUpdate() {
-        return isStaffToken() && (staffOwnsDoc(resource.data, 'products')
+        // Same canonical-identity guard as the owner branch below.
+        return isStaffToken() && !touchesCanonicalIdentity() && (staffOwnsDoc(resource.data, 'products')
           || (staffCan('products')
               && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['availability', 'updatedAt'])
               && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['updatedAt'])

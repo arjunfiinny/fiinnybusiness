@@ -20,7 +20,7 @@ export default function TeamPage() {
         description="Let the people who help run your shop manage products, orders and reels with their own login."
       />
       {/* In admin view the API is called with the admin's login, so name the shop explicitly. */}
-      <TeamManager ownerPhone={isAdminView ? String(profile?.phone ?? "") || undefined : undefined} adminMode={isAdminView} />
+      <TeamManager ownerPhone={isAdminView ? String(profile?.phone ?? "") || undefined : undefined} />
     </div>
   );
 }

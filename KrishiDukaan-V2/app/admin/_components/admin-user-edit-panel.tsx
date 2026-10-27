@@ -1057,7 +1057,7 @@ export function AdminUserEditPanel({ user, onClose, onSaved }: AdminUserEditPane
                 <p className="text-xs text-emerald-900/80">
                   Add helpers for this shop on the owner&apos;s behalf. The owner is notified and can change or remove them from Dashboard → Team.
                 </p>
-                <TeamManager ownerPhone={phone} adminMode />
+                <TeamManager ownerPhone={phone} />
               </section>
             )}
 

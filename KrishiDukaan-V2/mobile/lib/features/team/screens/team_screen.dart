@@ -114,11 +114,10 @@ class _TeamScreenState extends State<TeamScreen> {
   @override
   Widget build(BuildContext context) {
     final data = _data;
-    final atLimit = data != null && data.members.length >= data.limit;
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: const AppTopBar(title: 'Team'),
-      floatingActionButton: data == null || atLimit
+      floatingActionButton: data == null
           ? null
           : FloatingActionButton.extended(
               onPressed: _busy == null ? () => _openEditor() : null,
@@ -163,17 +162,10 @@ class _TeamScreenState extends State<TeamScreen> {
                 ),
               )
             else if (data != null) ...[
-              Text('${data.members.length} of ${data.limit} helpers', style: AppTextStyles.heading3),
-              if (atLimit)
-                Padding(
-                  padding: const EdgeInsets.only(top: 4),
-                  child: Text(
-                    data.limit == 0
-                        ? "Helpers aren't enabled for this shop. Contact KrishiDukan support."
-                        : "You've reached the helper limit. Contact KrishiDukan support if you need more.",
-                    style: AppTextStyles.caption,
-                  ),
-                ),
+              Text(
+                '${data.members.length} helper${data.members.length == 1 ? '' : 's'}',
+                style: AppTextStyles.heading3,
+              ),
               const SizedBox(height: 12),
               if (data.members.isEmpty)
                 Padding(
