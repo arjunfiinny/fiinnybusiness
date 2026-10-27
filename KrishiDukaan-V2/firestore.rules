@@ -800,6 +800,19 @@ service cloud.firestore {
     // ════════════════════════════════════════════════════════════════════════
 
     match /products/{productId} {
+      // Product-identity grouping fields, written ONLY from the admin
+      // /admin/product-identity view (adminLinkProductsToCanonical). A seller can
+      // write any field on their OWN product via the owner branch below, so
+      // without this guard they could stamp their doc with another product's
+      // canonicalId and merge their listing into that product's identity once
+      // canonicalId drives grouping. Restrict these keys to admin / products-team.
+      function canonicalIdentityKeys() {
+        return ['canonicalId', 'canonicalLinkedAt', 'canonicalLinkedBy'];
+      }
+      function touchesCanonicalIdentity() {
+        return request.resource.data.diff(resource.data).affectedKeys().hasAny(canonicalIdentityKeys());
+      }
+
       // A shop helper with Products: the shop's own product, or the shop's
       // own entry in another seller's availability list. Tried before the
       // owner clause: that one alone nearly fills the 1000-expression budget.
@@ -813,10 +826,12 @@ service cloud.firestore {
       }
 
       allow read: if true;
-      allow create: if isAuthed();
+      allow create: if isAuthed()
+                       && (isAdmin() || teamHas('products')
+                           || !request.resource.data.keys().hasAny(canonicalIdentityKeys()));
       // Team members granted "products" can help a seller who can't list a
       // product themselves — same broad section-scoped grant as inventory.
-      allow update: if isAdmin() || teamHas('products') || staffProductUpdate() || (isAuthed() && (
+      allow update: if isAdmin() || teamHas('products') || staffProductUpdate() || (isAuthed() && !touchesCanonicalIdentity() && (
         resource.data.ownerId == request.auth.uid ||
         resource.data.retailerId == request.auth.uid ||
         resource.data.manufacturerId == request.auth.uid ||
