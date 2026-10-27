@@ -89,6 +89,8 @@ export type MarketplaceProduct = {
   composition?: { name: string; value: string; color?: string }[];
   /** Free-form additional fields entered by the seller. */
   customFields?: { title: string; value: string }[];
+  /** Creation time of the source doc (ms) — ranks same-name docs in the merge. */
+  createdAtMs?: number;
   benefits?: string[];
   application?: string;
 

@@ -274,6 +274,20 @@ class DashboardRepository {
     }
   }
 
+  /// The candidate still exists under this name (a card can trail a rename
+  /// or delete by a few seconds); otherwise the listing is added unlinked,
+  /// as before, rather than failing the whole save.
+  Future<bool> _confirmLink(String productId, String nameKey) async {
+    try {
+      final snap = await _db.collection('products').doc(productId).get();
+      final d = snap.data();
+      if (d == null || d['isActive'] == false) return false;
+      return (d['name'] ?? '').toString().toLowerCase().trim() == nameKey;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<void> addListing({
     required String sellerPhone,
     required String sellerName,
@@ -307,6 +321,11 @@ class DashboardRepository {
     List<Map<String, String>>? composition,
     List<Map<String, String>>? customFields,
     String? videoUrl,
+    // The marketplace product whose name matches [productName], when the
+    // seller typed it instead of picking it. Linked to (like a pick) unless
+    // the seller already lists that name, so the product keeps one seller
+    // list and checkout can price this store. See [_confirmLink].
+    String? linkCandidateId,
   }) async {
     final uid = ShopSession.sellerUidOrNull();
     final now = DateTime.now();
@@ -335,9 +354,15 @@ class DashboardRepository {
             .get(),
     ]);
     final seenProductIds = <String>{};
+    final nameKey = (productName ?? '').toLowerCase().trim();
+    var listsSameName = false;
     for (final snap in activeProductSnaps) {
       for (final d in snap.docs) {
         seenProductIds.add(d.id);
+        final data = d.data() as Map<String, dynamic>? ?? const {};
+        if ((data['name'] ?? '').toString().toLowerCase().trim() == nameKey) {
+          listsSameName = true;
+        }
       }
     }
     final activeCount = seenProductIds.length;
@@ -377,6 +402,14 @@ class DashboardRepository {
       }
     }
     final expiresAt = subExpiry ?? Timestamp.fromDate(now.add(const Duration(days: 365)));
+
+    if (!isCopy && !listsSameName && nameKey.isNotEmpty &&
+        linkCandidateId != null && linkCandidateId.isNotEmpty &&
+        await _confirmLink(linkCandidateId, nameKey)) {
+      isCopy = true;
+      originalProductId = linkCandidateId;
+      catalogId = linkCandidateId;
+    }
 
     // ── 2. Create Product, Inventory, and Seat Listing ──────────────────────
     final productRef = _db.collection('products').doc();

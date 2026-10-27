@@ -966,6 +966,13 @@ class _AddListingSheetState extends ConsumerState<_AddListingSheet> {
                   onChanged: (val) {
                     setState(() {
                       final query = val.toLowerCase().trim();
+                      // Renamed after picking a suggestion: it's no longer
+                      // that product, so don't add this store to its sellers.
+                      // (Retyping the same name re-links at save.)
+                      if (_selectedCatalog != null &&
+                          _selectedCatalog!.name.toLowerCase().trim() != query) {
+                        _selectedCatalog = null;
+                      }
                       if (query.isEmpty) {
                         _suggestions = [];
                       } else {
@@ -1481,6 +1488,21 @@ class _AddListingSheetState extends ConsumerState<_AddListingSheet> {
     );
   }
 
+  /// The marketplace product already sold under [name], if any. Uses the
+  /// cards loaded for suggestions; one indexed read only if those haven't
+  /// arrived yet.
+  Future<String?> _existingProductIdFor(String name) async {
+    final key = name.toLowerCase().trim();
+    if (key.isEmpty) return null;
+    if (_catalogOptions.isNotEmpty) {
+      final match = _catalogOptions
+          .where((c) => c.name.toLowerCase().trim() == key && c.id.isNotEmpty)
+          .firstOrNull;
+      return match?.id;
+    }
+    return _catalogRepo.fetchProductIdByName(key);
+  }
+
   Future<void> _save() async {
     final name = _nameCtrl.text.trim();
     if (name.isEmpty) {
@@ -1593,6 +1615,7 @@ class _AddListingSheetState extends ConsumerState<_AddListingSheet> {
       final catalogId =
           _selectedCatalog?.id ??
           FirebaseFirestore.instance.collection('catalog').doc().id;
+      final linkCandidateId = isCopy ? null : await _existingProductIdFor(name);
 
       await DashboardRepository().addListing(
         sellerPhone: widget.sellerPhone,
@@ -1628,6 +1651,7 @@ class _AddListingSheetState extends ConsumerState<_AddListingSheet> {
         composition: _composition,
         customFields: _customFields,
         videoUrl: _videoUrl,
+        linkCandidateId: linkCandidateId,
       );
 
       // No account-level write here on purpose. The ACCOUNT flag
