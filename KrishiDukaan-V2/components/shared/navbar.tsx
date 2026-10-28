@@ -7,6 +7,7 @@ import { ICONS } from '../../app/constants';
 import { auth, getUserProfile } from '../../app/firebase';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useRecentSearches } from '../../app/lib/recent-searches';
 import { useI18n } from '../../app/i18n/I18nContext';
 import { MarketplaceProduct } from '../../types/product';
 import { reverseGeocodeToDisplay } from '../../app/utils/geolocation';
@@ -71,6 +72,7 @@ export function Navbar({
   const mobileSearchRef = useRef<HTMLDivElement>(null);
   
   const [internalSearch, setInternalSearch] = useState(productSearch || '');
+  const { recent: recentSearches, addSearch: addRecentSearch, clearAll: clearRecentSearches } = useRecentSearches();
   const activeSearch = setProductSearch ? productSearch : internalSearch;
   const updateSearch = (val: string) => {
     if (setProductSearch) setProductSearch(val);
@@ -288,6 +290,40 @@ export function Navbar({
     setLanguage(langs[(idx + 1) % langs.length]!);
   };
 
+  // Recent searches: shown when the box is focused but still empty (as the app does).
+  const showRecent = showResults && activeSearch.trim().length === 0 && recentSearches.length > 0;
+  const pickRecent = (q: string) => {
+    updateSearch(q);
+    setShowResults(false);
+    addRecentSearch(q);
+    router.push(`/?view=market&search=${encodeURIComponent(q)}`);
+  };
+  const RecentDropdown = () => (
+    <div className="absolute top-full left-0 right-0 mt-1.5 bg-white rounded-2xl shadow-ambient border border-surface-container z-[100] overflow-hidden max-h-[70vh] overflow-y-auto">
+      <div className="px-4 pt-3 pb-1.5 flex items-center justify-between">
+        <span className="text-[10px] font-black uppercase tracking-widest text-on-surface-variant">{t('recentSearches')}</span>
+        <button
+          type="button"
+          onMouseDown={(e) => { e.preventDefault(); clearRecentSearches(); }}
+          className="text-[11px] font-bold text-primary hover:underline"
+        >
+          {t('clearRecentSearches')}
+        </button>
+      </div>
+      {recentSearches.map((q) => (
+        <button
+          key={q}
+          type="button"
+          onMouseDown={() => pickRecent(q)}
+          className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-surface-container-low transition-colors text-left"
+        >
+          <svg className="w-4 h-4 text-outline shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg>
+          <span className="flex-1 min-w-0 text-sm text-on-surface truncate">{q}</span>
+        </button>
+      ))}
+    </div>
+  );
+
   const SearchDropdown = () => (
     <div className="absolute top-full left-0 right-0 mt-1.5 bg-white rounded-2xl shadow-ambient border border-surface-container z-[100] overflow-hidden max-h-[70vh] overflow-y-auto">
       {searchResults.products.length > 0 && (
@@ -432,6 +468,7 @@ export function Navbar({
                 onKeyDown={e => {
                   if (e.key === 'Enter' && activeSearch.trim()) {
                     setShowResults(false);
+                    addRecentSearch(activeSearch);
                     router.push(`/?view=market&search=${encodeURIComponent(activeSearch.trim())}`);
                   }
                 }}
@@ -457,6 +494,7 @@ export function Navbar({
                 )}
               </div>
               {shouldShowDropdown && <SearchDropdown />}
+              {showRecent && <RecentDropdown />}
             </div>
           </div>
 
@@ -766,6 +804,7 @@ export function Navbar({
             onKeyDown={e => {
               if (e.key === 'Enter' && activeSearch.trim()) {
                 setShowResults(false);
+                addRecentSearch(activeSearch);
                 router.push(`/?view=market&search=${encodeURIComponent(activeSearch.trim())}`);
               }
             }}
@@ -791,6 +830,7 @@ export function Navbar({
             )}
           </div>
           {shouldShowDropdown && <SearchDropdown />}
+              {showRecent && <RecentDropdown />}
         </div>
 
     </header>
