@@ -5,6 +5,7 @@ import {
   getDoc,
   getDocs,
   increment,
+  limit,
   orderBy,
   query,
   serverTimestamp,
@@ -614,6 +615,13 @@ export async function retailerHasProduct(
   ownerId: string,
   opts: { originalProductId?: string | null; name: string; unit: string },
 ): Promise<boolean> {
+  return (await checkOwnListings(ownerId, opts)).isDuplicate;
+}
+
+async function checkOwnListings(
+  ownerId: string,
+  opts: { originalProductId?: string | null; name: string; unit: string },
+): Promise<{ isDuplicate: boolean; hasSameName: boolean }> {
   const snap = await getDocs(
     query(
       collection(db, "products"),
@@ -624,15 +632,45 @@ export async function retailerHasProduct(
   const nameLower = opts.name.trim().toLowerCase();
   const unitLower = opts.unit.trim().toLowerCase();
 
-  return snap.docs.some((d) => {
+  let isDuplicate = false;
+  let hasSameName = false;
+  for (const d of snap.docs) {
     const data = d.data() as Record<string, unknown>;
-    if (data.isActive === false) return false;
-    if (opts.originalProductId && data.originalProductId === opts.originalProductId) return true;
-    return (
-      String(data.name ?? "").toLowerCase() === nameLower &&
-      String(data.unit ?? "").toLowerCase() === unitLower
+    if (data.isActive === false) continue;
+    if (opts.originalProductId && data.originalProductId === opts.originalProductId) isDuplicate = true;
+    if (String(data.name ?? "").trim().toLowerCase() === nameLower) {
+      hasSameName = true;
+      if (String(data.unit ?? "").toLowerCase() === unitLower) isDuplicate = true;
+    }
+  }
+  return { isDuplicate, hasSameName };
+}
+
+/**
+ * The marketplace already merges listings by name, so a seller who types the
+ * name of an existing product instead of picking the suggestion must still
+ * join that product: otherwise their unlinked listing has no seller list of
+ * its own, and the product page/checkout lose track of the other sellers.
+ * One read of the product's card (keyed by name) plus one of its main doc.
+ */
+async function findCatalogProductId(name: string): Promise<string | null> {
+  const nameKey = name.toLowerCase().trim();
+  if (!nameKey) return null;
+  try {
+    const cards = await getDocs(
+      query(collection(db, "marketplaceCards"), where("nameKey", "==", nameKey), limit(1)),
     );
-  });
+    const mainId = cards.empty ? "" : String(cards.docs[0].get("id") ?? "");
+    if (!mainId) return null;
+    const main = await getDoc(doc(db, "products", mainId));
+    const data = main.data();
+    if (!data || data.isActive === false) return null;
+    if (String(data.name ?? "").toLowerCase().trim() !== nameKey) return null;
+    return mainId;
+  } catch {
+    // A failed lookup only means the listing is added unlinked, as before.
+    return null;
+  }
 }
 
 export type AddProductInventoryInput = {
@@ -690,12 +728,12 @@ export async function createProductAndInventory(
   if (!subExpiry) throw new Error("No active subscription found.");
 
   // Duplicate guard — prevent the same product being listed more than once
-  const isDuplicate = await retailerHasProduct(ownerId, {
+  const own = await checkOwnListings(ownerId, {
     originalProductId: input.existingProductId,
     name: input.name,
     unit: input.unit,
   });
-  if (isDuplicate) {
+  if (own.isDuplicate) {
     throw new Error(
       `"${input.name.trim()}" is already in your inventory. Edit the existing listing instead of adding it again.`,
     );
@@ -715,7 +753,12 @@ export async function createProductAndInventory(
   const sellMode =
     input.sellMode === "online_delivery" ? "online_delivery" : "offline_store_only";
 
-  const isCopy = !!input.existingProductId;
+  // Typed an existing product's name without picking it → link to it anyway.
+  // Skipped when the seller already lists that name (another pack size), so
+  // their store isn't added to the product's sellers twice.
+  const linkedProductId =
+    input.existingProductId || (own.hasSameName ? null : await findCatalogProductId(input.name));
+  const isCopy = !!linkedProductId;
   const sourceVal = isCopy ? "retailer_inventory_copy" : "retailer_inventory";
 
   const productRef = doc(collection(db, "products"));
@@ -747,7 +790,7 @@ export async function createProductAndInventory(
     distance: "Nearby",
     sellMode,
     isOnline: sellMode === "online_delivery",
-    originalProductId: input.existingProductId || null,
+    originalProductId: linkedProductId || null,
 
     categoryInfo: input.categoryInfo ?? null,
     customFields: input.customFields?.length ? input.customFields : null,
@@ -762,8 +805,8 @@ export async function createProductAndInventory(
     // Legacy fertilizer flat fields omitted — categoryInfo is the source of truth.
   });
 
-  if (isCopy && input.existingProductId) {
-    const originalRef = doc(db, "products", input.existingProductId);
+  if (isCopy && linkedProductId) {
+    const originalRef = doc(db, "products", linkedProductId);
     batch.update(originalRef, {
       availability: arrayUnion({
         storeId: ownerId,

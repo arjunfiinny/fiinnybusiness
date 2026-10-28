@@ -326,6 +326,9 @@ class _ShopProfileScreenState extends ConsumerState<ShopProfileScreen> {
                           ? profile!.name
                           : (user?.businessName ?? user?.name ?? 'Shop');
                       final link = WebLinks.shop(shopPhone);
+                      final activeProducts = (productsAsync.value ?? const <ListingModel>[])
+                          .where((l) => l.isActive)
+                          .length;
                       // Same poster the owner shares from their brand editor,
                       // from data this page already loaded.
                       final poster = link == null
@@ -344,6 +347,13 @@ class _ShopProfileScreenState extends ConsumerState<ShopProfileScreen> {
                               photos: brand?.photos ?? const [],
                               highlights: brand?.highlights ?? const [],
                               link: link.replaceFirst(RegExp(r'^https?://'), ''),
+                              // Counts this page already shows — no extra reads.
+                              stats: [
+                                if (activeProducts > 0)
+                                  (posterCount(activeProducts), 'Products'),
+                                if ((followersAsync.value ?? 0) > 0)
+                                  (posterCount(followersAsync.value!), 'Followers'),
+                              ],
                             );
                       showBrandShareChoice(
                         btnContext,
