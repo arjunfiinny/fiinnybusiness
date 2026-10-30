@@ -49,6 +49,7 @@ import { StatusToast } from './components/shared/status-toast';
 import { StorePickerModal } from './components/StorePickerModal';
 import { GuidedTour, TourStep } from '../components/helpers';
 import { useI18n } from './i18n/I18nContext';
+import { reportProductPurchase } from './lib/ads/google-ads';
 
 type View = 'home' | 'market' | 'hub' | 'product' | 'map' | 'about' | 'profile' | 'orders' | 'login' | 'signup' | 'subscription' | 'cart' | 'brand' | 'become-retailer' | 'help';
 type UserRole = 'customer' | 'retailer' | 'manufacturer' | 'admin';
@@ -1301,6 +1302,20 @@ export default function App() {
       items: readyItems,
       payment: paymentDetails,
     });
+    // Google Ads purchase conversion. Reached only after the server confirmed the
+    // payment (verify ok, or a failure report that found the money captured) and
+    // the orders were written, so failed/cancelled payments and anything before
+    // checkout never fire it. The payment id makes it once-per-payment.
+    if (paymentDetails?.status === "paid") {
+      try {
+        reportProductPurchase({
+          orderValue: Number(paymentDetails.amount),
+          transactionId: paymentDetails.razorpayPaymentId || paymentDetails.razorpayOrderId,
+        });
+      } catch {
+        /* measurement must never interrupt the post-payment cart cleanup */
+      }
+    }
     setCartItems(pendingItems);
     const pendingMsg = pendingItems.length > 0
       ? ` ${pendingItems.length} item${pendingItems.length > 1 ? "s" : ""} still in cart (store not selected).`
