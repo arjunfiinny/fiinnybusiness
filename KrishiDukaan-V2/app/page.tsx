@@ -109,6 +109,26 @@ function resolveSellerCommercial(
   };
 }
 
+/**
+ * The pack size a cart line carries when the shopper didn't pick one: the card
+ * buttons ("+ Add", "Buy Now" on Market/Home) pass no variant. The size decides
+ * the line's weight and so its delivery slab; a line with no size weighed 0 kg
+ * and was delivered free (Crystal Gramoxone 1L, 31 Oct 2026). A one-size
+ * product gets that size. A product with several sizes returns undefined, and
+ * the caller must send the shopper to choose (see needsPackChoice).
+ */
+function defaultPackUnit(product: MarketplaceProduct): string | undefined {
+  const variants = product.variants ?? [];
+  if (variants.length === 1) return variants[0].unit || undefined;
+  if (variants.length === 0 && product.unit) return String(product.unit);
+  return undefined;
+}
+
+/** True when no size was picked and the product has more than one to pick from. */
+function needsPackChoice(product: MarketplaceProduct, variant?: { unit: string }): boolean {
+  return !variant?.unit && (product.variants?.length ?? 0) > 1;
+}
+
 // Redirects /?view=brand&manufacturer=PHONE to the canonical /brand/{slug} route.
 // Falls back to a "not found" message if the manufacturer has no slug set up yet.
 function BrandPageRedirect({ phone }: { phone: string }) {
@@ -1221,6 +1241,12 @@ export default function App() {
       setToastType("error");
       return;
     }
+    if (needsPackChoice(product, variant)) {
+      setToastMsg(`Choose a pack size for ${product.name}.`);
+      setToastType("error");
+      navigateToProduct(product.id);
+      return;
+    }
     // Use the best available discount (maxDiscountPct) as a preview for the pending item.
     // The price will be updated to the specific store's price when the user selects a store.
     const maxPct = product.maxDiscountPct ?? product.effectiveDiscountPct ?? 0;
@@ -1228,9 +1254,9 @@ export default function App() {
 
 
     setCartItems((prev) => {
-      // One-size products have no variants; carry their base size so the
+      // One-size products carry their size so delivery weighs it and the
       // order and invoice show it (the app already sends catalog.unit).
-      const variantUnit = variant?.unit || (!product.variants?.length && product.unit ? String(product.unit) : undefined);
+      const variantUnit = variant?.unit || defaultPackUnit(product);
       const found = prev.find(
         (i) => i.productId === product.id && i.sellMode === "pending" && i.variantUnit === variantUnit,
       );
@@ -1600,10 +1626,17 @@ export default function App() {
       return;
     }
 
+    // A size must be chosen before a multi-size product can be priced or weighed.
+    if (needsPackChoice(product, variant)) {
+      setToastMsg(`Choose a pack size for ${product.name} on its page.`);
+      setToastType("error");
+      return;
+    }
+
     const sellerType: "retailer" | "manufacturer" =
       (store as any).retailerId ? "retailer" : "manufacturer";
-    // One-size products: carry the base size, as above.
-    const variantUnit = variant?.unit || (!product.variants?.length && product.unit ? String(product.unit) : undefined);
+    // One-size products: carry the size, as above.
+    const variantUnit = variant?.unit || defaultPackUnit(product);
 
     setCartItems((prev) => {
       const found = prev.find(
@@ -1700,6 +1733,13 @@ export default function App() {
     if (product.sellMode === "offline_store_only") {
       setToastMsg("This product is not available for online ordering.");
       setToastType("error");
+      return;
+    }
+    // "Buy Now" on a card has no size; a multi-size product is chosen on its page.
+    if (needsPackChoice(product, variant)) {
+      setToastMsg(`Choose a pack size for ${product.name}.`);
+      setToastType("error");
+      navigate('product', { productId: product.id });
       return;
     }
     // Find the first store that stocks this product AND can actually deliver it.
