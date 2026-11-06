@@ -231,6 +231,7 @@ export async function markAttemptPaid(
           // A late capture can arrive after a failure was already recorded, so
           // clear the error rather than leaving a paid row showing one.
           error: null,
+          failureKind: null,
         },
         { merge: true },
       );
@@ -248,6 +249,37 @@ export type AttemptError = {
 };
 
 /**
+ * What kind of failure this was, from Razorpay's own payment list for the
+ * order (not the client's word):
+ *  - 'closed_without_paying': the order has NO payments — the checkout sheet
+ *    was closed, or broke, before the customer tried any method.
+ *  - 'payment_failed': at least one payment was tried and none captured.
+ *  - 'unknown': Razorpay could not be reached to check.
+ */
+export type AttemptFailureKind = 'closed_without_paying' | 'payment_failed' | 'unknown';
+
+/** What the checkout SDK reported, as the client sent it. Diagnostics only. */
+export type AttemptClientDiagnostics = {
+  /** razorpay_flutter code: 0 network, 1 invalid options, 2 cancelled,
+   *  3 TLS, 4 incompatible plugin, 100 unknown. */
+  sdkCode: number | null;
+  sdkCodeName: string | null;
+  /** The SDK's description verbatim, "undefined" included. */
+  rawDescription: string | null;
+  metadata: Record<string, unknown> | null;
+  /** How long the sheet was open before the error. */
+  sheetOpenMs: number | null;
+  platform: string | null;
+};
+
+export type AttemptFailureContext = {
+  failureKind: AttemptFailureKind;
+  paymentAttempted: boolean | null;
+  razorpayPaymentCount: number | null;
+  client?: AttemptClientDiagnostics;
+};
+
+/**
  * Marks an attempt failed with whatever Razorpay told the client.
  *
  * Deliberately refuses to overwrite an attempt already marked 'paid': the
@@ -257,6 +289,7 @@ export type AttemptError = {
 export async function markAttemptFailed(
   razorpayOrderId: string,
   error: AttemptError,
+  extra?: AttemptFailureContext,
 ): Promise<void> {
   try {
     const ref = getAdminDb().collection('paymentAttempts').doc(razorpayOrderId);
@@ -273,6 +306,14 @@ export async function markAttemptFailed(
           source: error.source ?? null,
           step: error.step ?? null,
         },
+        ...(extra
+          ? {
+              failureKind: extra.failureKind,
+              paymentAttempted: extra.paymentAttempted,
+              razorpayPaymentCount: extra.razorpayPaymentCount,
+              ...(extra.client ? { client: extra.client } : {}),
+            }
+          : {}),
         failedAt: new Date(),
         updatedAt: new Date(),
       },
@@ -370,6 +411,9 @@ export async function recordFailureFromRazorpay(
 
         amount: payment.amount / 100,
         method: payment.method ?? null,
+        // This path only runs for a real Razorpay payment entity.
+        failureKind: 'payment_failed' as AttemptFailureKind,
+        paymentAttempted: true,
 
         error: {
           code: payment.error_code ?? null,

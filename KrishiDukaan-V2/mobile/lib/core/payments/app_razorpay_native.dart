@@ -25,7 +25,24 @@ class _NativeRazorpay implements AppRazorpay {
       ));
     });
     _razorpay.on(Razorpay.EVENT_PAYMENT_ERROR, (PaymentFailureResponse r) {
-      onError(AppPaymentError(r.message ?? 'Payment failed. Please try again.'));
+      // r.error is Razorpay's error object (code, description, reason,
+      // source, step, metadata) when the SDK could parse one; keep all of it.
+      final e = r.error ?? const {};
+      String? str(String k) => e[k]?.toString();
+
+      final meta = e['metadata'];
+      onError(AppPaymentError(
+        AppPaymentError.customerMessage(r.code, r.message),
+        sdkCode: r.code,
+        rawDescription: r.message,
+        errorCode: str('code'),
+        reason: str('reason'),
+        source: str('source'),
+        step: str('step'),
+        metadata: meta is Map
+            ? meta.map((k, v) => MapEntry(k.toString(), v))
+            : null,
+      ));
     });
     _razorpay.on(Razorpay.EVENT_EXTERNAL_WALLET, (_) {});
   }

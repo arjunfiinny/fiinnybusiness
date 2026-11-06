@@ -40,6 +40,8 @@ class _WebRazorpay implements AppRazorpay {
         'Razorpay checkout.js is not loaded. Add '
         '<script src="https://checkout.razorpay.com/v1/checkout.js"></script> '
         'to web/index.html.',
+        sdkCode: AppPaymentErrorCode.invalidOptions,
+        rawDescription: 'checkout.js not loaded',
       ));
       return;
     }
@@ -65,7 +67,12 @@ class _WebRazorpay implements AppRazorpay {
     modal.setProperty(
       'ondismiss'.toJS,
       (() {
-        _onError(const AppPaymentError('Payment cancelled.'));
+        _onError(AppPaymentError(
+          AppPaymentError.customerMessage(
+              AppPaymentErrorCode.paymentCancelled, null),
+          sdkCode: AppPaymentErrorCode.paymentCancelled,
+          rawDescription: 'modal dismissed',
+        ));
       }).toJS,
     );
     jsOptions.setProperty('modal'.toJS, modal);
@@ -75,11 +82,23 @@ class _WebRazorpay implements AppRazorpay {
     rzp.on(
       'payment.failed',
       ((JSObject response) {
-        final error = response.getProperty('error'.toJS);
-        final desc =
-            error == null ? '' : _readString(error as JSObject, 'description');
+        final raw = response.getProperty('error'.toJS);
+        final error = raw == null ? null : raw as JSObject;
+        String? field(String k) {
+          if (error == null) return null;
+          final v = _readString(error, k);
+          return v.isEmpty ? null : v;
+        }
+
+        final desc = field('description');
         _onError(AppPaymentError(
-            desc.isNotEmpty ? desc : 'Payment failed. Please try again.'));
+          AppPaymentError.customerMessage(null, desc),
+          rawDescription: desc,
+          errorCode: field('code'),
+          reason: field('reason'),
+          source: field('source'),
+          step: field('step'),
+        ));
       }).toJS,
     );
 

@@ -124,6 +124,9 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
   /// Order amount in PAISE — see checkout_screen for why this is retained.
   int? _razorpayAmount;
 
+  /// When the checkout sheet was opened; see checkout_screen.dart.
+  DateTime? _sheetOpenedAt;
+
   /// Promo code — mirrors web's SubscriptionView. Validated against the same
   /// `promoCodes` collection create-order re-checks server-side, so what the
   /// seller sees here and what they are actually charged cannot drift.
@@ -666,6 +669,7 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
       _razorpayOrderId = order['id'] as String?;
       _razorpayAmount = (order['amount'] as num?)?.toInt();
 
+      _sheetOpenedAt = DateTime.now();
       _razorpay.open({
         'key': razorpayKey,
         'amount': order['amount'],
@@ -899,6 +903,10 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
   /// with no seats. See PaymentService.checkOrderStatus for the full story.
   void _onError(AppPaymentError r) async {
     final orderId = _razorpayOrderId;
+    final openedAt = _sheetOpenedAt;
+    final sheetOpenMs = openedAt == null
+        ? null
+        : DateTime.now().difference(openedAt).inMilliseconds;
     if (orderId == null) {
       setState(() {
         _loading = false;
@@ -955,7 +963,8 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
     if (!reconciliation.checkFailed) {
       unawaited(
         PaymentService().logFailedPayment(
-          r.message,
+          r,
+          sheetOpenMs: sheetOpenMs,
           orderId: orderId,
           amount: _razorpayAmount,
           kind: 'subscription',

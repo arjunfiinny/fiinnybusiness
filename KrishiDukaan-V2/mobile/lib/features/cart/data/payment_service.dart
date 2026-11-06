@@ -1,9 +1,10 @@
 import 'dart:convert';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
 import '../../../core/constants/app_config.dart';
+import '../../../core/payments/app_razorpay.dart';
 import '../../../core/models/cart_model.dart';
 
 /// Result of asking Razorpay directly whether an order actually has a
@@ -228,7 +229,11 @@ class PaymentService {
   /// logFailedPayment stores and what the admin Failed Payments card renders
   /// (it divides by 100).
   Future<void> logFailedPayment(
-    String message, {
+    AppPaymentError failure, {
+    /// How long the checkout sheet was open before the error, in ms. A
+    /// failure a second or two after opening means the sheet itself broke; a
+    /// long one means the customer looked at it and left.
+    int? sheetOpenMs,
     String? orderId,
     int? amount,
     /// 'cart' or 'subscription'.
@@ -259,7 +264,9 @@ class PaymentService {
             },
             body: jsonEncode({
               'razorpay_order_id': orderId,
-              'error': {'description': message},
+              'error': failure.toLogJson(),
+              'sheetOpenMs': ?sheetOpenMs,
+              'platform': kIsWeb ? 'web' : defaultTargetPlatform.name,
             }),
           );
         } catch (_) {
@@ -283,12 +290,12 @@ class PaymentService {
         'userPhone': phone ?? user.uid,
         'userUid': user.uid,
         'error': {
-          'reason': null,
-          'description': message,
-          'code': null,
-          'source': null,
-          'step': null,
-          'metadata': null,
+          'reason': failure.reason,
+          'description': failure.message,
+          'code': failure.errorCode,
+          'source': failure.source,
+          'step': failure.step,
+          'metadata': failure.metadata,
         },
         'orderId': orderId,
         'amount': amount,

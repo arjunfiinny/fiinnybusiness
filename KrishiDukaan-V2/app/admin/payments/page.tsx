@@ -80,9 +80,43 @@ type Attempt = {
     reason?: string | null;
     step?: string | null;
   } | null;
+  /** Set by attempt-failed from Razorpay's payment list (lib/payment-attempts
+   *  AttemptFailureKind). Absent on rows recorded before 6 Nov 2026. */
+  failureKind: "closed_without_paying" | "payment_failed" | "unknown" | null;
+  razorpayPaymentCount: number | null;
+  /** What the checkout SDK reported (app builds from 6 Nov 2026 on). */
+  client: {
+    sdkCode?: number | null;
+    sdkCodeName?: string | null;
+    rawDescription?: string | null;
+    sheetOpenMs?: number | null;
+    platform?: string | null;
+  } | null;
   createdAt: Date | null;
   paidAt: Date | null;
 };
+
+/** Placeholder texts the checkout sheet sends in place of a reason. */
+function meaningful(s: string | null | undefined): string | null {
+  const t = s?.trim();
+  if (!t) return null;
+  const l = t.toLowerCase();
+  return l === "undefined" || l === "null" || l === "na" ? null : t;
+}
+
+const SDK_CODE_LABEL: Record<number, string> = {
+  0: "network error",
+  1: "invalid checkout options",
+  2: "cancelled by customer",
+  3: "TLS / security error",
+  4: "incompatible app plugin",
+  100: "unknown SDK error",
+};
+
+function formatOpenFor(ms: number): string {
+  const s = Math.round(ms / 1000);
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+}
 
 /**
  * An attempt still sitting at 'created' this long after the order was made is
@@ -153,6 +187,9 @@ function toAttempt(d: QueryDocumentSnapshot<DocumentData>): Attempt {
     note: x.note ?? null,
     source: String(x.source ?? "unknown"),
     error: x.error ?? null,
+    failureKind: x.failureKind ?? null,
+    razorpayPaymentCount: typeof x.razorpayPaymentCount === "number" ? x.razorpayPaymentCount : null,
+    client: x.client ?? null,
     createdAt: toDate(x.createdAt),
     paidAt: toDate(x.paidAt),
   } as Attempt;
@@ -184,6 +221,8 @@ export default function AdminPaymentsPage() {
   // Bumped by Refresh so the 30-minute split and the counts are recomputed.
   const [loadedAt, setLoadedAt] = useState(() => Date.now());
   const [counts, setCounts] = useState({ failed: 0, abandoned: 0, pending: 0, paid: 0 });
+  // Of the failed: how many never reached a payment at Razorpay.
+  const [closedCount, setClosedCount] = useState(0);
   const [lostValue, setLostValue] = useState(0);
 
   // The selected tab, 50 at a time (newest first); totals come from count and
@@ -207,10 +246,16 @@ export default function AdminPaymentsPage() {
       // gateway ever refused, so counting it here overstates real losses.
       getAggregateFromServer(query(attemptsCol(), where("status", "==", "failed")), { v: sum("amount") })
         .then((a) => Number(a.data().v ?? 0)),
+      getCountFromServer(query(
+        attemptsCol(),
+        where("status", "==", "failed"),
+        where("failureKind", "==", "closed_without_paying"),
+      )).then((c) => c.data().count).catch(() => 0),
     ])
-      .then(([failed, abandoned, pending, paid, lost]) => {
+      .then(([failed, abandoned, pending, paid, lost, closed]) => {
         setCounts({ failed, abandoned, pending, paid });
         setLostValue(lost);
+        setClosedCount(closed);
         setError(null);
       })
       .catch((e) => setError(
@@ -333,7 +378,11 @@ export default function AdminPaymentsPage() {
 
       {/* Summary */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
-        <SummaryCard label="Failed" value={String(counts.failed)} tone="error" />
+        <SummaryCard
+          label={closedCount > 0 ? `Failed · ${closedCount} closed without paying` : "Failed"}
+          value={String(counts.failed)}
+          tone="error"
+        />
         <SummaryCard label="Abandoned" value={String(counts.abandoned)} tone="warn" />
         <SummaryCard label="In progress" value={String(counts.pending)} tone="warn" />
         <SummaryCard label="Successful" value={String(counts.paid)} tone="ok" />
@@ -453,8 +502,11 @@ function AttemptRow({
   onToggle: () => void;
 }) {
   const bucket = bucketOf(a);
+  const closedWithoutPaying = bucket === "failed" && a.failureKind === "closed_without_paying";
   const badge =
-    bucket === "failed"
+    closedWithoutPaying
+      ? { text: "Closed without paying", cls: "bg-amber-50 text-amber-700" }
+      : bucket === "failed"
       ? { text: "Failed", cls: "bg-red-50 text-red-700" }
       : bucket === "abandoned"
         ? { text: "Abandoned", cls: "bg-amber-50 text-amber-700" }
@@ -463,9 +515,23 @@ function AttemptRow({
           : { text: "Paid", cls: "bg-green-50 text-green-700" };
 
   // The single most useful line for a support call: why it did not go through.
+  const sdk = a.client?.sdkCode != null ? SDK_CODE_LABEL[a.client.sdkCode] ?? `SDK code ${a.client.sdkCode}` : null;
+  const openFor = a.client?.sheetOpenMs != null ? formatOpenFor(a.client.sheetOpenMs) : null;
+  const closedLine = closedWithoutPaying
+    ? [
+        "No payment was tried at Razorpay",
+        sdk ? `checkout reported: ${sdk}` : null,
+        openFor ? `sheet open ${openFor}` : null,
+      ].filter(Boolean).join(" · ")
+    : null;
   const reason =
-    a.error?.description ||
-    a.error?.reason ||
+    closedLine ||
+    meaningful(a.error?.description) ||
+    meaningful(a.error?.reason) ||
+    (bucket === "failed" && sdk ? `Checkout reported: ${sdk}` : null) ||
+    (bucket === "failed"
+      ? "No reason given by the checkout (recorded before reasons were captured)."
+      : null) ||
     (bucket === "abandoned"
       ? "Customer closed the payment screen without completing it."
       : bucket === "pending"
@@ -611,16 +677,30 @@ function AttemptRow({
           </div>
 
           {/* Failure detail */}
-          {a.error && (
+          {(a.error || a.client || a.failureKind) && (
             <div className="rounded-lg bg-red-50 p-3 text-sm">
               <p className="mb-1 text-xs font-bold uppercase tracking-wide text-red-700">
                 Razorpay error
               </p>
               <div className="flex flex-wrap gap-x-6 gap-y-1 text-red-700">
-                {a.error.description && <span>{a.error.description}</span>}
-                {a.error.reason && <span className="text-xs">reason: {a.error.reason}</span>}
-                {a.error.code && <span className="text-xs">code: {a.error.code}</span>}
-                {a.error.step && <span className="text-xs">step: {a.error.step}</span>}
+                {a.error?.description && <span>{a.error.description}</span>}
+                {a.error?.reason && <span className="text-xs">reason: {a.error.reason}</span>}
+                {a.error?.code && <span className="text-xs">code: {a.error.code}</span>}
+                {a.error?.step && <span className="text-xs">step: {a.error.step}</span>}
+                {a.razorpayPaymentCount != null && (
+                  <span className="text-xs">payments tried at Razorpay: {a.razorpayPaymentCount}</span>
+                )}
+                {a.client?.sdkCode != null && (
+                  <span className="text-xs">
+                    checkout code: {a.client.sdkCode}
+                    {sdk ? ` (${sdk})` : ""}
+                  </span>
+                )}
+                {openFor && <span className="text-xs">sheet open: {openFor}</span>}
+                {a.client?.rawDescription && (
+                  <span className="text-xs">checkout text: “{a.client.rawDescription}”</span>
+                )}
+                {a.client?.platform && <span className="text-xs">platform: {a.client.platform}</span>}
               </div>
             </div>
           )}

@@ -82,6 +82,10 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
   /// admin Failed Payments card expects (it renders amount / 100).
   int? _razorpayAmount;
 
+  /// When the checkout sheet was opened, so a failure can be logged with how
+  /// long the customer had it open (seconds = they left; ~0 = it broke).
+  DateTime? _sheetOpenedAt;
+
   @override
   void initState() {
     super.initState();
@@ -275,6 +279,7 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
       // errors when the server's RAZORPAY_KEY_ID differs from the app default.
       final razorpayKey = result['key_id'] as String? ?? AppConfig.razorpayKeyId;
 
+      _sheetOpenedAt = DateTime.now();
       _razorpay.open({
         'key': razorpayKey,
         'order_id': _razorpayOrderId,
@@ -403,6 +408,10 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
   /// "Failed" screen. See PaymentService.checkOrderStatus for the full story.
   void _onPaymentError(AppPaymentError response) async {
     final orderId = _razorpayOrderId;
+    final openedAt = _sheetOpenedAt;
+    final sheetOpenMs = openedAt == null
+        ? null
+        : DateTime.now().difference(openedAt).inMilliseconds;
     if (orderId == null) {
       setState(() {
         _isLoading = false;
@@ -444,7 +453,8 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
     if (!reconciliation.checkFailed) {
       unawaited(
         _paymentService.logFailedPayment(
-          response.message,
+          response,
+          sheetOpenMs: sheetOpenMs,
           orderId: orderId,
           amount: _razorpayAmount,
           kind: 'cart',
