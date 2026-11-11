@@ -206,6 +206,17 @@ export default function AdminUsersPage() {
     load(false, filterRole);
   }, [filterRole, filterDateFrom, filterDateTo, filterActive]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Deep-link support: Admin → Payments links a customer here as ?q=<phone>.
+  // Read from window (not useSearchParams, which would force a Suspense
+  // boundary around this large page). Seeding `search` flows through the
+  // debounce + full-collection fetch below, so the page opens pre-filtered to
+  // that customer. Runs once on mount, client-only.
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search).get("q");
+    if (q) setSearch(q);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     // Clearing the box takes effect immediately; typing settles after 250ms.
     if (!search) { setDebouncedSearch(""); return; }

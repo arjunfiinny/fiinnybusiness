@@ -37,6 +37,7 @@ export function sectionsForPath(pathname: string): AdminSection[] {
   const seg = pathname.split("/")[2] ?? "";
   if (!seg) return ["overview"];
   if (seg === "sales-team") return ["salesTeam"];
+  if (seg === "customer-history") return ["orders", "users"];
   if (seg === "route-payouts") return ["routePayouts"];
   if (seg === "payouts") return ["payouts", "routePayouts"];
   if (seg === "app-version") return ["appVersion"];

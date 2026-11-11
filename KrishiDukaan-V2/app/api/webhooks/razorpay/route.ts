@@ -8,6 +8,11 @@ import {
 } from "../../../lib/order-recovery";
 import { markPayoutsDueFromWebhook } from "../../../lib/payout-sync";
 import { applyRazorpayRefund, type RazorpayRefundEntity } from "../../../lib/refund-sync";
+import {
+  upsertPaymentFromEntity,
+  applyRefundToPayment,
+  type RazorpayPaymentEntity,
+} from "../../../lib/payments-mirror";
 
 /**
  * Razorpay webhook — the server-to-server signal that closes the gaps our
@@ -117,9 +122,24 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       const refund = ((event.payload as Record<string, unknown> | undefined)?.refund as
         | { entity?: RazorpayRefundEntity }
         | undefined)?.entity;
+      // Keep the order's refund state in step (existing behaviour) AND the
+      // payments mirror's (new) — the latter is what the dashboard reads.
       const orderId = refund ? await applyRazorpayRefund(refund) : null;
+      if (refund) await applyRefundToPayment(refund);
       return NextResponse.json({ ok: true, orderId });
     }
+
+    // `payment.authorized`: a payment authorized but not yet captured. Mirror it
+    // so it shows as an unresolved (Created) payment — NEVER as captured — until
+    // a capture event (or a sync) advances it.
+    if (eventName === "payment.authorized") {
+      const authEntity = ((event.payload as Record<string, unknown> | undefined)?.payment as
+        | { entity?: RazorpayPaymentEntity }
+        | undefined)?.entity;
+      if (authEntity?.id) await upsertPaymentFromEntity(authEntity, "webhook");
+      return NextResponse.json({ ok: true, mirrored: authEntity?.id ?? null });
+    }
+
     if (eventName !== "payment.failed" && eventName !== "payment.captured") {
       return NextResponse.json({ ok: true, ignored: eventName });
     }
@@ -139,6 +159,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (eventName === "payment.captured") {
       const paymentId = String(paymentEntity.id ?? "");
       const amountPaise = Number(paymentEntity.amount ?? 0);
+
+      // Mirror the capture into `payments` straight away (the dashboard's
+      // source of truth), independent of the order-recovery dance below.
+      await upsertPaymentFromEntity(paymentEntity as RazorpayPaymentEntity, "webhook", {
+        capturedAt: new Date(),
+      });
 
       // Cheap first look, then the grace wait only if needed. The recovery
       // call re-checks for itself before writing, so most captures find the
@@ -196,6 +222,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       },
       { id: orderId, notes },
       "razorpay_webhook",
+    );
+
+    // Mirror the failed payment (with its real error metadata and payment id)
+    // into `payments` — the exact data the mobile-client failure path never
+    // captured, and the reason the old dashboard's failure counts were wrong.
+    await upsertPaymentFromEntity(
+      { ...(paymentEntity as RazorpayPaymentEntity), order_id: orderId, notes },
+      "webhook",
     );
 
     return NextResponse.json({ ok: true });
