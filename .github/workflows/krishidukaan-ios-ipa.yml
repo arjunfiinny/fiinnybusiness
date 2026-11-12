@@ -19,6 +19,8 @@ concurrency:
 
 jobs:
   ios:
+    # The signing secrets live only in the main repo; forks would always fail.
+    if: github.repository == 'arjunfiinny/fiinnybusiness'
     runs-on: macos-14
     defaults:
       run:
@@ -48,7 +50,10 @@ jobs:
           # as of 2026-07-24). Verify in App Store Connect -> TestFlight ->
           # Builds that the current highest build for KrishiDukaan is still
           # below 1001 before relying on this. Computed in bash, not a YAML
-          # expression, since GitHub Actions' ${{ }} syntax has no + operator.
+          # expression, since GitHub Actions' expression syntax has no + operator.
+          # (Never write the literal dollar-brace-brace marker in a comment here:
+          # GitHub parses it even inside run scripts, and an empty one makes the
+          # whole workflow invalid, failing every push on every branch.)
           echo "BUILD_NUMBER=$((1000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
 
       - name: Select Xcode 16
