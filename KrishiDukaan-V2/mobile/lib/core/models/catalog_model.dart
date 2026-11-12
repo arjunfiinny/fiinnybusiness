@@ -83,6 +83,9 @@ class CatalogModel {
   final String id;
   final String name;
   final List<String> nameSearch;
+  /// Searches an admin linked to this product (Admin > Search links), from
+  /// the card's `searchAliases`. Market search matches them like the name.
+  final List<String> searchAliases;
   final String category;
   final List<String> images;
   final double price;
@@ -144,6 +147,12 @@ class CatalogModel {
   // Merging / web schema fields
   final String? manufacturerId;
   final String? manufacturerPhone;
+  /// The product owner's phone (manufacturer or self-listing retailer).
+  final String? ownerPhone;
+  /// Server-decided (functions/src/marketplace/online-eligibility.ts): whether
+  /// the OWNER can take an online order for this product, by the same rule
+  /// checkout uses. null on products the server hasn't decided yet.
+  final bool? ownerOnline;
   final String? source;
   final String? retailerId;
   final String? retailerPhone;
@@ -178,6 +187,7 @@ class CatalogModel {
     required this.id,
     required this.name,
     required this.nameSearch,
+    this.searchAliases = const [],
     required this.category,
     required this.images,
     required this.price,
@@ -207,6 +217,8 @@ class CatalogModel {
     this.sellerDiscounts = const {},
     this.manufacturerId,
     this.manufacturerPhone,
+    this.ownerPhone,
+    this.ownerOnline,
     this.source,
     this.retailerId,
     this.retailerPhone,
@@ -239,6 +251,7 @@ class CatalogModel {
     String? id,
     String? name,
     List<String>? nameSearch,
+    List<String>? searchAliases,
     String? category,
     List<String>? images,
     double? price,
@@ -268,6 +281,8 @@ class CatalogModel {
     Map<String, double>? sellerDiscounts,
     String? manufacturerId,
     String? manufacturerPhone,
+    String? ownerPhone,
+    bool? ownerOnline,
     String? source,
     String? retailerId,
     String? retailerPhone,
@@ -289,6 +304,7 @@ class CatalogModel {
       id: id ?? this.id,
       name: name ?? this.name,
       nameSearch: nameSearch ?? this.nameSearch,
+      searchAliases: searchAliases ?? this.searchAliases,
       category: category ?? this.category,
       images: images ?? this.images,
       price: price ?? this.price,
@@ -318,6 +334,8 @@ class CatalogModel {
       sellerDiscounts: sellerDiscounts ?? this.sellerDiscounts,
       manufacturerId: manufacturerId ?? this.manufacturerId,
       manufacturerPhone: manufacturerPhone ?? this.manufacturerPhone,
+      ownerPhone: ownerPhone ?? this.ownerPhone,
+      ownerOnline: ownerOnline ?? this.ownerOnline,
       source: source ?? this.source,
       retailerId: retailerId ?? this.retailerId,
       retailerPhone: retailerPhone ?? this.retailerPhone,
@@ -356,6 +374,11 @@ class CatalogModel {
     final lowestPrice = (d['lowestPrice'] as num?)?.toDouble();
     final createdAtMs = (d['createdAtMs'] as num?)?.toInt() ?? 0;
     return base.copyWith(
+      searchAliases: (d['searchAliases'] as List?)
+              ?.map((e) => e.toString().toLowerCase().trim())
+              .where((e) => e.isNotEmpty)
+              .toList() ??
+          const [],
       price: lowestPrice,
       lowestPrice: lowestPrice,
       reviewCount: (d['totalReviews'] as num?)?.toInt(),
@@ -569,6 +592,8 @@ class CatalogModel {
       maxDiscountPct: maxDiscountPct,
       manufacturerId: manufacturerId,
       manufacturerPhone: manufacturerPhone,
+      ownerPhone: d['ownerPhone'] as String?,
+      ownerOnline: d['ownerOnline'] as bool?,
       source: source,
       retailerId: retailerId,
       retailerPhone: retailerPhone,
