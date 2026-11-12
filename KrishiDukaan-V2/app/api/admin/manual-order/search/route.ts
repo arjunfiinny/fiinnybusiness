@@ -214,6 +214,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 }
 
 function mapCustomer(id: string, d: FirebaseFirestore.DocumentData): Record<string, unknown> {
+  const s = (v: unknown) => (v ? String(v) : null);
   return {
     id,
     name: String(d.name ?? d.businessName ?? d.ownerName ?? '').trim() || '(no name)',
@@ -222,7 +223,31 @@ function mapCustomer(id: string, d: FirebaseFirestore.DocumentData): Record<stri
     city: d.city ? String(d.city) : null,
     state: d.state ? String(d.state) : null,
     address: d.address ? String(d.address) : null,
+    // Structured delivery address — the checkout-written fields the order's
+    // customerAddress string is composed from, and what the wizard edits/saves.
+    addressArea:     s(d.addressArea),
+    addressCity:     s(d.addressCity),
+    addressDistrict: s(d.addressDistrict),
+    addressState:    s(d.addressState),
+    addressPincode:  s(d.addressPincode),
   };
+}
+
+/** Flatten a seller address (either a {line1,city,state,pincode} object or a
+ *  plain string) into a single display line. */
+function retailerAddressLine(d: FirebaseFirestore.DocumentData): string | null {
+  const a = d.address;
+  if (!a) {
+    const parts = [d.city, d.state, d.pincode].filter(Boolean).map(String);
+    return parts.length ? parts.join(', ') : null;
+  }
+  if (typeof a === 'string') return a.trim() || null;
+  if (typeof a === 'object') {
+    const o = a as Record<string, unknown>;
+    const parts = [o.line1, o.area, o.city, o.district, o.state, o.pincode].filter(Boolean).map(String);
+    return parts.length ? parts.join(', ') : null;
+  }
+  return null;
 }
 
 function mapRetailer(id: string, d: FirebaseFirestore.DocumentData): Record<string, unknown> {
@@ -233,6 +258,7 @@ function mapRetailer(id: string, d: FirebaseFirestore.DocumentData): Record<stri
     city: d.city ? String(d.city) : null,
     state: d.state ? String(d.state) : null,
     gstin: d.gstin ?? d.gstNumber ?? null,
+    address: retailerAddressLine(d),
   };
 }
 

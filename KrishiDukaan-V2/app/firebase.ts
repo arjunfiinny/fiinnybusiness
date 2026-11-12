@@ -4197,6 +4197,42 @@ export async function logFailedPayment(
 
 // ─── Admin profile save (phone-keyed — works before first OTP login) ──────────
 
+/** The checkout-written customer delivery-address fields on users/{phone}. */
+export type CustomerDeliveryAddress = { area: string; city: string; district: string; state: string; pincode: string };
+
+/**
+ * Map a customer delivery address onto the exact users/{phone} field keys the
+ * checkout flow persists (app/page.tsx) and the order's `customerAddress` string
+ * is composed from. Single source of truth, reused by adminSaveProfile and
+ * adminSaveCustomerAddress so the two can never drift.
+ */
+export function customerAddressFields(addr: CustomerDeliveryAddress): Record<string, unknown> {
+  return {
+    addressArea:     addr.area.trim()     || null,
+    addressCity:     addr.city.trim()     || null,
+    addressDistrict: addr.district.trim() || null,
+    addressState:    addr.state.trim()    || null,
+    addressPincode:  addr.pincode.trim()  || null,
+  };
+}
+
+/**
+ * Update ONLY a customer's delivery address on users/{phone} — a focused,
+ * side-effect-free write that leaves name/email/role/etc untouched (merge). Used
+ * by the manual-order wizard's final-review address edit. Reuses the same field
+ * schema as adminSaveProfile via customerAddressFields().
+ */
+export async function adminSaveCustomerAddress(
+  phone: string,
+  addr: CustomerDeliveryAddress,
+): Promise<void> {
+  await setDoc(
+    doc(db, "users", phone),
+    { ...customerAddressFields(addr), updatedAt: serverTimestamp() },
+    { merge: true },
+  );
+}
+
 export interface AdminSaveProfileInput {
   businessName: string;
   ownerName: string;
@@ -4261,12 +4297,7 @@ export async function adminSaveProfile(
   } else if (data.customerAddress) {
     // Customers store their delivery address in these checkout-written fields, not
     // the seller-style address/city/state/pincode keys above.
-    const ca = data.customerAddress;
-    userFields.addressArea     = ca.area.trim()     || null;
-    userFields.addressCity     = ca.city.trim()     || null;
-    userFields.addressDistrict = ca.district.trim() || null;
-    userFields.addressState    = ca.state.trim()    || null;
-    userFields.addressPincode  = ca.pincode.trim()  || null;
+    Object.assign(userFields, customerAddressFields(data.customerAddress));
   }
   await setDoc(doc(db, "users", phone), userFields, { merge: true });
 

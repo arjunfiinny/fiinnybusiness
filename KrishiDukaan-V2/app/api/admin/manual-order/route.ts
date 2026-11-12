@@ -33,6 +33,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   let body: {
     sellerPhone?: string;
     razorpayPaymentId?: string;
+    offline?: { method?: string; idempotencyKey?: string };
     customer?: {
       id?: string;
       name?: string;
@@ -56,10 +57,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const customer = body.customer;
   const items = Array.isArray(body.items) ? body.items : [];
 
+  // Offline (retailer-collected) payment path — mutually exclusive with Razorpay.
+  const offlineMethod = String(body.offline?.method ?? '').trim();
+  const offlineKey = String(body.offline?.idempotencyKey ?? '').trim();
+  const isOffline = !!body.offline && !!offlineMethod;
+
   if (!sellerPhone) return NextResponse.json({ error: 'A retailer is required.' }, { status: 400 });
-  if (!razorpayPaymentId) return NextResponse.json({ error: 'A payment is required.' }, { status: 400 });
   if (!customer?.id) return NextResponse.json({ error: 'A customer is required.' }, { status: 400 });
   if (items.length === 0) return NextResponse.json({ error: 'At least one product is required.' }, { status: 400 });
+  if (!isOffline && !razorpayPaymentId) {
+    return NextResponse.json({ error: 'A payment is required.' }, { status: 400 });
+  }
+  if (isOffline && !['cash', 'upi', 'other'].includes(offlineMethod)) {
+    return NextResponse.json({ error: 'Invalid offline payment method.' }, { status: 400 });
+  }
+  if (isOffline && !offlineKey) {
+    return NextResponse.json({ error: 'An idempotency key is required for an offline payment.' }, { status: 400 });
+  }
 
   const deliveryOverride =
     body.deliveryCharge != null && Number.isFinite(body.deliveryCharge) ? Number(body.deliveryCharge) : null;
@@ -68,9 +82,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const result = await createManualOrder({
       adminUid: caller.uid,
       sellerPhone,
-      razorpayPaymentId,
+      ...(isOffline
+        ? { offline: { method: offlineMethod as 'cash' | 'upi' | 'other', idempotencyKey: offlineKey } }
+        : { razorpayPaymentId, allowUnverifiedOverride: body.allowUnverifiedOverride === true }),
       deliveryOverride,
-      allowUnverifiedOverride: body.allowUnverifiedOverride === true,
       customer: {
         id: String(customer.id),
         name: String(customer.name ?? '').trim(),

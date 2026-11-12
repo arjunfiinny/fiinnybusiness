@@ -329,6 +329,17 @@ const DETERMINISTIC_ID = (razorpayOrderId: string) => `man_${razorpayOrderId}`;
 /** Deterministic order id for an admin-override order that has no Razorpay order
  *  id — keyed off the payment id so a retry still can't double-create. */
 const manualOrderIdForPayment = (razorpayPaymentId: string) => `man_pay_${razorpayPaymentId}`;
+/** Deterministic order id for an offline (retailer-collected) payment, which has
+ *  NO Razorpay id — keyed off a client idempotency token so a retry/double-submit
+ *  returns the same order rather than creating a second one. */
+const manualOrderIdForOffline = (idempotencyKey: string) => `man_off_${idempotencyKey.replace(/[^a-zA-Z0-9_-]/g, '')}`;
+
+/** Offline payment methods a retailer may have collected directly. */
+export type OfflinePaymentMethod = 'cash' | 'upi' | 'other';
+export const OFFLINE_METHODS: OfflinePaymentMethod[] = ['cash', 'upi', 'other'];
+const OFFLINE_METHOD_LABEL: Record<OfflinePaymentMethod, string> = {
+  cash: 'Cash', upi: 'UPI', other: 'Other (offline)',
+};
 
 /** Every order already tied to a Razorpay PAYMENT id, by either payment key. */
 async function findOrdersForRazorpayPayment(razorpayPaymentId: string): Promise<string[]> {
@@ -571,6 +582,16 @@ async function finalizeVerification(
 
 // ── Order creation ──────────────────────────────────────────────────────────
 
+/** How an order's payment was recorded — surfaced so the review/result screens can
+ *  distinguish a Razorpay-verified payment from a retailer-collected offline one. */
+export type ManualPaymentSummary = {
+  mode: 'razorpay' | 'offline';
+  status: string;
+  amount: number;
+  method: string | null;
+  razorpayPaymentId: string | null;
+};
+
 export type CreateManualOrderResult =
   | {
       ok: true;
@@ -579,6 +600,7 @@ export type CreateManualOrderResult =
       status: string;
       grandTotal: number;
       invoice: InvoiceOutcome;
+      payment: ManualPaymentSummary;
     }
   | { ok: false; status: number; error: string; verification?: ManualPaymentVerification };
 
@@ -594,7 +616,12 @@ export type CreateManualOrderInput = {
   };
   sellerPhone: string;
   items: ManualOrderItemInput[];
-  razorpayPaymentId: string;
+  /** Razorpay payment to verify + link. Omit when recording an offline payment. */
+  razorpayPaymentId?: string;
+  /** Offline payment collected by the retailer (cash/UPI/other) — mutually
+   *  exclusive with razorpayPaymentId; NOT a Razorpay payment. Idempotency key is
+   *  client-generated once per attempt so retries don't double-create. */
+  offline?: { method: OfflinePaymentMethod; idempotencyKey: string };
   /** Admin-set delivery charge (₹) for this order; null keeps the calculated one. */
   deliveryOverride?: number | null;
   /** Create even when the payment can't be auto-verified (see
@@ -629,29 +656,54 @@ export async function createManualOrder(input: CreateManualOrderInput): Promise<
     return { ok: false, status: 400, error: 'Order total is zero — check the selected products and prices.' };
   }
 
-  const verification = await verifyPaymentForManualOrder({
-    razorpayPaymentId: input.razorpayPaymentId,
-    customerId: input.customer.id,
-    expectedTotalRupees: pricing.grandTotal,
-    allowUnverifiedOverride: input.allowUnverifiedOverride === true,
-  });
-  if (!verification.ok) {
-    return {
-      ok: false,
-      status: 409,
-      error: `Payment verification failed:\n- ${verification.blocking.join('\n- ')}`,
-      verification,
-    };
-  }
+  // ── Two payment paths ──────────────────────────────────────────────────────
+  //  A) Razorpay: verify the payment against Razorpay for this exact total/customer.
+  //  B) Offline : the retailer collected the money directly (cash/UPI/other); there
+  //     is NO Razorpay payment to verify — we record it as an offline payment.
+  const isOffline = !!input.offline;
+  let verification: ManualPaymentVerification | null = null;
+  let unverified = false;
+  let razorpayOrderId: string | null = null;
+  let orderId: string;
+  let offlineMethod: OfflinePaymentMethod | null = null;
 
-  // A verified payment carries its Razorpay order id; an admin-override one has
-  // none, so the order is keyed off the payment id instead. Either way the id is
-  // deterministic, so a retry finds the same order and never double-creates.
-  const unverified = verification.verifiedVia === 'admin_override';
-  const razorpayOrderId = verification.razorpayOrderId;
-  const orderId = razorpayOrderId
-    ? DETERMINISTIC_ID(razorpayOrderId)
-    : manualOrderIdForPayment(input.razorpayPaymentId);
+  if (isOffline) {
+    offlineMethod = input.offline!.method;
+    if (!OFFLINE_METHODS.includes(offlineMethod)) {
+      return { ok: false, status: 400, error: 'Invalid offline payment method.' };
+    }
+    const key = String(input.offline!.idempotencyKey ?? '').trim();
+    if (!key) {
+      return { ok: false, status: 400, error: 'An idempotency key is required for an offline payment.' };
+    }
+    orderId = manualOrderIdForOffline(key);
+  } else {
+    if (!input.razorpayPaymentId) {
+      return { ok: false, status: 400, error: 'A payment is required.' };
+    }
+    verification = await verifyPaymentForManualOrder({
+      razorpayPaymentId: input.razorpayPaymentId,
+      customerId: input.customer.id,
+      expectedTotalRupees: pricing.grandTotal,
+      allowUnverifiedOverride: input.allowUnverifiedOverride === true,
+    });
+    if (!verification.ok) {
+      return {
+        ok: false,
+        status: 409,
+        error: `Payment verification failed:\n- ${verification.blocking.join('\n- ')}`,
+        verification,
+      };
+    }
+    // A verified payment carries its Razorpay order id; an admin-override one has
+    // none, so the order is keyed off the payment id instead. Either way the id is
+    // deterministic, so a retry finds the same order and never double-creates.
+    unverified = verification.verifiedVia === 'admin_override';
+    razorpayOrderId = verification.razorpayOrderId;
+    orderId = razorpayOrderId
+      ? DETERMINISTIC_ID(razorpayOrderId)
+      : manualOrderIdForPayment(input.razorpayPaymentId);
+  }
   const ref = db.collection('orders').doc(orderId);
 
   const seller = await resolveSellerAccount(input.sellerPhone);
@@ -695,27 +747,47 @@ export async function createManualOrder(input: CreateManualOrderInput): Promise<
     deliveryMode: 'delivery',
     status: 'placed',
     statusHistory: [{ status: 'placed', at: nowIso }],
-    payment: {
-      ...(razorpayOrderId ? { razorpayOrderId } : {}),
-      razorpayPaymentId: input.razorpayPaymentId,
-      status: 'paid',
-      amount: (verification.amountPaise ?? Math.round(pricing.grandTotal * 100)) / 100,
-      paidAt: nowIso,
-      verifiedVia: verification.verifiedVia,
-      ...(unverified ? { unverified: true } : {}),
-    },
+    // Offline: an explicit retailer-collected payment — NO Razorpay id, flagged so
+    // every reader (orders list, invoice, review/result) can tell the two apart.
+    payment: isOffline
+      ? {
+          mode: 'offline',
+          method: offlineMethod,
+          collectedBy: 'retailer',
+          offline: true,
+          status: 'paid',
+          amount: pricing.grandTotal,
+          paidAt: nowIso,
+        }
+      : {
+          mode: 'razorpay',
+          ...(razorpayOrderId ? { razorpayOrderId } : {}),
+          razorpayPaymentId: input.razorpayPaymentId,
+          method: verification!.method ?? null,
+          status: 'paid',
+          amount: (verification!.amountPaise ?? Math.round(pricing.grandTotal * 100)) / 100,
+          paidAt: nowIso,
+          verifiedVia: verification!.verifiedVia,
+          ...(unverified ? { unverified: true } : {}),
+        },
     // Auditable, following the order-recovery convention: this order did not come
     // through the normal client path — an admin created it manually.
     recovered: {
       by: 'admin_manual_order',
       at: nowIso,
       adminUid: input.adminUid,
-      basis: unverified
+      basis: isOffline
+        ? `admin-selected products + offline payment collected by retailer (${offlineMethod})`
+        : unverified
         ? 'admin-selected products + admin-vouched payment id (UNVERIFIED — not confirmed by Razorpay or the internal ledger)'
         : 'admin-selected products + verified captured Razorpay payment',
-      verifiedVia: verification.verifiedVia,
-      ...(unverified ? { unverifiedOverride: true } : {}),
-      razorpayPaymentId: input.razorpayPaymentId,
+      ...(isOffline
+        ? { offline: true, offlineMethod }
+        : {
+            verifiedVia: verification!.verifiedVia,
+            ...(unverified ? { unverifiedOverride: true } : {}),
+            razorpayPaymentId: input.razorpayPaymentId,
+          }),
       ...(pricing.deliveryOverridden
         ? { deliveryOverridden: true, deliveryCalculated: pricing.deliveryCalculated, deliveryCharged: pricing.deliveryCharge }
         : {}),
@@ -740,6 +812,16 @@ export async function createManualOrder(input: CreateManualOrderInput): Promise<
   // the order, so the admin can retry create to regenerate it without re-paying.
   const invoice = await ensureOrderInvoice(orderId);
 
+  const payment: ManualPaymentSummary = isOffline
+    ? { mode: 'offline', status: 'paid', amount: pricing.grandTotal, method: OFFLINE_METHOD_LABEL[offlineMethod!], razorpayPaymentId: null }
+    : {
+        mode: 'razorpay',
+        status: 'paid',
+        amount: (verification!.amountPaise ?? Math.round(pricing.grandTotal * 100)) / 100,
+        method: verification!.method ?? null,
+        razorpayPaymentId: input.razorpayPaymentId ?? null,
+      };
+
   return {
     ok: true,
     orderId,
@@ -747,6 +829,7 @@ export async function createManualOrder(input: CreateManualOrderInput): Promise<
     status: 'placed',
     grandTotal: pricing.grandTotal,
     invoice,
+    payment,
   };
 }
 

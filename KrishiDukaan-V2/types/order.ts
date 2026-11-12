@@ -299,7 +299,32 @@ export type PaymentInfo = {
   refundArn?: string;
   /** ISO — last time the status was read from Razorpay. */
   refundCheckedAt?: string;
+
+  // ── Payment mode (manual orders) ────────────────────────────────────────
+  /** How the money was taken. 'offline' = collected directly by the retailer
+   *  (cash/UPI/other, via admin manual-order creation); 'razorpay' or absent =
+   *  an online Razorpay payment. */
+  mode?: "razorpay" | "offline";
+  /** Offline-payment method label (e.g. "Cash", "UPI", "other"). */
+  method?: string;
+  /** True for a retailer-collected offline payment. */
+  offline?: boolean;
+  /** Who physically collected an offline payment (e.g. "retailer"). */
+  collectedBy?: string;
 };
+
+/**
+ * Label for the invoice "Mode of Payment" line, reflecting how the order was
+ * ACTUALLY paid — never shows "Online (Razorpay)" for a retailer-collected
+ * offline payment. Shared by every invoice renderer (preview, PDF, download).
+ */
+export function paymentModeLabel(payment?: PaymentInfo): string {
+  if (!payment) return "Cash on Delivery";
+  if (payment.mode === "offline" || payment.offline === true || payment.collectedBy === "retailer") {
+    return "Offline (Collected by Retailer)";
+  }
+  return "Online (Razorpay)";
+}
 
 export type InvoiceMetadata = {
   invoiceNumber: string;
