@@ -1,4 +1,4 @@
-import { formatCustomerAddress, normalizeOrderItems } from "../../types/order";
+import { formatCustomerAddress, normalizeOrderItems, paymentModeLabel } from "../../types/order";
 import type { OrderDoc } from "../../types/order";
 import { loadInvoiceFontsBase64 } from "./invoice-fonts";
 
@@ -216,7 +216,7 @@ export function buildInvoiceHtml(order: OrderDoc, seller?: InvoiceSellerInfo): s
 
   // ── Transaction / totals detail block ────────────────────────────────────────
   const paymentTxnId = order.payment?.razorpayPaymentId ?? order.payment?.razorpayOrderId ?? "—";
-  const modeOfPayment = order.payment ? "Online (Razorpay)" : "Cash on Delivery";
+  const modeOfPayment = paymentModeLabel(order.payment);
   const dateTime = (() => {
     try {
       const d = (order.createdAt as any)?.toDate?.() ?? new Date(order.createdAt as string);
