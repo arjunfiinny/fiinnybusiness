@@ -74,7 +74,8 @@ class OrderRepository {
   }
 
   /// Creates one order doc per unique seller after successful payment.
-  Future<void> createOrdersAfterPayment({
+  /// Returns the ids of the orders written (one per seller).
+  Future<List<String>> createOrdersAfterPayment({
     required List<CartItemModel> items,
     required String customerName,
     required String customerPhone,
@@ -90,6 +91,10 @@ class OrderRepository {
     /// The address state that picked the delivery slab; stored so the order
     /// (and its invoice) show which slab set applied.
     String? customerDeliveryState,
+
+    /// The address in parts (house / area / landmark / city / district /
+    /// state / pincode) — orders.deliveryAddress, same as web checkout.
+    Map<String, String>? deliveryAddress,
   }) async {
     final user = FirebaseAuth.instance.currentUser!;
 
@@ -105,6 +110,7 @@ class OrderRepository {
     }
 
     final batch = _db.batch();
+    final orderIds = <String>[];
 
     for (final entry in bySeller.entries) {
       final sellerPhone = entry.key;
@@ -120,11 +126,14 @@ class OrderRepository {
       final state = (customerDeliveryState ?? '').trim();
 
       final orderRef = _db.collection('orders').doc();
+      orderIds.add(orderRef.id);
       batch.set(orderRef, {
         'customerId': user.uid,
         'customerName': customerName,
         'customerPhone': customerPhone,
         'customerAddress': customerAddress,
+        if ((deliveryAddress?['pincode'] ?? '').isNotEmpty)
+          'deliveryAddress': deliveryAddress,
         // sellerId kept as phone for legacy query compatibility. May also be
         // an owner UID when the product carried no phone — web-created orders
         // are keyed that way too, so the dashboard matches either.
@@ -193,6 +202,7 @@ class OrderRepository {
     }
 
     await batch.commit();
+    return orderIds;
   }
 
   /// This seller's pricing: the server's / estimate's figure when there is one

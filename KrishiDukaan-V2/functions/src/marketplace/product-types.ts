@@ -17,6 +17,15 @@ export type MarketplaceProduct = {
   createdBy?: string;
   source?: string;
 
+  /**
+   * Admin-assigned product-identity group id (/admin/product-identity). When set,
+   * it — not the product name — is the merge/grouping key, so two docs the admin
+   * marked as the SAME real product collapse into one card even if their names
+   * differ. Absent → the doc groups by name as before. Its value is the
+   * authoritative doc's own id.
+   */
+  canonicalId?: string;
+
   /** Reference / Back-compat fields */
   manufacturerId?: string;
   manufacturerProductId?: string;
@@ -40,6 +49,8 @@ export type MarketplaceProduct = {
   extraDeliveryCharge?: number;
   /** When true, this product ships free — it adds no weight/charge to the seller's delivery fee. */
   freeDelivery?: boolean;
+  /** Seller pays this % (1–99) of this product's delivery, the buyer the rest. */
+  sellerDeliveryPct?: number;
 
   /** Legacy display fields — present on older documents only */
   stock?: string;
@@ -72,6 +83,7 @@ export type MarketplaceProduct = {
     gstIncluded?: boolean;
     extraDeliveryCharge?: number;
     freeDelivery?: boolean;
+    sellerDeliveryPct?: number;
   }[];
 
   /** Lowest selling price across all stores that stock this product (pre-discount) */

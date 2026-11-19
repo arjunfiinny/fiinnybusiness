@@ -43,7 +43,7 @@ import { LegalLinks } from "../../components/shared/legal-doc";
  * Public, indexable seller-acquisition page.
  *
  * Every other seller surface (/dashboard/upgrade, /dashboard/subscription) is
- * auth-gated AND Disallow'd in robots.ts, so nothing on the site answered the
+ * auth-gated AND Disallow'd in robots.txt, so nothing on the site answered the
  * seller-intent query "where can I sell agri products online and what does it
  * cost". This page is the crawlable answer, and it states the real numbers in
  * plain text so search engines and AI answer engines can quote them.
@@ -1290,7 +1290,7 @@ export default async function SellPage() {
         </section>
 
         {/* FAQ */}
-        <section className="mt-20">
+        <section id="faq" className="mt-20 scroll-mt-24">
           <h2 className="text-2xl font-black text-on-surface text-center mb-8">
             Frequently asked questions
           </h2>

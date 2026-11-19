@@ -12,6 +12,7 @@ import { Tag } from 'lucide-react';
 import { BannerSlideVisual } from '../components/BannerSlide';
 import { displayPrice } from '../lib/price-display';
 import { PriceTag } from '../../components/shared/price-tag';
+import { DeliveredPriceLine } from '../components/shared/delivered-price-line';
 import ProductImage from '../../components/shared/product-image';
 
 interface HomeViewProps {
@@ -273,15 +274,19 @@ export default function HomeView({
     }
   };
 
-  // Quick-access category tiles — IDs match Firestore product.category values (case-insensitive).
+  // Quick-access category tiles — IDs are canonical category names, so each id's
+  // lowercase form matches a product's categoryKey (same order as the Market
+  // filter chips). 'Bio Pesticides' was a typo for 'Bio-Stimulants' and matched
+  // nothing; 'Sprayers' is dropped here to mirror removing its Market chip (the
+  // category itself is kept — products stay reachable by search).
   const categoryTiles = [
+    { id: 'Fertilizers',   label: t('catFertilizers'),  imgUrl: 'https://images.unsplash.com/photo-1416879595882-3373a0480b5b?auto=format&fit=crop&w=120&h=120&q=80', color: 'from-amber-50 to-orange-100' },
     { id: 'Pesticides',    label: t('catPesticides'),    imgUrl: 'https://images.unsplash.com/photo-1574943320219-553eb213f72d?auto=format&fit=crop&w=120&h=120&q=80', color: 'from-emerald-50 to-emerald-100' },
-    { id: 'Fertilizers',  label: t('catFertilizers'),  imgUrl: 'https://images.unsplash.com/photo-1416879595882-3373a0480b5b?auto=format&fit=crop&w=120&h=120&q=80', color: 'from-amber-50 to-orange-100' },
     { id: 'Herbicides',   label: t('catHerbicides'),   imgUrl: 'https://images.unsplash.com/photo-1500937386664-56d1dfef3854?auto=format&fit=crop&w=120&h=120&q=80', color: 'from-rose-50 to-pink-100' },
-    { id: 'Bio Pesticides', label: t('catBioStimulants'), imgUrl: 'https://images.unsplash.com/photo-1530836369250-ef72a3f5cda8?auto=format&fit=crop&w=120&h=120&q=80', color: 'from-teal-50 to-cyan-100' },
-    { id: 'Sprayers',     label: t('catSprayers'),     imgUrl: 'https://images.unsplash.com/photo-1622383563227-04401ab4e5ea?auto=format&fit=crop&w=120&h=120&q=80', color: 'from-sky-50 to-blue-100' },
+    { id: 'Insecticides', label: t('catInsecticides'), imgUrl: 'https://images.unsplash.com/photo-1622383563227-04401ab4e5ea?auto=format&fit=crop&w=120&h=120&q=80', color: 'from-sky-50 to-blue-100' },
+    { id: 'Bio-Stimulants', label: t('catBioStimulants'), imgUrl: 'https://images.unsplash.com/photo-1530836369250-ef72a3f5cda8?auto=format&fit=crop&w=120&h=120&q=80', color: 'from-teal-50 to-cyan-100' },
     { id: 'Seeds',        label: t('catSeeds'),        imgUrl: 'https://images.unsplash.com/photo-1558618666-fcd25c85cd64?auto=format&fit=crop&w=120&h=120&q=80', color: 'from-yellow-50 to-amber-100' },
-    { id: 'Tools',        label: t('catTools'),        imgUrl: 'https://images.unsplash.com/photo-1601584115197-04ecc0da31d7?auto=format&fit=crop&w=120&h=120&q=80', color: 'from-slate-50 to-gray-100' },
+    { id: 'Insecticides', label: t('catInsecticides'), imgUrl: 'https://images.unsplash.com/photo-1574943320219-553eb213f72d?auto=format&fit=crop&w=120&h=120&q=80', color: 'from-slate-50 to-gray-100' },
     { id: 'all',          label: t('catViewAll'),      imgUrl: 'https://images.unsplash.com/photo-1488459716781-31db52582fe9?auto=format&fit=crop&w=120&h=120&q=80', color: 'from-primary/10 to-primary/20' },
   ];
 
@@ -538,6 +543,7 @@ export default function HomeView({
               <div className={`p-3 flex flex-col flex-1 ${hasOffer ? 'bg-gradient-to-b from-green-50/30 to-white' : ''}`}>
                 <h3 className="text-sm font-bold text-on-surface line-clamp-2 mb-1 leading-tight">{product.name}</h3>
                 <PriceTag value={dp} size="sm" className="mt-auto" />
+                <DeliveredPriceLine product={product} className="mt-0.5" />
                 {product.sellMode !== "offline_store_only" && (
                   <div className="mt-2" onClick={(e) => e.stopPropagation()}>
                     <HelperTooltip side="top" textKey="marketAddToCart">

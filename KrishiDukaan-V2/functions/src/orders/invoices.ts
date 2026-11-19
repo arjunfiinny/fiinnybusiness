@@ -12,7 +12,8 @@ import { expirySecret } from "../notifications/reassignment";
  * and refuses orders that aren't accepted yet.
  */
 
-const APP_BASE_URL = "https://krishidukan.com";
+// Set per project in functions/.env.<project>, so UAT never calls the live website.
+const APP_BASE_URL = process.env.APP_BASE_URL || "https://krishidukan.com";
 
 async function requestInvoice(orderId: string): Promise<boolean> {
   try {
@@ -70,10 +71,13 @@ export const sweepMissingInvoices = onSchedule(
       .limit(300)
       .get();
 
-    // Only accepted (or later) orders have an invoice; placed ones wait.
+    // Only accepted (or later) orders have an invoice; placed ones wait. A retailer
+    // manual pay-by-link order that is still awaiting payment is excluded too — its
+    // invoice is generated only once the Razorpay webhook marks it paid.
     const missing = snap.docs.filter(
       (d) =>
         INVOICE_READY.has(String(d.data().status ?? "")) &&
+        d.data().awaitingPayment !== true &&
         !(d.data().invoice as { storagePath?: string } | undefined)?.storagePath,
     );
     let ok = 0;

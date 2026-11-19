@@ -1,4 +1,5 @@
 import { getApp, getApps, initializeApp } from 'firebase/app';
+import { deliveryAddressWriteFields, type DeliveryAddress } from './lib/delivery-address';
 import {
   addDoc,
   arrayRemove,
@@ -409,7 +410,8 @@ export async function fetchStores(): Promise<Store[]> {
         id: doc.id,
         retailerId: data.retailerId,
         userId: data.userId,
-        name: data.shopName || data.ownerName || 'Retailer',
+        // Business-identity priority: businessName → shopName → ownerName → name.
+        name: data.businessName || data.shopName || data.ownerName || data.name || 'Retailer',
         ownerName: data.ownerName,
         // Fall back to doc.id: for phone-keyed docs the doc ID is the phone number itself
         phone: data.phone || (/^\+?\d{10,13}$/.test(doc.id) ? doc.id : undefined),
@@ -507,7 +509,7 @@ export async function fetchStores(): Promise<Store[]> {
         return {
           id: doc.id,
           userId: data.uid || undefined,
-          name: data.shopName || data.businessName || data.ownerName || data.name,
+          name: data.businessName || data.shopName || data.ownerName || data.name,
           ownerName: data.ownerName,
           phone: data.phone || (/^\+?\d{10,13}$/.test(doc.id) ? doc.id : undefined),
           logo: data.logo || undefined,
@@ -677,7 +679,12 @@ export async function fetchStoresForSellers(sellers: ProductSellerKey[]): Promis
         id: docId || seller.storeId || seller.storePhone || '',
         retailerId: d.retailerId,
         userId: d.uid || d.userId || undefined,
-        name: d.shopName || d.businessName || d.ownerName || d.name || seller.storeName || 'Retailer',
+        // Business-identity priority: businessName → shopName → ownerName → name.
+        // businessName and shopName are both business-identity fields (the canonical
+        // uid-keyed retailer doc stores its business name ONLY in shopName), so they
+        // rank first. `name` is last because on profiles/users docs it holds the
+        // OWNER's personal name, not the shop. ownerName is never the primary name.
+        name: d.businessName || d.shopName || d.ownerName || d.name || seller.storeName || 'Retailer',
         ownerName: d.ownerName,
         phone,
         logo: d.logo || undefined,
@@ -1418,11 +1425,35 @@ function phoneTail(v: string): string {
   return d.length >= 10 ? d.slice(-10) : "";
 }
 
+/** A delivery address in parts, as checkout collects it (orders.deliveryAddress). */
+export type { DeliveryAddress } from './lib/delivery-address';
+
+/**
+ * Saves the customer's delivery address to their profile (users/{phone},
+ * resolved through uidIndex like getUserProfile; email-only admin accounts
+ * use users/{uid}). One shape for profile and checkout, web and app
+ * (lib/delivery-address.ts). Returns false when there is no profile to save to.
+ */
+export async function saveDeliveryAddress(uid: string, address: Partial<DeliveryAddress>, role: unknown): Promise<boolean> {
+  const idx = await getDoc(doc(db, 'uidIndex', uid));
+  const phone = idx.exists() ? String(idx.data().phone ?? '') : '';
+  const ref = doc(db, 'users', phone || uid);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) return false;
+  await updateDoc(ref, {
+    ...deliveryAddressWriteFields(address, role ?? snap.data().role),
+    updatedAt: serverTimestamp(),
+  });
+  return true;
+}
+
 export async function createOrdersFromCart(params: {
   customerId: string;
   customerName: string;
   customerPhone: string;
   customerAddress: string;
+  /** The same address in parts (house / area / landmark / city / state / pincode). */
+  deliveryAddress?: DeliveryAddress;
   /** Finalized delivery-address state — decides in/out-of-state delivery slabs. */
   customerDeliveryState?: string;
   /**
@@ -1443,7 +1474,7 @@ export async function createOrdersFromCart(params: {
     paidAt: string;
   };
 }): Promise<string[]> {
-  const { customerId, customerName, customerPhone, customerAddress, customerDeliveryState, serverBreakdown, items, payment } = params;
+  const { customerId, customerName, customerPhone, customerAddress, deliveryAddress, customerDeliveryState, serverBreakdown, items, payment } = params;
   if (!items.length) return [];
 
   const groups = new Map<string, CartItem[]>();
@@ -1622,6 +1653,7 @@ export async function createOrdersFromCart(params: {
       customerName: customerName.trim(),
       customerPhone: customerPhone.trim(),
       customerAddress: customerAddress.trim(),
+      ...(deliveryAddress?.pincode ? { deliveryAddress } : {}),
       ...(customerDeliveryState ? { customerDeliveryState } : {}),
       sellerId,
       sellerType,
@@ -1868,6 +1900,22 @@ export async function updateOrderStatus(orderId: string, status: OrderStatus): P
   });
 }
 
+/**
+ * Asks the shipping functions to act on a courier order: request the pickup, or
+ * (test bookings only, checked on the server) pretend to be the courier. This
+ * field is the only shipping data a seller can write.
+ */
+export async function requestShipmentAction(
+  orderId: string,
+  action: "pickup" | "simulate",
+  event?: string,
+): Promise<void> {
+  await updateDoc(doc(db, "orders", orderId), {
+    shipmentRequest: { id: crypto.randomUUID(), action, ...(event ? { event } : {}), at: new Date().toISOString() },
+    updatedAt: serverTimestamp(),
+  });
+}
+
 export async function updateOrderPayment(orderId: string, paymentInfo: {
   razorpayOrderId: string;
   razorpayPaymentId: string;
@@ -1970,7 +2018,7 @@ export async function fetchManufacturerContacts(manufacturerId: string): Promise
   }
 }
 
-import { Hub, INITIAL_HUBS } from './initialHubs';
+import { Hub } from './initialHubs';
 
 export type { Hub };
 
@@ -2161,28 +2209,16 @@ export function trackDirectionRequest(productId: string) {
 
 export async function fetchHubs(): Promise<Hub[]> {
   try {
+    // READ ONLY. This used to "seed" the collection with INITIAL_HUBS whenever
+    // the read came back empty — from any signed-in admin's browser, on any
+    // page that lists hubs. An empty read is not proof the collection is
+    // empty (an offline/cache-only read returns empty too), and setDoc
+    // replaces the whole document. On 7 Nov 2026 12:14 UTC it rewrote all 10
+    // hubs over the admin-uploaded images and content with the 2026 defaults,
+    // whose Unsplash links have since died — the broken "Shop by Crop" icons.
+    // Callers already fall back to built-in display data on an empty result;
+    // writing defaults is an explicit admin action (Admin > Hubs > import).
     const snapshot = await getDocs(collection(db, 'hubs'));
-    if (snapshot.empty) {
-      console.log('Firebase: Hubs collection is empty. Seeding initial hubs...');
-      try {
-        for (const hub of INITIAL_HUBS) {
-          const { id, ...hubData } = hub;
-          await setDoc(doc(db, 'hubs', id), {
-            ...hubData,
-            createdAt: serverTimestamp(),
-            source: 'initial_sync'
-          });
-        }
-        const newSnapshot = await getDocs(collection(db, 'hubs'));
-        return newSnapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data()
-        } as Hub));
-      } catch (seedError) {
-        console.warn('Firebase: Seeding initial hubs failed (likely permission denied). Falling back to local INITIAL_HUBS:', seedError);
-        return INITIAL_HUBS;
-      }
-    }
     return snapshot.docs.map(doc => ({
       id: doc.id,
       ...doc.data()
@@ -2739,10 +2775,11 @@ export async function adminDeleteProduct(productId: string): Promise<void> {
  * fields + updatedAt. It NEVER changes name, image, variants, price, stock,
  * availability, source or ownership, so no seller-specific listing data can be
  * overwritten, and no doc is deleted or renamed. The marketplace card pipeline
- * does not read canonicalId yet (see types/product.ts), so this changes no
- * storefront behaviour — grouping stays name-based until the separately
- * approved catalogId migration. Linking never happens automatically; it is only
- * ever called from an explicit admin confirmation in /admin/product-identity.
+ * now GROUPS by canonicalId (functions/src/marketplace: groupKeyOf), so the
+ * linked docs — and their seller copies, re-pointed here too — merge into one
+ * storefront card with unioned package-size variants and every seller as a
+ * retailer. Linking never happens automatically; it is only ever called from an
+ * explicit admin confirmation in /admin/product-identity.
  *
  * Idempotent: re-linking the same set to the same canonicalId is a no-op-ish
  * re-stamp. When the selection spans docs that already carry DIFFERENT
@@ -2761,8 +2798,17 @@ export async function adminLinkProductsToCanonical(
   if (!ids.includes(canonicalId)) {
     throw new Error('The authoritative product must be one of the selected products.');
   }
+  // Seller copies of a linked doc (admin_assigned / manufacturer_assigned /
+  // retailer_inventory_copy, tied back by originalProductId / manufacturerProductId)
+  // must share the group's canonicalId too — the marketplace merge now groups by
+  // canonicalId, so a copy left on its name key would split those retailers into a
+  // separate card and vanish from the merged product. New copies inherit it
+  // automatically (they are spread from the source doc at assignment time).
+  const copyIds = await findCopyProductIds(ids);
+  const targetIds = Array.from(new Set([...ids, ...copyIds]));
+
   const batch = writeBatch(db);
-  for (const id of ids) {
+  for (const id of targetIds) {
     batch.set(
       doc(db, 'products', id),
       {
@@ -2775,7 +2821,30 @@ export async function adminLinkProductsToCanonical(
     );
   }
   await batch.commit();
-  return ids.length;
+  return targetIds.length;
+}
+
+/**
+ * Finds every seller-copy product doc rooted at any of `rootIds`, matched by the
+ * two back-reference fields copies carry (originalProductId for admin/retailer
+ * copies, manufacturerProductId for manufacturer-assigned ones). Chunked to
+ * respect Firestore's `in`-operator limit. Read-only.
+ */
+async function findCopyProductIds(rootIds: string[]): Promise<string[]> {
+  const roots = Array.from(new Set(rootIds.filter(Boolean)));
+  if (roots.length === 0) return [];
+  const found = new Set<string>();
+  const runField = async (field: 'originalProductId' | 'manufacturerProductId') => {
+    for (let i = 0; i < roots.length; i += 10) {
+      const chunk = roots.slice(i, i + 10);
+      const snap = await getDocs(query(collection(db, 'products'), where(field, 'in', chunk)));
+      for (const d of snap.docs) found.add(d.id);
+    }
+  };
+  await Promise.all([runField('originalProductId'), runField('manufacturerProductId')]);
+  // Never re-stamp a root as its own copy.
+  for (const r of roots) found.delete(r);
+  return Array.from(found);
 }
 
 /**
@@ -2786,16 +2855,25 @@ export async function adminLinkProductsToCanonical(
  */
 export async function adminUnlinkProductFromCanonical(productId: string): Promise<void> {
   if (!productId) throw new Error('A product id is required.');
-  await setDoc(
-    doc(db, 'products', productId),
-    {
-      canonicalId: deleteField(),
-      canonicalLinkedAt: deleteField(),
-      canonicalLinkedBy: deleteField(),
-      updatedAt: serverTimestamp(),
-    },
-    { merge: true },
-  );
+  // Clear the doc and every seller copy rooted at it, mirroring the propagation
+  // in adminLinkProductsToCanonical so the copies fall back to their name group
+  // instead of being stranded on a canonicalId whose root no longer carries it.
+  const copyIds = await findCopyProductIds([productId]);
+  const targetIds = Array.from(new Set([productId, ...copyIds]));
+  const batch = writeBatch(db);
+  for (const id of targetIds) {
+    batch.set(
+      doc(db, 'products', id),
+      {
+        canonicalId: deleteField(),
+        canonicalLinkedAt: deleteField(),
+        canonicalLinkedBy: deleteField(),
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true },
+    );
+  }
+  await batch.commit();
 }
 
 /**
@@ -4197,6 +4275,42 @@ export async function logFailedPayment(
 
 // ─── Admin profile save (phone-keyed — works before first OTP login) ──────────
 
+/** The checkout-written customer delivery-address fields on users/{phone}. */
+export type CustomerDeliveryAddress = { area: string; city: string; district: string; state: string; pincode: string };
+
+/**
+ * Map a customer delivery address onto the exact users/{phone} field keys the
+ * checkout flow persists (app/page.tsx) and the order's `customerAddress` string
+ * is composed from. Single source of truth, reused by adminSaveProfile and
+ * adminSaveCustomerAddress so the two can never drift.
+ */
+export function customerAddressFields(addr: CustomerDeliveryAddress): Record<string, unknown> {
+  return {
+    addressArea:     addr.area.trim()     || null,
+    addressCity:     addr.city.trim()     || null,
+    addressDistrict: addr.district.trim() || null,
+    addressState:    addr.state.trim()    || null,
+    addressPincode:  addr.pincode.trim()  || null,
+  };
+}
+
+/**
+ * Update ONLY a customer's delivery address on users/{phone} — a focused,
+ * side-effect-free write that leaves name/email/role/etc untouched (merge). Used
+ * by the manual-order wizard's final-review address edit. Reuses the same field
+ * schema as adminSaveProfile via customerAddressFields().
+ */
+export async function adminSaveCustomerAddress(
+  phone: string,
+  addr: CustomerDeliveryAddress,
+): Promise<void> {
+  await setDoc(
+    doc(db, "users", phone),
+    { ...customerAddressFields(addr), updatedAt: serverTimestamp() },
+    { merge: true },
+  );
+}
+
 export interface AdminSaveProfileInput {
   businessName: string;
   ownerName: string;
@@ -4261,12 +4375,7 @@ export async function adminSaveProfile(
   } else if (data.customerAddress) {
     // Customers store their delivery address in these checkout-written fields, not
     // the seller-style address/city/state/pincode keys above.
-    const ca = data.customerAddress;
-    userFields.addressArea     = ca.area.trim()     || null;
-    userFields.addressCity     = ca.city.trim()     || null;
-    userFields.addressDistrict = ca.district.trim() || null;
-    userFields.addressState    = ca.state.trim()    || null;
-    userFields.addressPincode  = ca.pincode.trim()  || null;
+    Object.assign(userFields, customerAddressFields(data.customerAddress));
   }
   await setDoc(doc(db, "users", phone), userFields, { merge: true });
 
@@ -4723,6 +4832,8 @@ export interface WaResolvedUser {
   businessName: string;
   // "consumer" (mobile app) is normalised to "customer" before this reaches the UI
   role: "retailer" | "manufacturer" | "salesExecutive" | "admin" | "customer" | "farmer" | "unknown";
+  /** Firebase Auth UID — present when the users doc has a uid field. Used for customer-history links. */
+  uid?: string;
 }
 
 export interface WaConvMeta {
@@ -4805,6 +4916,7 @@ export async function resolveWaUserByPhone(phone: string): Promise<WaResolvedUse
         name: d.name || d.ownerName || d.fullName || "",
         businessName: d.shopName || d.businessName || "",
         role: normalizeWaRole(rawRole),
+        uid: d.uid || undefined,
       };
       return result;
     }
@@ -4818,6 +4930,7 @@ export async function resolveWaUserByPhone(phone: string): Promise<WaResolvedUse
         name: d.name || d.ownerName || "",
         businessName: d.shopName || d.businessName || "",
         role: "retailer",
+        uid: d.uid || undefined,
       };
       return result;
     }
@@ -4831,6 +4944,7 @@ export async function resolveWaUserByPhone(phone: string): Promise<WaResolvedUse
         name: d.name || d.ownerName || "",
         businessName: d.businessName || d.shopName || "",
         role: "manufacturer",
+        uid: d.uid || undefined,
       };
       return result;
     }

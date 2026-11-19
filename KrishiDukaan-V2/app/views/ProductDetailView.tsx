@@ -16,6 +16,11 @@ import { db, trackDirectionRequest, trackProductClick, trackStoreCall, fetchUser
 import { HelperIcon, HelperTooltip } from '../../components/helpers';
 import { useI18n } from '../i18n/I18nContext';
 import { StatusToast } from '../components/shared/status-toast';
+import { DeliveryEstimate } from '../components/shared/delivery-estimate';
+import { useDeliverTo } from '../lib/deliver-to';
+import { offerFor, rankDelivered, useDeliveredOffers } from '../lib/delivered-price-client';
+import type { OfferInput, OfferResult } from '../lib/delivered-offers';
+import { formatDeliveryDate } from '../lib/delivery-eta';
 import {
   fetchRetailerPublicProfile,
   fetchRetailerProductSummaries,
@@ -26,6 +31,7 @@ import { ReviewSection } from '../../components/shared/ReviewSection';
 import { ProductListingCard } from '../../components/shared/ProductListingCard';
 import { BoughtBy } from '../../components/shared/bought-by';
 import { displayPrice, pctOff } from '../lib/price-display';
+import { sharePhone, shopShareUrl } from '../lib/share-links';
 
 type StoreListItem = {
   id: string;
@@ -161,6 +167,14 @@ function RetailerProfileSection({
   const [profile, setProfile] = useState<RetailerPublicProfile | null>(null);
   const [products, setProducts] = useState<RetailerProductSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  // Whether this shop has a live /shop/{phone} brand page. The doc is only
+  // gettable when enabled === true (firestore.rules), so a disabled or missing
+  // page resolves to false and the "Visit brand page" link stays hidden — the
+  // same visibility switch Phase 2's auto-publish will flip. Mirrors the
+  // manufacturer section's slug-gated "Visit Brand Store" button.
+  const brandPhone = sharePhone(retailerPhone);
+  const brandUrl = shopShareUrl(retailerPhone);
+  const [brandLive, setBrandLive] = useState(false);
 
   useEffect(() => {
     setLoading(true);
@@ -175,6 +189,15 @@ function RetailerProfileSection({
       .finally(() => setLoading(false));
   }, [retailerPhone, currentProductId]);
 
+  useEffect(() => {
+    if (!brandPhone) { setBrandLive(false); return; }
+    let cancelled = false;
+    getDoc(doc(db, "retailerBrandPages", brandPhone))
+      .then((snap) => { if (!cancelled) setBrandLive(snap.exists() && snap.data()?.enabled === true); })
+      .catch(() => { if (!cancelled) setBrandLive(false); });
+    return () => { cancelled = true; };
+  }, [brandPhone]);
+
   if (loading) {
     return (
       <div className="rounded-3xl border border-surface-container bg-white p-6 animate-pulse">
@@ -186,7 +209,7 @@ function RetailerProfileSection({
 
   if (!profile && products.length === 0) return null;
 
-  const shopName = profile?.shopName || "This Retailer";
+  const shopName = profile?.businessName || profile?.shopName || "This Retailer";
   const locationParts = [profile?.city, profile?.state].filter(Boolean);
 
   return (
@@ -223,7 +246,22 @@ function RetailerProfileSection({
           </span>
         </div>
       </div>
-      
+
+      {/* Visit brand page — only when the shop has a live /shop/{phone} page.
+          Reuses the manufacturer "Visit Brand Store" button pattern. */}
+      {brandLive && brandUrl && (
+        <div className="px-6 pt-4">
+          <a
+            href={brandUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="w-full justify-center sm:w-auto sm:justify-start inline-flex items-center gap-1.5 bg-primary hover:bg-primary/90 text-white px-4 py-2 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all hover:scale-[1.02] active:scale-95"
+          >
+            {t('visitBrandStore')} <ICONS.ChevronRight className="w-3 h-3" />
+          </a>
+        </div>
+      )}
+
       {/* Store Reviews */}
       <div className="px-6 pt-4 border-b border-surface-container pb-4">
         <ReviewSection targetId={retailerPhone} targetType="store" />
@@ -1178,7 +1216,7 @@ export default function ProductDetailView({
     [product.availability, storeOnlineMap],
   );
 
-  const visibleStores = useMemo(() => {
+  const storeGroups = useMemo(() => {
     const stocked = displayStores.filter((s) => resolveStoreVariant(s).stocked);
     // Stores that can actually deliver go first. Someone on this page wants to
     // buy, and the list is distance-sorted — so a store willing to ship sat
@@ -1190,8 +1228,51 @@ export default function ProductDetailView({
     const online: typeof stocked = [];
     const offline: typeof stocked = [];
     for (const s of stocked) (canOrderFrom(s) ? online : offline).push(s);
-    return [...online, ...offline];
+    return { online, offline };
   }, [displayStores, resolveStoreVariant, canOrderFrom]);
+
+  // ── Delivered price per seller (docs/delivered-price-architecture.md §4.5) ──
+  // For the shopper's "Deliver to" pincode, each store that delivers is priced
+  // item + delivery (same rules as checkout, POST /api/delivery/offers), and
+  // the list is ordered cheapest DELIVERED first — a nearer store, or one with
+  // an offer or free delivery, wins when it really is cheaper at the door.
+  const deliverTo = useDeliverTo();
+  const deliveryOfferByStore = useMemo(() => {
+    const m = new Map<string, OfferInput>();
+    const size = selectedVariant?.unit || product.unit || productVariants?.[0]?.unit || '';
+    // The 30 nearest delivering stores: enough to find the cheapest, one request.
+    for (const store of storeGroups.online.slice(0, 30)) {
+      const phone = (store as any).phone as string | undefined;
+      const entry = findStoreAvailability(store);
+      const resolved = resolveStoreVariant(store);
+      if (!resolved.price || !(resolved.price > 0)) continue;
+      const { finalPrice } = calcDiscount(resolved.price, resolveStoreDiscountPct(store));
+      const o = offerFor(
+        product,
+        entry
+          ? { ...entry, storePhone: entry.storePhone || phone }
+          : { storeId: store.id, storePhone: phone, stockLevel: '' },
+        size,
+        finalPrice,
+      );
+      if (o) m.set(store.id, o);
+    }
+    return m;
+  }, [storeGroups, selectedVariant, product, productVariants, findStoreAvailability, resolveStoreVariant, resolveStoreDiscountPct]);
+  const deliveryOffers = useMemo(() => Array.from(deliveryOfferByStore.values()), [deliveryOfferByStore]);
+  const deliveredById = useDeliveredOffers(deliveryOffers, deliverTo?.pincode ?? null, true);
+  const deliveredFor = useCallback((storeId: string): OfferResult | null => {
+    const o = deliveryOfferByStore.get(storeId);
+    const r = o ? deliveredById.get(o.id) ?? null : null;
+    return r?.status === 'ok' ? r : null;
+  }, [deliveryOfferByStore, deliveredById]);
+
+  const visibleStores = useMemo(() => {
+    const ranked = rankDelivered(storeGroups.online.map((store) => ({ store, result: deliveredFor(store.id) })))
+      .map((r) => r.store);
+    return [...ranked, ...storeGroups.offline];
+  }, [storeGroups, deliveredFor]);
+  const cheapestDeliveredId = visibleStores.length > 1 && deliveredFor(visibleStores[0]!.id) ? visibleStores[0]!.id : null;
 
   // Compute the displayed price block (current price, MRP, savings, discount %,
   // "lowest nearby") for the CURRENTLY SELECTED variant only. Never uses the
@@ -1480,6 +1561,7 @@ export default function ProductDetailView({
             const hasStoreOffer = resolvedDiscountPct > 0;
             const { finalPrice: resolvedFinalPrice } =
               calcDiscount(resolvedPrice ?? 0, resolvedDiscountPct);
+            const delivered = deliveredFor(store.id);
 
             return (
               <div
@@ -1514,6 +1596,26 @@ export default function ProductDetailView({
                           </span>
                         )}
                       </div>
+                      {/* Delivered to the shopper's pincode: item + delivery = total, and the date. */}
+                      {delivered && (
+                        <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] leading-tight">
+                          {cheapestDeliveredId === store.id && (
+                            <span className="rounded-full bg-green-600 px-1.5 py-0.5 text-[9px] font-black uppercase tracking-wide text-white">
+                              Lowest delivered
+                            </span>
+                          )}
+                          <span className="text-on-surface-variant">
+                            ₹{delivered.itemTotal!.toLocaleString('en-IN')} +{' '}
+                            {delivered.free
+                              ? <span className="font-bold text-green-700">FREE delivery{delivered.campaign ? ` · ${delivered.campaign}` : ''}</span>
+                              : <>₹{delivered.deliveryCharge!.toLocaleString('en-IN')} delivery</>}
+                            {' '}= <span className="font-bold text-on-surface">₹{delivered.total!.toLocaleString('en-IN')}</span>
+                          </span>
+                          {delivered.deliveryBy && (
+                            <span className="font-semibold text-green-700">· by {formatDeliveryDate(delivered.deliveryBy)}</span>
+                          )}
+                        </div>
+                      )}
                       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-1 md:mt-0.5">
                         <span className="text-[10px] font-bold text-on-surface-variant flex items-center gap-1 whitespace-nowrap">
                           <ICONS.Location className="w-3 h-3 shrink-0" />{(store as any).distanceLabel || store.distance || t('nearby')}
@@ -1522,6 +1624,12 @@ export default function ProductDetailView({
                         {(availability?.freeDelivery ?? (product.freeDelivery && !availability)) && availability?.isOnline !== false && (
                           <span className="inline-flex items-center gap-0.5 rounded-full bg-green-100 text-green-700 px-1.5 py-0.5 text-[9px] font-black whitespace-nowrap shrink-0">
                             <ICONS.Delivery className="w-2.5 h-2.5" />{t('freeDeliveryLabel')}
+                          </span>
+                        )}
+                        {/* This store's share offer on this product: it pays part of the delivery. */}
+                        {!availability?.freeDelivery && (availability?.sellerDeliveryPct ?? 0) > 0 && availability?.isOnline !== false && (
+                          <span className="inline-flex items-center gap-0.5 rounded-full bg-green-100 text-green-700 px-1.5 py-0.5 text-[9px] font-black whitespace-nowrap shrink-0">
+                            <ICONS.Delivery className="w-2.5 h-2.5" />{availability!.sellerDeliveryPct}% off delivery
                           </span>
                         )}
                         {(() => {
@@ -1958,6 +2066,18 @@ export default function ProductDetailView({
             )}
           </div>
         </div>
+          );
+        })()}
+
+        {/* Deliver to <pincode> — courier price and date for the nearest store that delivers */}
+        {product.sellMode !== "offline_store_only" && visibleStores.some(canOrderFrom) && (() => {
+          const chosen = displayStores.find((s) => s.id === selectedOrderStoreId) ?? visibleStores.find(canOrderFrom);
+          return (
+            <DeliveryEstimate
+              productId={product.id}
+              seller={(chosen as any)?.phone}
+              size={selectedVariant?.unit}
+            />
           );
         })()}
 

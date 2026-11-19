@@ -10,6 +10,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:http/http.dart' as http;
 import '../data/server_priced_items.dart';
+import '../../../core/utils/delivery_date.dart';
 import '../../../core/payments/app_razorpay.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/app_config.dart';
@@ -27,8 +28,11 @@ import '../../../core/widgets/empty_state.dart';
 import '../../../core/widgets/loading_overlay.dart';
 import '../data/payment_service.dart';
 import '../../orders/data/order_repository.dart';
+import '../../auth/data/auth_repository.dart';
+import '../../../core/models/delivery_address.dart';
 import '../../../core/services/app_review_service.dart';
 import '../../../core/widgets/back_or_home_button.dart';
+import '../../../core/services/analytics_service.dart';
 
 class CheckoutScreen extends ConsumerStatefulWidget {
   const CheckoutScreen({super.key});
@@ -44,7 +48,10 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
   final _firstNameCtrl = TextEditingController();
   final _lastNameCtrl = TextEditingController();
   final _phoneCtrl = TextEditingController();
-  final _addressCtrl = TextEditingController();
+  // Amazon-style address: pincode, flat/house, area/village, landmark, town, state.
+  final _houseCtrl = TextEditingController();
+  final _addressCtrl = TextEditingController(); // area, street, sector, village
+  final _landmarkCtrl = TextEditingController();
   final _cityCtrl = TextEditingController();
   final _pincodeCtrl = TextEditingController();
   final _districtCtrl = TextEditingController();
@@ -64,6 +71,15 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
 
   late final AppRazorpay _razorpay;
   final _paymentService = PaymentService();
+
+  /// The server's real price for this cart and pincode (courier, or the
+  /// seller's charge where no courier serves it). Null until fetched, or when
+  /// it can't be: the slab estimate is shown then.
+  CartQuote? _quote;
+  bool _quoting = false;
+  String _quoteKey = '';
+  Timer? _quoteTimer;
+  String _lastPin = '';
   final _orderRepo = OrderRepository();
   final _reviewService = AppReviewService();
 
@@ -76,6 +92,10 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
   Map<String, String> _areaWarnings = const {};
   int _areaCheckGen = 0;
   bool _prefilled = false;
+
+  /// Save the address typed here as the profile's delivery address (shared
+  /// with the web and the profile screen). On by default, like the web.
+  bool _saveAddress = true;
   String? _error;
   String? _razorpayOrderId;
   /// Order amount in PAISE, kept so a failure can be logged with the value the
@@ -93,6 +113,12 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
       onSuccess: _onPaymentSuccess,
       onError: _onPaymentError,
     );
+    // GA4 begin_checkout: the customer entered checkout (from the cart or Buy Now).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) AnalyticsService.instance.beginCheckout(ref.read(cartProvider));
+    });
+
+    _pincodeCtrl.addListener(_onPincodeChanged);
 
     // Pre-fill phone from Firebase Auth
     final user = FirebaseAuth.instance.currentUser;
@@ -103,15 +129,69 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
 
   @override
   void dispose() {
+    _quoteTimer?.cancel();
+    _pincodeCtrl.removeListener(_onPincodeChanged);
     _razorpay.clear();
     _firstNameCtrl.dispose();
     _lastNameCtrl.dispose();
     _phoneCtrl.dispose();
+    _houseCtrl.dispose();
     _addressCtrl.dispose();
+    _landmarkCtrl.dispose();
     _cityCtrl.dispose();
     _pincodeCtrl.dispose();
     _districtCtrl.dispose();
     super.dispose();
+  }
+
+  /// Pincode → city, district and state (GET /api/pincode/{pin}), so the
+  /// customer types only the street/area and the state that prices delivery
+  /// can't be mistyped. Then the cart is re-priced for the new pincode.
+  Future<void> _onPincodeChanged() async {
+    final pin = _pincodeCtrl.text.trim();
+    if (!RegExp(r'^[1-9][0-9]{5}$').hasMatch(pin) || pin == _lastPin) return;
+    _lastPin = pin;
+    try {
+      final res = await http
+          .get(Uri.parse('${AppConfig.apiBaseUrl}/api/pincode/$pin'))
+          .timeout(const Duration(seconds: 8));
+      if (!mounted || res.statusCode != 200 || _pincodeCtrl.text.trim() != pin) return;
+      final d = jsonDecode(res.body) as Map<String, dynamic>;
+      final city = (d['city'] ?? '').toString();
+      final district = (d['district'] ?? '').toString();
+      if (city.isNotEmpty) _cityCtrl.text = city;
+      if (district.isNotEmpty) _districtCtrl.text = district;
+      final st = matchIndianState((d['state'] ?? '').toString());
+      if (st != null) _setState(st);
+    } catch (_) {
+      // Lookup unavailable: the fields stay editable as before.
+    }
+    _scheduleQuote();
+  }
+
+  /// Asks the server for the exact price whenever the cart, pincode or state
+  /// changes (debounced), so the total shown is the total charged.
+  void _scheduleQuote() {
+    final items = ref.read(cartProvider);
+    final pin = _pincodeCtrl.text.trim();
+    final key = '${items.map((i) => '${i.sellerPhone}:${i.catalogId}:${i.quantity}:${i.variantLabel ?? ''}').join('|')}#$pin#${_state ?? ''}';
+    if (key == _quoteKey) return;
+    _quoteKey = key;
+    _quoteTimer?.cancel();
+    if (items.isEmpty || !RegExp(r'^[1-9][0-9]{5}$').hasMatch(pin)) {
+      if (_quote != null || _quoting) setState(() { _quote = null; _quoting = false; });
+      return;
+    }
+    setState(() => _quoting = true);
+    _quoteTimer = Timer(const Duration(milliseconds: 450), () async {
+      final q = await _paymentService.quoteCart(
+        items: items,
+        pincode: pin,
+        customerDeliveryState: _state,
+      );
+      if (!mounted || key != _quoteKey) return;
+      setState(() { _quote = q; _quoting = false; });
+    });
   }
 
   /// Sets the delivery state and lets the whole cart re-price for it.
@@ -153,10 +233,29 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
   }
 
   /// The address exactly as written to the order and sent to the server.
+  /// House, area and landmark as one line — `address` in the order's map,
+  /// which every existing screen and the courier already read.
+  String get _addressLine => [
+        _houseCtrl.text.trim(),
+        _addressCtrl.text.trim(),
+        if (_landmarkCtrl.text.trim().isNotEmpty) 'Near ${_landmarkCtrl.text.trim()}',
+      ].where((p) => p.isNotEmpty).join(', ');
+
+  /// The address in parts (orders.deliveryAddress, same as web checkout).
+  Map<String, String> _deliveryAddress() => {
+        'house': _houseCtrl.text.trim(),
+        'area': _addressCtrl.text.trim(),
+        'landmark': _landmarkCtrl.text.trim(),
+        'city': _cityCtrl.text.trim(),
+        'district': _districtCtrl.text.trim(),
+        'state': _state ?? '',
+        'pincode': _pincodeCtrl.text.trim(),
+      };
+
   Map<String, dynamic> _addressMap() => {
         'name': _fullName,
         'phone': _phoneCtrl.text.trim(),
-        'address': _addressCtrl.text.trim(),
+        'address': _addressLine,
         'city': _cityCtrl.text.trim(),
         if (_districtCtrl.text.trim().isNotEmpty)
           'district': _districtCtrl.text.trim(),
@@ -224,20 +323,27 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
       _error = null;
     });
 
+    // GA4 add_shipping_info: delivery details passed validation and can be
+    // delivered to. (No address or phone goes into the event.)
+    AnalyticsService.instance.addShippingInfo(ref.read(cartProvider));
+
     try {
       final items = ref.read(cartProvider);
       final user = FirebaseAuth.instance.currentUser!;
       // Re-priced for the address state chosen NOW (not a stale estimate).
       final delivery = await ref.read(deliveryChargeProvider.future);
       final gstAdded = delivery.gstAdded;
+      // The server's quote (courier price) when we have it — what the screen showed.
+      final shownDelivery = _quote?.delivery ?? delivery.totalCharge;
       final expectedTotal =
-          ref.read(cartTotalProvider) + gstAdded + delivery.totalCharge;
+          ref.read(cartTotalProvider) + gstAdded + shownDelivery;
 
       final result = await _paymentService.createCartOrder(
         items: items,
         userId: user.uid,
-        clientDelivery: delivery.totalCharge,
+        clientDelivery: shownDelivery,
         clientGst: gstAdded,
+        customerPincode: _pincodeCtrl.text.trim(),
         customerDeliveryState: _state,
         // Same values createOrdersAfterPayment writes later — sent now so
         // the server can rebuild the order if that later step never runs.
@@ -278,6 +384,9 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
       // Use the key the backend used to create the order — prevents key-mismatch
       // errors when the server's RAZORPAY_KEY_ID differs from the app default.
       final razorpayKey = result['key_id'] as String? ?? AppConfig.razorpayKeyId;
+
+      // GA4 add_payment_info: the payment step is opening (label only).
+      AnalyticsService.instance.addPaymentInfo(items);
 
       _sheetOpenedAt = DateTime.now();
       _razorpay.open({
@@ -377,10 +486,13 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
     final items = ref.read(cartProvider);
     final user = FirebaseAuth.instance.currentUser!;
     final delivery = await ref.read(deliveryChargeProvider.future);
+    // Each line at the price the server charged, so the order matches it.
+    final pricedItems = withServerPrices(items, _serverItems);
+    final pricing = _serverPricing ??
+        {for (final sp in delivery.sellers) sp.sellerKey: sp};
 
-    await _orderRepo.createOrdersAfterPayment(
-      // Each line at the price the server charged, so the order matches it.
-      items: withServerPrices(items, _serverItems),
+    final orderIds = await _orderRepo.createOrdersAfterPayment(
+      items: pricedItems,
       customerName: _fullName,
       customerPhone: user.phoneNumber ?? '',
       customerAddress: _addressMap(),
@@ -388,10 +500,39 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
       razorpayPaymentId: razorpayPaymentId,
       // The server's figures when we have them (what was charged), else the
       // estimate this screen showed.
-      pricingBySeller: _serverPricing ??
-          {for (final sp in delivery.sellers) sp.sellerKey: sp},
+      pricingBySeller: pricing,
       customerDeliveryState: _state,
+      deliveryAddress: _deliveryAddress(),
     );
+
+    // GA4 purchase: we only get here after the server verified the payment
+    // (signature check) or Razorpay's own records confirmed the capture, and
+    // the orders were written. Values are the server's: item prices it
+    // charged, its delivery and its added GST. Sent once per payment.
+    unawaited(AnalyticsService.instance.logPurchase(
+      transactionId: razorpayPaymentId,
+      lines: pricedItems,
+      shipping: pricing.values.fold(0.0, (s, sp) => s + sp.deliveryCharge),
+      tax: pricing.values.fold(0.0, (s, sp) => s + sp.gstAdded),
+      orderIds: orderIds,
+    ));
+
+    // The address becomes the profile's delivery address (best effort: the
+    // order is already placed; a failed save must not look like a failure).
+    final profile = ref.read(currentUserProvider).value;
+    if (_saveAddress && profile != null) {
+      unawaited(AuthRepository()
+          .saveDeliveryAddress(
+            phone: profile.phone,
+            role: profile.role,
+            address: DeliveryAddress.clean(
+              house: _houseCtrl.text, area: _addressCtrl.text, landmark: _landmarkCtrl.text,
+              city: _cityCtrl.text, district: _districtCtrl.text, state: _state ?? '',
+              pincode: _pincodeCtrl.text,
+            ),
+          )
+          .then((_) => ref.invalidate(currentUserProvider), onError: (_) {}));
+    }
 
     ref.read(cartProvider.notifier).clear();
     // Fire-and-forget: never block navigation on the review prompt.
@@ -496,20 +637,30 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
     if (!_prefilled && profile != null) {
       _prefilled = true;
       if (_firstNameCtrl.text.isEmpty && _lastNameCtrl.text.isEmpty) _prefillName(profile.name);
-      if (_addressCtrl.text.isEmpty) _addressCtrl.text = profile.address ?? '';
-      if (_cityCtrl.text.isEmpty) _cityCtrl.text = profile.city ?? '';
-      if (_pincodeCtrl.text.isEmpty) _pincodeCtrl.text = profile.pincode ?? '';
+      // The one saved delivery address (core/models/delivery_address.dart):
+      // the profile's, the web checkout's, or a buyer's one-line address.
+      final da = profile.deliveryAddress;
+      if (_houseCtrl.text.isEmpty) _houseCtrl.text = da.house;
+      if (_addressCtrl.text.isEmpty) _addressCtrl.text = da.area;
+      if (_landmarkCtrl.text.isEmpty) _landmarkCtrl.text = da.landmark;
+      if (_cityCtrl.text.isEmpty) _cityCtrl.text = da.city;
+      if (_districtCtrl.text.isEmpty) _districtCtrl.text = da.district;
+      if (_pincodeCtrl.text.isEmpty) _pincodeCtrl.text = da.pincode;
       // The saved state, matched onto the recognised list ("Orissa" → Odisha),
       // so returning buyers get the right delivery slab without picking again.
-      final saved = matchIndianState(profile.state);
+      final saved = matchIndianState(da.state);
       if (_state == null && saved != null) _setState(saved);
     }
 
     // While the delivery estimate loads, the grand total is unknown — the Pay
     // button stays disabled so the shown amount always equals the charge.
-    final estimating = deliveryAsync.isLoading;
+    final estimating = deliveryAsync.isLoading || _quoting;
     final delivery = deliveryAsync.value;
-    final deliveryCharge = delivery?.totalCharge ?? 0.0;
+    final deliveryCharge = _quote?.delivery ?? delivery?.totalCharge ?? 0.0;
+    // Re-price when the cart or state changed since the last quote.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _scheduleQuote();
+    });
     final gstAdded = delivery?.gstAdded ?? 0.0;
     // items + GST added on top + delivery: the figure the server will charge.
     final grandTotal = subtotal + deliveryCharge + gstAdded;
@@ -610,30 +761,37 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
                         ],
                         validator: _required),
                     const SizedBox(height: 12),
-                    _field(_addressCtrl, 'Street Address', Icons.home_outlined,
-                        maxLines: 2, validator: _required),
+                    // Pincode first: it fills town, district and state.
+                    _field(_pincodeCtrl, 'Pincode *', Icons.pin,
+                        keyboardType: TextInputType.number,
+                        inputFormatters: [
+                          FilteringTextInputFormatter.digitsOnly,
+                          LengthLimitingTextInputFormatter(6),
+                        ],
+                        validator: (v) => RegExp(r'^[1-9]\d{5}$').hasMatch((v ?? '').trim())
+                            ? null
+                            : 'Enter your 6-digit pincode'),
                     const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: _field(_cityCtrl, 'City', Icons.location_city,
-                              validator: _required),
-                        ),
-                        const SizedBox(width: 12),
-                        SizedBox(
-                          width: 116,
-                          child: _field(_pincodeCtrl, 'Pincode', Icons.pin,
-                              keyboardType: TextInputType.number,
-                              inputFormatters: [
-                                FilteringTextInputFormatter.digitsOnly,
-                                LengthLimitingTextInputFormatter(6),
-                              ],
-                              validator: _required),
-                        ),
-                      ],
-                    ),
+                    _field(_houseCtrl, 'Flat, House no., Building, Company, Apartment *',
+                        Icons.home_outlined,
+                        textCapitalization: TextCapitalization.words,
+                        validator: _required),
                     const SizedBox(height: 12),
-                    _field(_districtCtrl, 'District (optional)', Icons.map_outlined),
+                    _field(_addressCtrl, 'Area, Street, Sector, Village *',
+                        Icons.signpost_outlined,
+                        textCapitalization: TextCapitalization.words,
+                        validator: _required),
+                    const SizedBox(height: 12),
+                    _field(_landmarkCtrl, 'Landmark (optional), e.g. near Hanuman temple',
+                        Icons.place_outlined,
+                        textCapitalization: TextCapitalization.sentences),
+                    const SizedBox(height: 12),
+                    // One Town / City box. The district comes from the
+                    // pincode and is kept with the order, but not shown:
+                    // India Post's district is also the city.
+                    _field(_cityCtrl, 'Town / City *', Icons.location_city,
+                        textCapitalization: TextCapitalization.words,
+                        validator: _required),
                     const SizedBox(height: 12),
                     // A dropdown, not free text: the state decides the
                     // delivery charge, so it must be a recognised name.
@@ -642,7 +800,7 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
                       isExpanded: true,
                       menuMaxHeight: 340,
                       decoration: InputDecoration(
-                        labelText: 'State',
+                        labelText: 'State *',
                         prefixIcon: const Icon(Icons.flag_outlined, size: 20),
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(12),
@@ -668,6 +826,17 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
                       validator: (v) => (v == null || v.isEmpty)
                           ? 'Select your state — delivery is priced by it'
                           : null,
+                    ),
+                    CheckboxListTile(
+                      value: _saveAddress,
+                      onChanged: (v) => setState(() => _saveAddress = v ?? false),
+                      contentPadding: EdgeInsets.zero,
+                      controlAffinity: ListTileControlAffinity.leading,
+                      dense: true,
+                      title: Text(
+                        'Save as my delivery address',
+                        style: AppTextStyles.caption,
+                      ),
                     ),
                   ],
                 ),
@@ -715,12 +884,80 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
                             : 'FREE',
                         valueColor:
                             deliveryCharge == 0 ? AppColors.success : null,
-                        badge: delivery?.slabType == null
+                        badge: (_quote?.couriers.isNotEmpty ?? false) || delivery?.slabType == null
                             ? null
                             : (delivery!.slabType == DeliveryType.inState
                                 ? 'Within-State'
                                 : 'Outside-State'),
                       ),
+                      if (formatDeliveryDate(_quote?.deliveryBy) != null)
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: Padding(
+                            padding: const EdgeInsets.only(bottom: 2),
+                            child: Text(
+                              'Delivery by ${formatDeliveryDate(_quote?.deliveryBy)}',
+                              style: AppTextStyles.bodySmall.copyWith(
+                                color: AppColors.success,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        ),
+                      if (_quote?.campaignName != null)
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: Padding(
+                            padding: const EdgeInsets.only(bottom: 2),
+                            child: Text(
+                              '${_quote!.campaignName}: KrishiDukan pays ${CurrencyUtils.format(_quote!.campaignPays)} of your delivery',
+                              style: AppTextStyles.caption.copyWith(
+                                color: AppColors.success,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ),
+                      if ((_quote?.storesCover ?? 0) > 0)
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: Padding(
+                            padding: const EdgeInsets.only(bottom: 2),
+                            child: Text(
+                              'The store pays ${CurrencyUtils.format(_quote!.storesCover)} of your delivery',
+                              style: AppTextStyles.caption.copyWith(
+                                color: AppColors.success,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ),
+                      if (_quote?.freeAbove != null)
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: Padding(
+                            padding: const EdgeInsets.only(bottom: 2),
+                            child: Text(
+                              'Free delivery: your order reached the store\'s ${CurrencyUtils.format(_quote!.freeAbove!)} offer',
+                              style: AppTextStyles.caption.copyWith(
+                                color: AppColors.success,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ),
+                      if (_quote?.couriers.isNotEmpty ?? false)
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: Padding(
+                            padding: const EdgeInsets.only(bottom: 2),
+                            child: Text(
+                              'Courier: ${_quote!.couriers.join(', ')}',
+                              style: AppTextStyles.caption
+                                  .copyWith(color: Colors.black54),
+                            ),
+                          ),
+                        ),
                       if ((_state ?? '').isNotEmpty)
                         Align(
                           alignment: Alignment.centerLeft,

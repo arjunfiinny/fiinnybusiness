@@ -31,15 +31,17 @@ import {
   Shuffle,
   TrendingDown,
 } from "lucide-react";
-import { auth, fetchIncomingOrdersForSeller, fetchReroutedAwayOrdersForSeller, updateOrderStatus } from "../../firebase";
+import { doc, onSnapshot } from "firebase/firestore";
+import { auth, db, fetchIncomingOrdersForSeller, fetchReroutedAwayOrdersForSeller, updateOrderStatus } from "../../firebase";
 import { PageHeader } from "../_components/page-header";
 import { formatCustomerAddress, normalizeOrderItems, orderGrandTotal } from "../../../types/order";
-import { ORDER_STATUS_FLOW, REVERTABLE_STATUSES, isInvoiceReady, validRevertTargets, type OrderDoc, type OrderStatus } from "../../../types/order";
+import { ORDER_STATUS_FLOW, REVERTABLE_STATUSES, SHIPMENT_LEFT_SELLER, isCourierOrder, isInvoiceReady, validRevertTargets, type OrderDoc, type OrderStatus } from "../../../types/order";
 import { useI18n } from "../../i18n/I18nContext";
 import { openInvoice } from "../../utils/invoice-generator";
 import { OrderRequestsPanel } from "../_components/order-requests-panel";
 import { fetchOpenOffers } from "../_lib/order-offers";
 import { DispatchDialog, TrackingDialog } from "./_tracking-dialogs";
+import ShipmentCard from "../../views/ShipmentCard";
 import { trackingSendsRemaining, MAX_TRACKING_SENDS } from "./_tracking";
 
 // Progression shown to the seller. Imported rather than redeclared so the
@@ -90,6 +92,14 @@ const NEXT_ACTIONS: Record<OrderStatus, { next: OrderStatus; label: string; colo
   // firestore.rules refuses any seller write to it until someone accepts.
   reassigning: [],
 };
+
+/** A courier moves its own orders: the seller keeps only Reject, until pickup. */
+function actionsFor(order: OrderDoc) {
+  const all = NEXT_ACTIONS[order.status] || [];
+  if (!isCourierOrder(order)) return all;
+  if (order.shipment && SHIPMENT_LEFT_SELLER.includes(order.shipment.stage)) return [];
+  return all.filter((a) => a.next === "rejected");
+}
 
 type FilterTab = "all" | "rerouted" | OrderStatus;
 type ViewTab = "orders" | "payments" | "requests";
@@ -524,7 +534,14 @@ function OrderDetailModal({
 
           {/* Payment */}
           <div className="rounded-xl border border-surface-container p-4 space-y-2 text-sm">
-            <p className="text-[10px] font-black uppercase tracking-widest text-on-surface-variant">Payment</p>
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[10px] font-black uppercase tracking-widest text-on-surface-variant">Payment</p>
+              {(order as any).manualOrder && (
+                <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-black text-primary">
+                  Manually created
+                </span>
+              )}
+            </div>
             {payment ? (
               <>
                 <div className="flex justify-between"><span className="text-on-surface-variant">Status</span><PaymentBadge payment={payment} /></div>
@@ -533,6 +550,16 @@ function OrderDetailModal({
                 <div className="flex justify-between"><span className="text-on-surface-variant">Razorpay order</span><span className="font-mono text-xs text-on-surface break-all">{payment.razorpayOrderId || "—"}</span></div>
                 <div className="flex justify-between"><span className="text-on-surface-variant">Paid at</span><PaidAtValue order={order} /></div>
                 {!!payment.refundedAmount && <div className="flex justify-between"><span className="text-on-surface-variant">Refunded</span><span className="font-semibold text-on-surface">₹{Number(payment.refundedAmount).toFixed(2)}</span></div>}
+                {payment.status !== "paid" && payment.paymentLinkUrl && (
+                  <div className="flex justify-between gap-2 items-start pt-1">
+                    <span className="text-on-surface-variant shrink-0">Payment link</span>
+                    <span className="flex items-center gap-1.5 min-w-0">
+                      <a href={payment.paymentLinkUrl} target="_blank" rel="noreferrer" className="font-semibold text-primary truncate hover:underline max-w-[150px]">{payment.paymentLinkUrl}</a>
+                      <button type="button" onClick={() => void navigator.clipboard?.writeText(payment.paymentLinkUrl!)}
+                        className="shrink-0 rounded-md border border-outline-variant/40 px-1.5 py-0.5 text-[11px] font-bold text-on-surface-variant hover:bg-surface-container">Copy</button>
+                    </span>
+                  </div>
+                )}
               </>
             ) : (
               <p className="text-xs text-on-surface-variant">No online payment on this order (cash on delivery or payment pending).</p>
@@ -576,8 +603,11 @@ function OrderDetailModal({
             </div>
           )}
 
-          {/* Shipment tracking — only once the parcel has left the seller */}
-          {["dispatched", "out_for_delivery", "delivered"].includes(order.status) && (() => {
+          {order.shipment && <ShipmentCard order={order} sellerView />}
+
+          {/* Shipment tracking — only once the parcel has left the seller.
+              A courier order shows the card above instead. */}
+          {!isCourierOrder(order) && ["dispatched", "out_for_delivery", "delivered"].includes(order.status) && (() => {
             const remaining = trackingSendsRemaining(order);
             const used = MAX_TRACKING_SENDS - remaining;
             const link = order.tracking?.url;
@@ -635,7 +665,7 @@ function OrderDetailModal({
                 <Download className="w-3.5 h-3.5" /> Download Invoice
               </button>
             )}
-            {REVERTABLE_STATUSES.includes(order.status) && order.status !== "delivered" && (
+            {!isCourierOrder(order) && REVERTABLE_STATUSES.includes(order.status) && order.status !== "delivered" && (
               <button
                 type="button"
                 disabled={updating}
@@ -1104,6 +1134,17 @@ export default function OrdersPage() {
       ? { key, dir: prev.dir === "asc" ? "desc" : "asc" }
       : { key, dir: "desc" });
 
+  // The courier booking arrives moments after Accept, and status then moves on
+  // its own: keep the open order live. One document, only while it is open.
+  useEffect(() => {
+    if (!selectedId) return;
+    return onSnapshot(doc(db, "orders", selectedId), (snap) => {
+      const data = snap.data();
+      if (!data) return;
+      setOrders((list) => list.map((o) => (o.id === selectedId ? ({ ...o, ...data, id: o.id } as typeof o) : o)));
+    }, () => { /* the list view still has the last loaded copy */ });
+  }, [selectedId]);
+
   const selectedOrder = selectedId
     ? (orders.find((o) => o.id === selectedId) ?? reroutedOrders.find((o) => o.id === selectedId) ?? null)
     : null;
@@ -1126,11 +1167,23 @@ export default function OrdersPage() {
 
   return (
     <>
-      <PageHeader
-        title={t('incomingOrdersTitle')}
-        description={t('ordersDesc')}
-        helperKey="dashOrders"
-      />
+      <div className="flex items-start justify-between gap-3">
+        <PageHeader
+          title={t('incomingOrdersTitle')}
+          description={t('ordersDesc')}
+          helperKey="dashOrders"
+        />
+        {uid && sellerType && (
+          <Link
+            href="/dashboard/orders/create"
+            className="mt-1 shrink-0 inline-flex items-center gap-1.5 rounded-xl bg-primary px-3.5 py-2 text-sm font-bold text-white hover:bg-primary/90 whitespace-nowrap"
+          >
+            <IndianRupee className="h-4 w-4" />
+            <span className="hidden sm:inline">Create order manually</span>
+            <span className="sm:hidden">Create</span>
+          </Link>
+        )}
+      </div>
 
       {actionError && (
         <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -1458,7 +1511,7 @@ export default function OrdersPage() {
                         const config = isReroutedAway
                           ? { badge: "bg-orange-100 text-orange-800", label: "Rerouted", icon: Shuffle }
                           : statusConfig(order.status);
-                        const actions = isReroutedAway ? [] : (NEXT_ACTIONS[order.status] || []);
+                        const actions = isReroutedAway ? [] : actionsFor(order);
                         const items = normalizeOrderItems(order.items as any);
                         const isUpdating = updatingId === order.id;
                         return (
@@ -1537,7 +1590,7 @@ export default function OrdersPage() {
                                     ))}
                                   </div>
                                 )}
-                                {!isReroutedAway && REVERTABLE_STATUSES.includes(order.status) && order.status !== "delivered" && (
+                                {!isReroutedAway && !isCourierOrder(order) && REVERTABLE_STATUSES.includes(order.status) && order.status !== "delivered" && (
                                   <button
                                     type="button"
                                     disabled={isUpdating}
@@ -1581,7 +1634,7 @@ export default function OrdersPage() {
         <OrderDetailModal
           order={selectedOrder}
           seller={sellerInfo}
-          actions={isSelectedRerouted ? [] : (NEXT_ACTIONS[selectedOrder.status] || [])}
+          actions={isSelectedRerouted ? [] : actionsFor(selectedOrder)}
           updating={updatingId === selectedOrder.id}
           onAdvance={onAdvance}
           onOpenTracking={(id) => setTrackingForId(id)}
