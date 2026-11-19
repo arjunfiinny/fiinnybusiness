@@ -5,6 +5,9 @@ import '../../../core/constants/app_text_styles.dart';
 import '../../../core/models/catalog_model.dart';
 import '../../../core/models/cart_model.dart';
 import '../../../core/models/listing_model.dart';
+import '../../../core/providers/user_provider.dart';
+import '../../../core/providers/deliver_to_provider.dart';
+import '../../../core/services/delivered_price_service.dart';
 import '../../../core/utils/currency_utils.dart';
 import '../../../core/utils/geo_utils.dart';
 import '../../../core/utils/weight_utils.dart';
@@ -278,7 +281,7 @@ class StoreSelectorSheet extends ConsumerWidget {
           ? 'No store sells the ${selected.label} size online right now.'
           : 'No store sells this online right now.');
     }
-    return _list(context, built);
+    return _list(context, built, catalog: catalog, ref: ref);
   }
 
   Widget _message(String? text, {bool loading = false}) => Padding(
@@ -291,7 +294,12 @@ class StoreSelectorSheet extends ConsumerWidget {
         ),
       );
 
-  Widget _list(BuildContext context, List<StoreOption> opts) {
+  Widget _list(BuildContext context, List<StoreOption> opts,
+      {CatalogModel? catalog, WidgetRef? ref}) {
+    final buyer = ref?.watch(currentUserProvider).value;
+    final pin = ref?.watch(deliverToProvider)?.pincode ?? (buyer?.deliveryAddress.pincode.isNotEmpty == true
+        ? buyer!.deliveryAddress.pincode
+        : buyer?.pincode ?? '');
     return ListView.separated(
       shrinkWrap: true,
       padding: const EdgeInsets.all(16),
@@ -299,8 +307,17 @@ class StoreSelectorSheet extends ConsumerWidget {
       separatorBuilder: (_, _) => const SizedBox(height: 10),
       itemBuilder: (_, i) {
         final o = opts[i];
+        final entries = (catalog?.availability ?? <AvailabilityEntry>[]).where(
+          (a) => a.storeId == o.listing.id || a.storePhone == o.listing.sellerPhone,
+        );
+        final offer = catalog != null && entries.isNotEmpty &&
+                RegExp(r'^[1-9][0-9]{5}$').hasMatch(pin)
+            ? offerFor(catalog, entries.first,
+                variantLabel ?? catalog.unit ?? '', o.effectivePrice)
+            : null;
         return StoreOptionCard(
           option: o,
+          deliveredPrice: offer == null ? null : DeliveredPriceService.instance.get(pin, offer),
           isCurrent:
               currentListingId != null && o.listing.id == currentListingId,
           onTap: () => Navigator.pop(context, o),
@@ -314,12 +331,14 @@ class StoreSelectorSheet extends ConsumerWidget {
 /// an optional "Current" badge. Shared by the selector sheet.
 class StoreOptionCard extends StatelessWidget {
   final StoreOption option;
+  final Future<DeliveredResult?>? deliveredPrice;
   final bool isCurrent;
   final VoidCallback onTap;
 
   const StoreOptionCard({
     super.key,
     required this.option,
+    this.deliveredPrice,
     this.isCurrent = false,
     required this.onTap,
   });
@@ -401,6 +420,24 @@ class StoreOptionCard extends StatelessWidget {
                       ],
                     ],
                   ),
+                  if (deliveredPrice != null)
+                    FutureBuilder<DeliveredResult?>(
+                      future: deliveredPrice,
+                      builder: (context, snapshot) {
+                        final result = snapshot.data;
+                        if (result?.ok != true) return const SizedBox.shrink();
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 5),
+                          child: Text(
+                            '${CurrencyUtils.format(result!.total!)} delivered for 1 pack',
+                            style: AppTextStyles.caption.copyWith(
+                              color: AppColors.primary,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        );
+                      },
+                    ),
                 ],
               ),
             ),
@@ -437,8 +474,8 @@ class StoreOptionCard extends StatelessWidget {
 ///
 /// Compares effectivePrice (post-discount) rather than the list price: that is
 /// the number that reaches the cart, so a shop with a worse list price but a
-/// live offer can still legitimately win. Shared by the product page's sticky
-/// bar and the product cards' Buy Now, so both pick the same store.
+/// live offer can still legitimately win. Also the fallback when a delivered
+/// quote is unavailable.
 StoreOption bestStoreOption(List<StoreOption> options) {
   var best = options.first;
   for (final o in options.skip(1)) {
@@ -452,6 +489,53 @@ StoreOption bestStoreOption(List<StoreOption> options) {
     }
   }
   return best;
+}
+
+/// Prefer the lowest payable one-pack total at the shopper's pincode.
+/// Falls back to the lowest item price when delivery cannot be quoted.
+Future<StoreOption> bestDeliveredStoreOption(
+  CatalogModel product,
+  List<StoreOption> options,
+  String? pincode,
+  String size,
+) async {
+  var chosen = bestStoreOption(options);
+  if (pincode == null || !RegExp(r'^[1-9][0-9]{5}$').hasMatch(pincode) || options.length < 2) {
+    return chosen;
+  }
+  final byPrice = [...options]..sort((a, b) => a.effectivePrice.compareTo(b.effectivePrice));
+  final nearest = [...options]..sort((a, b) =>
+      (a.listing.distanceKm ?? double.infinity).compareTo(b.listing.distanceKm ?? double.infinity));
+  final candidates = <StoreOption>[];
+  final seen = <String>{};
+  for (final option in [...byPrice.take(20), ...nearest.take(20)]) {
+    if (seen.add(option.listing.id)) candidates.add(option);
+  }
+  final results = await Future.wait(candidates.map((option) async {
+    final entries = (product.availability ?? <AvailabilityEntry>[]).where((a) =>
+        a.storeId == option.listing.id || a.storePhone == option.listing.sellerPhone);
+    final entry = entries.isNotEmpty
+        ? entries.first
+        : AvailabilityEntry(
+            storeId: option.listing.id,
+            storePhone: option.listing.sellerPhone,
+            sellingPrice: option.originalPrice,
+          );
+    final offer = offerFor(product, entry, size, option.effectivePrice);
+    if (offer == null) return (option: option, total: null as double?);
+    try {
+      final result = await DeliveredPriceService.instance
+          .get(pincode, offer)
+          .timeout(const Duration(seconds: 8));
+      return (option: option, total: result?.ok == true ? result!.total : null);
+    } catch (_) {
+      return (option: option, total: null as double?);
+    }
+  }));
+  final priced = results.where((result) => result.total != null).toList()
+    ..sort((a, b) => a.total!.compareTo(b.total!));
+  if (priced.isNotEmpty) chosen = priced.first.option;
+  return chosen;
 }
 
 /// GST for a cart line: the seller copy's own fields when present, otherwise

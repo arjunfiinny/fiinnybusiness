@@ -89,6 +89,7 @@ function staticEntries(newest: {
     // edits the code, which this file cannot see, and guessing would put us
     // back where we started.
     { url: `${SITE_URL}/`, changeFrequency: "daily", priority: 1.0 },
+    { url: `${SITE_URL}/catalog`, changeFrequency: "monthly", priority: 0.7 },
     { url: `${SITE_URL}/sell`, changeFrequency: "monthly", priority: 0.9 },
     // The index pages are their listings, so they are as fresh as the freshest
     // thing listed on them.

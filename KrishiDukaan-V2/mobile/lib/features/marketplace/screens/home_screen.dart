@@ -1210,6 +1210,7 @@ class _TrackedProductCardState extends ConsumerState<_TrackedProductCard> {
     return ProductCard(
       product: p,
       onTap: () => context.push('/product/${p.id}'),
+      onAddToCart: canQuickBuy(p) ? () => quickAddToCart(context, ref, p) : null,
       onBuyNow: canQuickBuy(p) ? () => quickBuyNow(context, ref, p) : null,
       buyNowLabel: needsSizeChoice(p) ? 'Choose size' : 'Buy Now',
     );

@@ -32,6 +32,7 @@ import '../../auth/data/auth_repository.dart';
 import '../../../core/models/delivery_address.dart';
 import '../../../core/services/app_review_service.dart';
 import '../../../core/widgets/back_or_home_button.dart';
+import '../../../core/widgets/support_call_card.dart';
 import '../../../core/services/analytics_service.dart';
 
 class CheckoutScreen extends ConsumerStatefulWidget {
@@ -711,6 +712,8 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
               const SizedBox(height: 14),
 
               // ── Delivery address ────────────────────────────────────────
+              const SupportCallCard(),
+              const SizedBox(height: 14),
               _SectionCard(
                 icon: Icons.location_on_outlined,
                 title: 'Delivery Address',

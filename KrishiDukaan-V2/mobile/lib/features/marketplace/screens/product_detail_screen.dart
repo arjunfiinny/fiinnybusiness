@@ -489,13 +489,17 @@ class _ProductDetailScreenState extends ConsumerState<ProductDetailScreen> {
     if (options.isEmpty) return;
     if (!ensureSignedInForCart(context, ref)) return;
 
-    // Auto-select the best store instead of interrupting with a picker.
-    // buildStoreOptions has already dropped any store that cannot supply the
-    // SELECTED size and priced the rest at their own rate for it, so the
-    // cheapest here is genuinely the cheapest for the size being bought — it
-    // can never be a smaller size's price standing in for a bigger one.
-    // The buyer can still switch shops from the cart ("Change store").
-    final chosen = _bestOption(options);
+    final buyer = ref.read(currentUserProvider).value;
+    final pin = ref.read(deliverToProvider)?.pincode ??
+        (buyer?.deliveryAddress.pincode.isNotEmpty == true
+            ? buyer!.deliveryAddress.pincode
+            : buyer?.pincode);
+    final chosen = await bestDeliveredStoreOption(
+      catalog,
+      options,
+      pin,
+      _selectedVariantLabel(catalog) ?? '',
+    );
 
     if (!mounted) return;
     _addOptionToCart(catalog, chosen);
@@ -506,9 +510,7 @@ class _ProductDetailScreenState extends ConsumerState<ProductDetailScreen> {
       // Name the shop that was auto-picked. The buyer no longer chooses it up
       // front, so this plus the cart's "Change store" is how they stay in
       // control of who they're buying from.
-      final label = options.length > 1
-          ? 'Added ${catalog.name} — cheapest at ${chosen.listing.sellerName}'
-          : 'Added ${catalog.name} from ${chosen.listing.sellerName}';
+      final label = 'Added ${catalog.name} from ${chosen.listing.sellerName}';
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           // A snackbar with an action stays until tapped unless told otherwise;
@@ -526,15 +528,6 @@ class _ProductDetailScreenState extends ConsumerState<ProductDetailScreen> {
       );
     }
   }
-
-  /// The store to buy from when the buyer doesn't pick one: the lowest price
-  /// they'd actually pay for the selected size, ties broken by proximity.
-  ///
-  /// Compares effectivePrice (post-discount) rather than the list price —
-  /// that's the number that reaches the cart, so a shop with a worse list
-  /// price but a live offer can still legitimately win.
-  static StoreOption _bestOption(List<StoreOption> options) =>
-      bestStoreOption(options);
 
   /// The package size the buyer currently has selected, or null when this
   /// product has no size chooser. Must match the `selectedVariant` computed in
@@ -2195,7 +2188,7 @@ class _ProductDetailScreenState extends ConsumerState<ProductDetailScreen> {
                 scrollDirection: Axis.horizontal,
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 itemCount: reels.length,
-                separatorBuilder: (_, __) => const SizedBox(width: 12),
+                separatorBuilder: (_, _) => const SizedBox(width: 12),
                 itemBuilder: (context, index) {
                   final reel = reels[index];
                   return GestureDetector(

@@ -43,6 +43,7 @@ interface HomeViewProps {
   onCategoryClick?: (categoryId: string) => void;
   onMarketSearch?: (query: string) => void;
   onAddToCart?: (product: MarketplaceProduct) => void;
+  onBuyNow?: (product: MarketplaceProduct) => void;
   onRegisterClick?: () => void;
   onNavigateRoute?: (route: string) => void;
 }
@@ -111,6 +112,7 @@ export default function HomeView({
   onCategoryClick,
   onMarketSearch,
   onAddToCart,
+  onBuyNow,
   onRegisterClick,
   onNavigateRoute,
 }: HomeViewProps) {
@@ -540,12 +542,12 @@ export default function HomeView({
                 <h3 className="text-sm font-bold text-on-surface line-clamp-2 mb-1 leading-tight">{product.name}</h3>
                 <PriceTag value={dp} size="sm" className="mt-auto" />
                 <DeliveredPriceLine product={product} className="mt-0.5" />
-                {product.sellMode !== "offline_store_only" && (
-                  <div className="mt-2" onClick={(e) => e.stopPropagation()}>
+                {product.sellMode !== "offline_store_only" && product.isOnline !== false && (
+                  <div className="mt-2 flex gap-1.5" onClick={(e) => e.stopPropagation()}>
                     <HelperTooltip side="top" textKey="marketAddToCart">
                       <button
                         onClick={(e) => { e.stopPropagation(); onAddToCart ? onAddToCart(product) : onProductClick(product.id); }}
-                        className={`w-full border-2 text-xs font-bold py-1.5 rounded-lg transition-colors ${
+                        className={`flex-1 min-w-0 border-2 text-[11px] sm:text-xs font-bold py-2 rounded-lg transition-colors ${
                           hasOffer
                             ? 'border-green-600 text-green-700 hover:bg-green-600 hover:text-white'
                             : 'border-primary text-primary hover:bg-primary hover:text-white'
@@ -554,6 +556,12 @@ export default function HomeView({
                         {t('addToCart')}
                       </button>
                     </HelperTooltip>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); onBuyNow ? onBuyNow(product) : onProductClick(product.id); }}
+                      className="flex-1 min-w-0 rounded-lg bg-primary px-1 text-[11px] sm:text-xs font-bold text-white transition-colors hover:bg-primary/90"
+                    >
+                      {t('buyNowBtn')}
+                    </button>
                   </div>
                 )}
               </div>

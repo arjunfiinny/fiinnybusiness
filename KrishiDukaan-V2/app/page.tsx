@@ -37,6 +37,10 @@ import { MarketplaceProduct } from '../types/product';
 import { LatLng } from './utils/haversine';
 import { getUserLocation, DEFAULT_LOCATION, DEFAULT_LOCATION_LABEL, GeoResult } from './utils/geolocation';
 import { computeStoreDistances, storeStocksProduct } from './utils/nearby';
+import { onlineStoreChoices } from './lib/best-online-store';
+import { deliveredOffer, offerFor } from './lib/delivered-price-client';
+import type { OfferResult } from './lib/delivered-offers';
+import { useDeliverTo } from './lib/deliver-to';
 import type { CartItem } from '../types/order';
 import { cartItemKey } from '../types/order';
 import { withServerPrices, type ServerPricedItem } from './lib/server-priced-items';
@@ -186,6 +190,7 @@ function fullCustomerName(info: { customerFirstName: string; customerLastName: s
 
 export default function App() {
   const { t } = useI18n();
+  const deliverTo = useDeliverTo();
   const [currentView, setCurrentView] = useState<View>('home');
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const [toastType, setToastType] = useState<'success' | 'error'>('success');
@@ -231,6 +236,7 @@ export default function App() {
   const [checkoutLoading, setCheckoutLoading] = useState(false);
   const [checkoutMessage, setCheckoutMessage] = useState<string | null>(null);
   const [storePickerProduct, setStorePickerProduct] = useState<MarketplaceProduct | null>(null);
+  const purchasingProductIds = useRef(new Set<string>());
   const [checkoutInfo, setCheckoutInfo] = useState({
     // Two compulsory fields (surname included); joined into customerName
     // wherever an order, Razorpay or a message needs the full name.
@@ -635,33 +641,40 @@ export default function App() {
   // Guards ensureStoresLoaded so the full /retailers read happens at most once
   // per session, no matter how many store-dependent views the user opens.
   const storesLoadedRef = useRef(false);
+  const storesPromiseRef = useRef<Promise<any[]> | null>(null);
+  const loadedStoresRef = useRef<any[]>([]);
   const [storesLoading, setStoresLoading] = useState(false);
 
   // Lazily fetch the full store/retailer list the FIRST time the user opens a
   // store-dependent view (Stores/Map, Market, Product, Cart). Home never calls
   // this — that read used to run unconditionally on every home load and was the
-  // single biggest source of Firestore reads. Idempotent: the ref is set before
-  // the await so concurrent navigations coalesce into one fetch.
-  const ensureStoresLoaded = useCallback(async () => {
-    if (storesLoadedRef.current) return;
-    storesLoadedRef.current = true;
+  // single biggest source of Firestore reads. Concurrent calls share one fetch.
+  const ensureStoresLoaded = useCallback(async (): Promise<any[]> => {
+    if (storesLoadedRef.current) return loadedStoresRef.current;
+    if (storesPromiseRef.current) return storesPromiseRef.current;
     setStoresLoading(true);
     const t0 = typeof performance !== 'undefined' ? performance.now() : 0;
-    try {
-      const stores = await fetchStores();
-      setAllStores(stores);
-      if (process.env.NODE_ENV !== 'production') {
-        const ms = typeof performance !== 'undefined' ? Math.round(performance.now() - t0) : 0;
-        // Dev diagnostic: confirms the full /retailers read fires exactly once,
-        // on demand — and never on the home view.
-        console.info(`[stores] lazy fetchStores() → ${stores.length} stores in ${ms}ms (one-time, on-demand)`);
+    const request = (async () => {
+      try {
+        const stores = await fetchStores();
+        loadedStoresRef.current = stores;
+        storesLoadedRef.current = true;
+        setAllStores(stores);
+        if (process.env.NODE_ENV !== 'production') {
+          const ms = typeof performance !== 'undefined' ? Math.round(performance.now() - t0) : 0;
+          console.info(`[stores] lazy fetchStores() → ${stores.length} stores in ${ms}ms (one-time, on-demand)`);
+        }
+        return stores;
+      } catch (err) {
+        console.error('Failed to lazy-load stores:', err);
+        return [];
+      } finally {
+        setStoresLoading(false);
+        storesPromiseRef.current = null;
       }
-    } catch (err) {
-      console.error('Failed to lazy-load stores:', err);
-      storesLoadedRef.current = false; // allow a retry on the next store-view open
-    } finally {
-      setStoresLoading(false);
-    }
+    })();
+    storesPromiseRef.current = request;
+    return request;
   }, []);
 
   // Guards ensureHubsLoaded so the full /hubs read happens at most once per
@@ -1290,62 +1303,6 @@ export default function App() {
     }
   };
 
-  const addToCart = (product: MarketplaceProduct, variant?: { unit: string; price: number; stock?: number }) => {
-    if (product.sellMode === "offline_store_only") {
-      setToastMsg("This product is not available for online ordering.");
-      setToastType("error");
-      return;
-    }
-    if (needsPackChoice(product, variant)) {
-      setToastMsg(`Choose a pack size for ${product.name}.`);
-      setToastType("error");
-      navigateToProduct(product.id);
-      return;
-    }
-    // Use the best available discount (maxDiscountPct) as a preview for the pending item.
-    // The price will be updated to the specific store's price when the user selects a store.
-    const maxPct = product.maxDiscountPct ?? product.effectiveDiscountPct ?? 0;
-    const { finalPrice: discountedPrice } = calcDiscount(product.price, maxPct);
-
-
-    setCartItems((prev) => {
-      // One-size products carry their size so delivery weighs it and the
-      // order and invoice show it (the app already sends catalog.unit).
-      const variantUnit = variant?.unit || defaultPackUnit(product);
-      const found = prev.find(
-        (i) => i.productId === product.id && i.sellMode === "pending" && i.variantUnit === variantUnit,
-      );
-      if (found) {
-        return prev.map((i) =>
-          i.productId === product.id && i.sellMode === "pending" && i.variantUnit === variantUnit
-            ? { ...i, qty: i.qty + 1 }
-            : i
-        );
-      }
-      return [
-        ...prev,
-        {
-          productId: product.id,
-          sellerId: "",
-          sellerType: "retailer" as const,
-          name: product.name,
-          image: product.image,
-          price: variant ? variant.price : (maxPct > 0 ? discountedPrice : product.price),
-          originalPrice: !variant && maxPct > 0 ? product.price : undefined,
-          discountPct: !variant && maxPct > 0 ? maxPct : undefined,
-          qty: 1,
-          sellMode: "pending" as const,
-          ...(variantUnit ? { variantUnit } : {}),
-          // GST + delivery are retailer-specific and resolved when a store is chosen
-          // (see onAssignStore). A pending line has no seller yet, so none are set.
-        },
-      ];
-    });
-    const label = variant ? `${product.name} (${variant.unit})` : product.name;
-    setToastMsg(`${label} added to cart.`);
-    setToastType("success");
-  };
-
   // Compute formatted address from structured fields. Order matters: the
   // courier engine reads city/state from the END of this string
   // (functions/src/shipping/pure.ts parseCustomerAddress), so new parts go first.
@@ -1741,8 +1698,10 @@ export default function App() {
         (i) => i.productId === product.id && i.sellerId === sellerId && i.variantUnit === variantUnit,
       );
       if (found) {
-        // bump qty for existing online_delivery item from same seller
-        return prev.map((i) =>
+        // Bump the selected seller and clear any legacy pending copy of this size.
+        return prev.filter((i) =>
+          !(i.productId === product.id && i.sellMode === 'pending' && i.variantUnit === variantUnit)
+        ).map((i) =>
           i.productId === product.id && i.sellerId === sellerId && i.variantUnit === variantUnit
             ? { ...i, qty: i.qty + 1 }
             : i
@@ -1776,7 +1735,7 @@ export default function App() {
             ? product.sellerDiscounts[storePhone]
             : (store.id && product.sellerDiscounts?.[store.id])
               ? product.sellerDiscounts[store.id]
-              : 0;
+              : availEntry?.discountPct ?? 0;
       if (storeDiscountPct > 0) {
         originalStorePrice = baseStorePrice;
         const { finalPrice } = calcDiscount(baseStorePrice, storeDiscountPct);
@@ -1817,72 +1776,86 @@ export default function App() {
     setToastType("success");
   }, []);
 
-  // Buy Now: add to cart (auto-select first online store if available) + go to cart
-  //
-  // The selected package size MUST be threaded through. ProductDetailView passes
-  // the chosen variant to onBuyNow, but this handler used to drop it — so Buy Now
-  // silently added the base size no matter which chip the buyer picked. It went
-  // unnoticed while products effectively had one selectable size per store; the
-  // moment a store stocked a second (5L alongside 1L), Buy Now charged for 1L.
-  const handleBuyNow = useCallback((
+  const handleCardPurchase = async (
     product: MarketplaceProduct,
     variant?: { unit: string; price: number; stock?: number },
+    buyNow = false,
   ) => {
-    if (product.sellMode === "offline_store_only") {
+    if (purchasingProductIds.current.has(product.id)) return;
+    if (product.sellMode === "offline_store_only" || product.isOnline === false) {
       setToastMsg("This product is not available for online ordering.");
       setToastType("error");
       return;
     }
-    // "Buy Now" on a card has no size; a multi-size product is chosen on its page.
     if (needsPackChoice(product, variant)) {
       setToastMsg(`Choose a pack size for ${product.name}.`);
       setToastType("error");
-      navigate('product', { productId: product.id });
+      navigateToProduct(product.id);
       return;
     }
-    // Find the first store that stocks this product AND can actually deliver it.
-    //
-    // This used to return the first entry in the product's availability array
-    // with no delivery check whatsoever, despite the comment claiming otherwise.
-    // Assignment pushes a retailer into that array the moment a manufacturer
-    // assigns them stock — before the retailer has accepted their invite, and
-    // regardless of whether they ever switched on online delivery. So Buy Now
-    // could hand the buyer a shop that never joined KrishiDukan and cannot ship.
-    //
-    // Two independent switches must both be on:
-    //   store.onlineDelivery      — THIS shop turned on online delivery
-    //   availability[].isOnline   — this shop's listing of THIS product is online
-    // The listing flag only blocks when explicitly false, so entries written
-    // before it existed still behave as before and rely on the account switch.
-    const onlineStore = storesWithDistance.find((store) => {
-      const storePhone = (store as any).phone as string | undefined;
-      const storeUserId = (store as any).userId as string | undefined;
-      const storeRetailerId = (store as any).retailerId as string | undefined;
-
-      const availEntry = product.availability?.find(
-        (a) =>
-          a.storeId === store.id ||
-          (a.storePhone && storePhone && a.storePhone === storePhone) ||
-          (a.storeId && storeUserId && a.storeId === storeUserId) ||
-          (a.storeId && storeRetailerId && a.storeId === storeRetailerId)
+    purchasingProductIds.current.add(product.id);
+    try {
+      const fetchedStores = await ensureStoresLoaded();
+      const storeIds = new Set(fetchedStores.map((store) => store.id));
+      const manufacturerStores = STORES.filter((store) =>
+        Object.values(MANUFACTURERS).some((manufacturer) => manufacturer.storeIds.includes(store.id)) &&
+        !storeIds.has(store.id)
       );
-      if (!availEntry) return false;
-      if ((store as any).onlineDelivery !== true) return false;
-      if ((availEntry as any).isOnline === false) return false;
-      return true;
-    });
-
-    if (onlineStore) {
-      // Pass the variant's price as the explicit price too: handleAddToCartFromStore
-      // resolves the store's own per-size price from it, and falling back to the
-      // base price here would charge 1L money for a 5L can.
-      handleAddToCartFromStore(product, onlineStore, variant?.price, variant);
-    } else {
-      // No specific store found — add as pending and navigate to cart
-      addToCart(product, variant);
+      const options = computeStoreDistances([...fetchedStores, ...manufacturerStores], coordinates);
+      const choices = onlineStoreChoices(product, options, variant?.unit || defaultPackUnit(product));
+      if (!choices.length) {
+        setToastMsg(`No store currently offers online ordering for ${product.name}.`);
+        setToastType("error");
+        return;
+      }
+      let choice = choices[0];
+      if (deliverTo?.pincode && choices.length > 1) {
+        // Price the item and delivery together at the buyer's saved pincode.
+        // Include both the lowest item prices and the nearest stores, so a
+        // slightly dearer local seller can win on the actual amount payable.
+        const nearest = [...choices].sort((a, b) => a.store.distanceKm - b.store.distanceKm);
+        const candidates = Array.from(new Set([...choices.slice(0, 30), ...nearest.slice(0, 30)])).slice(0, 60);
+        const priced = await Promise.all(candidates.map(async (candidate) => {
+          const entry = candidate.entry ?? {
+            storeId: candidate.store.id,
+            storePhone: candidate.store.phone,
+            stockLevel: 'In Stock',
+          };
+          const offer = offerFor(product, entry, variant?.unit || defaultPackUnit(product) || '', candidate.finalPrice);
+          const result: OfferResult | null = offer ? await Promise.race([
+            deliveredOffer(deliverTo.pincode, offer),
+            new Promise<OfferResult | null>((resolve) => setTimeout(() => resolve(null), 8000)),
+          ]) : null;
+          return { candidate, total: result?.status === 'ok' ? result.total : undefined };
+        }));
+        const known = priced.filter((row): row is { candidate: typeof choice; total: number } =>
+          typeof row.total === 'number' && Number.isFinite(row.total)
+        );
+        if (known.length) {
+          known.sort((a, b) => a.total - b.total || a.candidate.store.distanceKm - b.candidate.store.distanceKm);
+          choice = known[0].candidate;
+        }
+      }
+      handleAddToCartFromStore(
+        product,
+        choice.store,
+        choice.price,
+        variant ? { ...variant, price: choice.price } : undefined,
+      );
+      if (buyNow) navigate("cart");
+    } catch (error) {
+      console.error('Could not select a store for this product:', error);
+      setToastMsg('Could not add this product right now. Please try again.');
+      setToastType('error');
+    } finally {
+      purchasingProductIds.current.delete(product.id);
     }
-    navigate("cart");
-  }, [storesWithDistance, handleAddToCartFromStore, addToCart, navigate]);
+  };
+
+  const handleBuyNow = (
+    product: MarketplaceProduct,
+    variant?: { unit: string; price: number; stock?: number },
+  ) => { void handleCardPurchase(product, variant, true); };
 
   const navigateToMap = (storeId?: string, fromProductId?: string | null) => {
     setMapFilterProductId(fromProductId !== undefined ? fromProductId : null);
@@ -1946,7 +1919,8 @@ export default function App() {
               setSelectedCategory('all');
               navigate('market');
             }}
-            onAddToCart={addToCart}
+            onAddToCart={(product) => { void handleCardPurchase(product); }}
+            onBuyNow={handleBuyNow}
             onRegisterClick={() => navigate('login')}
             onNavigateRoute={navigateToRoute}
           />
@@ -1956,7 +1930,7 @@ export default function App() {
           <MarketView
             searchQuery={productSearch}
             onProductClick={navigateToProduct}
-            onAddToCart={addToCart}
+            onAddToCart={(product) => { void handleCardPurchase(product); }}
             onBuyNow={handleBuyNow}
             cartItems={cartItems}
             onGoToCart={() => navigate("cart")}
@@ -2002,7 +1976,7 @@ export default function App() {
             setSelectedCategory(cat);
             navigate('market');
           }}
-          onAddToCart={addToCart}
+          onAddToCart={(product, variant) => { void handleCardPurchase(product, variant); }}
           onAddToCartFromStore={handleAddToCartFromStore}
           onBuyNow={handleBuyNow}
         />;
@@ -2424,7 +2398,8 @@ export default function App() {
               setSelectedCategory(cat);
               navigate('market');
             }}
-            onAddToCart={addToCart}
+            onAddToCart={(product) => { void handleCardPurchase(product); }}
+            onBuyNow={handleBuyNow}
             onRegisterClick={() => navigate('login')}
             onNavigateRoute={navigateToRoute}
           />
