@@ -31,7 +31,9 @@ class VisitTimeline extends StatelessWidget {
             color: AppColors.primary,
             title: ordered[i].dealerName,
             subtitle: IstDate.timeLabel(ordered[i].visitedAt),
-            detail: ordered[i].purposeLabel,
+            detail: ordered[i].dealerStatus == null
+                ? ordered[i].purposeLabel
+                : '${ordered[i].purposeLabel} · ${ordered[i].dealerStatus}',
             note: ordered[i].notes,
             isLast: i == ordered.length - 1 && session.endedAt == null,
           ),

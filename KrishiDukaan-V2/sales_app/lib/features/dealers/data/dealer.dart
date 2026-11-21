@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../../../core/services/location_service.dart';
+import 'dealer_status.dart';
 
 /// What kind of trade partner this record is. The field team calls on
 /// retailers, distributors and manufacturers — the people who actually buy —
@@ -75,6 +76,8 @@ class Dealer {
   final bool active;
   final String createdBy;
   final DateTime? createdAt;
+  final DateTime? updatedAt;
+  final String? status;
 
   /// Optional shop/dealer photo. Absent on every dealer created before this
   /// field existed and on any the web has not been given an uploader for, so
@@ -97,6 +100,8 @@ class Dealer {
     required this.active,
     required this.createdBy,
     this.createdAt,
+    this.updatedAt,
+    this.status,
     this.imageUrl,
     this.imagePath,
     this.interest,
@@ -116,6 +121,8 @@ class Dealer {
       active: d['active'] != false,
       createdBy: '${d['createdBy'] ?? ''}',
       createdAt: (d['createdAt'] as Timestamp?)?.toDate(),
+      updatedAt: (d['updatedAt'] as Timestamp?)?.toDate(),
+      status: DealerStatus.clean(d['status'] as String?),
       imageUrl: d['imageUrl'] as String?,
       imagePath: d['imagePath'] as String?,
       interest: DealerInterest.from(d['interest']),
@@ -141,6 +148,8 @@ class DealerInput {
   final String address;
   final DealerType type;
   final LatLngPoint? geo;
+  final String? status;
+  final bool statusChanged;
 
   /// Null when the rep hasn't picked one — creation/edit must succeed either
   /// way, since this is optional.
@@ -153,6 +162,8 @@ class DealerInput {
     required this.address,
     required this.type,
     required this.geo,
+    this.status,
+    this.statusChanged = false,
     this.interest,
   });
 }

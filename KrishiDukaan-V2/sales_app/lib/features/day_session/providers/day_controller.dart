@@ -68,9 +68,14 @@ class DayController extends Notifier<DayState> {
             );
       } catch (_) {}
 
-      unawaited(RouteTracker.ensureRunning(sessionId));
+      final tracking = await RouteTracker.ensureRunning(sessionId);
       _refresh();
-      state = const DayState();
+      state = tracking
+          ? const DayState()
+          : const DayState(
+              error:
+                  'Day started, but route tracking could not start. Check location permission and GPS, then reopen the app.',
+            );
       return true;
     } on LocationException catch (e) {
       state = DayState(error: e.message);
@@ -90,6 +95,7 @@ class DayController extends Notifier<DayState> {
     final uid = ref.read(currentUidProvider);
     if (uid == null || state.busy) return false;
 
+    var trackingStopped = false;
     try {
       state = const DayState(phase: DayPhase.locating);
       final endGeo = await LocationService.current();
@@ -103,6 +109,7 @@ class DayController extends Notifier<DayState> {
       final ordered = sortVisits(visits);
       // Stop recording before reading the breadcrumbs so the list is final.
       await RouteTracker.stop();
+      trackingStopped = true;
       final fresh =
           await ref.read(daySessionRepositoryProvider).byId(session.id) ??
           session;
@@ -126,9 +133,11 @@ class DayController extends Notifier<DayState> {
       state = const DayState();
       return true;
     } on LocationException catch (e) {
+      if (trackingStopped) unawaited(RouteTracker.ensureRunning(session.id));
       state = DayState(error: e.message);
       return false;
     } catch (_) {
+      if (trackingStopped) unawaited(RouteTracker.ensureRunning(session.id));
       state = const DayState(
         error: 'Could not end your day. Please try again.',
       );

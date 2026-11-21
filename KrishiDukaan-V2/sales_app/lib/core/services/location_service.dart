@@ -54,11 +54,8 @@ class LocationService {
       );
       return LatLngPoint(pos.latitude, pos.longitude);
     } catch (_) {
-      // A timeout usually means indoors / weak signal. Last known position is
-      // acceptable here ONLY as a same-session approximation, so it is still
-      // rejected if the device has never had a fix.
-      final last = await Geolocator.getLastKnownPosition();
-      if (last != null) return LatLngPoint(last.latitude, last.longitude);
+      // A cached fix may be hours old. Never use it for a visit or end-day
+      // stamp, since it would add a false leg to the calculated route.
       throw const LocationException(
         'Could not get your location. Move to an open area and try again.',
       );

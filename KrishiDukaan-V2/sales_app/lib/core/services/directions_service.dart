@@ -53,9 +53,8 @@ class DirectionsService {
   /// at most [legSize] points (sharing their boundary point), routes each, and
   /// stitches the distances and polylines together.
   ///
-  /// A leg whose lookup fails falls back to straight-line distance for that leg
-  /// only, so one bad request doesn't discard the whole day. Returns null only
-  /// when there is nothing to route.
+  /// If a leg cannot be routed, return null rather than saving a straight-line
+  /// approximation as actual travel distance.
   static Future<RouteResult?> routeLong(
     List<LatLngPoint> waypoints, {
     int legSize = 20,
@@ -67,12 +66,16 @@ class DirectionsService {
       final end = math.min(i + legSize, waypoints.length);
       final leg = waypoints.sublist(i, end);
       final r = await route(leg);
-      if (r != null) {
-        km += r.totalDistanceKm;
-        final pl = r.encodedPolyline;
-        line.addAll(pl != null && pl.isNotEmpty ? decodePolyline(pl) : leg);
+      if (r == null) return null;
+      km += r.totalDistanceKm;
+      final pl = r.encodedPolyline;
+      if (pl != null && pl.isNotEmpty) {
+        try {
+          line.addAll(decodePolyline(pl));
+        } catch (_) {
+          line.addAll(leg);
+        }
       } else {
-        km += straightLineKm(leg);
         line.addAll(leg);
       }
       if (end == waypoints.length) break;
@@ -89,7 +92,9 @@ class DirectionsService {
     final dLat = rad(b.lat - a.lat), dLng = rad(b.lng - a.lng);
     final h =
         math.pow(math.sin(dLat / 2), 2) +
-        math.cos(rad(a.lat)) * math.cos(rad(b.lat)) * math.pow(math.sin(dLng / 2), 2);
+        math.cos(rad(a.lat)) *
+            math.cos(rad(b.lat)) *
+            math.pow(math.sin(dLng / 2), 2);
     return 2 * r * math.asin(math.min(1, math.sqrt(h)));
   }
 
