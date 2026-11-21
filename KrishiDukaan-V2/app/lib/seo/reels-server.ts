@@ -19,7 +19,9 @@ import {
   orderBy,
   query,
 } from "firebase/firestore/lite";
+import { cache } from "react";
 import { getClientDb } from "../firebase-client-server";
+import { indexableReelIds } from "./reel-dedupe";
 import { buildProductSlug, filterServableProductIds } from "./products-server";
 
 export interface SeoReel {
@@ -208,13 +210,24 @@ export async function getReelById(id: string): Promise<SeoReel | null> {
   }
 }
 
-/** All indexable reels for the sitemap. */
+/**
+ * Every listable reel, fetched once per request: generateMetadata and the page
+ * both need the full set to decide indexability (see reel-dedupe.ts).
+ */
+export const getAllReelsForIndexing = cache(() => getAllReels(2000));
+
+/**
+ * All indexable reels for the sitemap: one watch page per video and no test
+ * uploads — the same rule /reels/[slug] applies via isReelIndexable, so the
+ * sitemap never lists a page that answers noindex.
+ */
 export async function getReelsForSitemap(
   max = 2000,
 ): Promise<{ id: string; title: string; createdAtMs: number }[]> {
   try {
     const reels = await getAllReels(max);
-    return reels.map((r) => ({
+    const indexable = indexableReelIds(reels);
+    return reels.filter((r) => indexable.has(r.id)).map((r) => ({
       id: r.id,
       title: r.title,
       createdAtMs: r.createdAtMs,
