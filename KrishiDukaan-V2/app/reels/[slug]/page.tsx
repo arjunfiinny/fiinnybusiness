@@ -3,13 +3,14 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import {
   getReelById,
-  getAllReels,
+  getAllReelsForIndexing,
   buildReelSlug,
   extractReelIdFromSlug,
   linkedProductPath,
   reelCssFilter,
   servableLinkedProductIds,
 } from "../../lib/seo/reels-server";
+import { isReelIndexable } from "../../lib/seo/reel-dedupe";
 import ReelOverlay from "../components/ReelOverlay";
 
 const SITE_URL =
@@ -39,11 +40,17 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
     reel.title ||
     `Watch this farming video by ${reel.shopName} on KrishiDukan AgriReels.`;
   const canonical = `${SITE_URL}/reels/${buildReelSlug(reel.title, reel.id)}`;
+  // A re-share of another reel's video, or a test upload: still watchable by
+  // link, but not a second watch page for Google (see lib/seo/reel-dedupe.ts).
+  // noindex rather than a cross-page canonical — the titles differ, so Google
+  // could ignore the canonical and keep seeing two pages with one video.
+  const indexable = isReelIndexable(reel, await getAllReelsForIndexing());
 
   return {
     title,
     description,
     alternates: { canonical },
+    ...(indexable ? {} : { robots: { index: false, follow: true } }),
     openGraph: {
       title: shareTitle,
       description,
@@ -85,8 +92,11 @@ export default async function ReelPage({ params }: PageProps) {
       : null;
   const canonical = `${SITE_URL}/reels/${buildReelSlug(reel.title, reel.id)}`;
 
+  const allReels = await getAllReelsForIndexing();
+  const indexable = isReelIndexable(reel, allReels);
+
   // More reels for the "watch next" rail (excluding this one).
-  const others = (await getAllReels(13)).filter((r) => r.id !== reel.id).slice(0, 12);
+  const others = allReels.filter((r) => r.id !== reel.id).slice(0, 12);
 
   // ── JSON-LD: VideoObject — Google's video rich-result format.
   //
@@ -97,7 +107,10 @@ export default async function ReelPage({ params }: PageProps) {
   // Reels predating the transcode function have no poster and will get one
   // from the backfill; until then this page renders normally, keeps its
   // breadcrumbs, and simply makes no video claim.
-  const videoLd: Record<string, unknown> | null = !reel.thumbnailUrl ? null : {
+  //
+  // Also omitted on a noindex page (a duplicate or test reel): the video is
+  // claimed once, by its one indexable watch page.
+  const videoLd: Record<string, unknown> | null = !reel.thumbnailUrl || !indexable ? null : {
     "@context": "https://schema.org",
     "@type": "VideoObject",
     name: reel.title || `${reel.shopName} on AgriReels`,
