@@ -25,6 +25,11 @@ String? routeForNotification(String? type, Map<String, dynamic> data) {
   }
 
   switch (type) {
+    case 'cart_reminder':
+      return '/cart';
+    case 'payment_refunded':
+      final id = str('orderId');
+      return id != null ? '/orders/${Uri.encodeComponent(id)}' : '/orders';
     case 'order':
       return '/dashboard/orders';
     // Another seller rejected an order this seller could fulfil. Lands on the

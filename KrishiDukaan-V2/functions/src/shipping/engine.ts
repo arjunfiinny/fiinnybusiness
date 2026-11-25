@@ -128,8 +128,9 @@ async function fallBackToSelf(orderId: string, o: FirebaseFirestore.DocumentData
     },
     updatedAt: nowIso(),
   });
-  // Planned courier order that no courier took: the delivery money becomes the
-  // seller's (an adjustment, paid after delivery). docs/delivery-money-architecture.md
+  // Planned courier order that no courier took: record any unused seller offer
+  // returned under the settlement plan. New plans keep customer delivery money
+  // with KrishiDukan.
   try {
     const st = await settlementFor(orderId);
     if (st && st.plan.deliveryTo === "platform") await recordSelfDelivery(orderId, st.plan, orderSellerKey(o));
@@ -137,7 +138,7 @@ async function fallBackToSelf(orderId: string, o: FirebaseFirestore.DocumentData
     logger.error("[shipping] self-delivery adjustment not recorded", { orderId, e: String(e) });
     await orderRef(orderId).update({
       "shipment.needsAttention": true,
-      "shipment.attentionNote": "The seller is delivering, but their delivery money was not recorded. Check their payout.",
+      "shipment.attentionNote": "The seller is delivering, but the settlement adjustment was not recorded. Check their payout.",
     }).catch(() => undefined);
   }
   await notify(String(o.sellerPhone ?? ""), "order", "Please deliver this order yourself",
@@ -178,8 +179,8 @@ export async function bookForOrder(orderId: string): Promise<void> {
   const { order: o, attempt } = claimed;
 
   // The settlement plan decides who ships (docs/delivery-money-architecture.md).
-  // Priced with the seller's own delivery: the customer paid THEM for it, so
-  // the seller delivers and the platform books nothing. No plan (old app
+  // Priced with the seller's own delivery: the seller delivers and the platform
+  // books nothing. Version 2 keeps the customer delivery payment. No plan (old app
   // builds, manual orders): the original rules below, claw-back included.
   let st: Awaited<ReturnType<typeof settlementFor>> = null;
   try {
@@ -312,7 +313,9 @@ async function keepDeliveryFee(orderId: string, cfg: ShippingConfig): Promise<vo
   // by offering Free Delivery — recorded on the shipment at booking, capped at
   // what the courier charged (pure.ts sellerCourierShare).
   const sellerPays = Number(o?.shipment?.sellerPaysCourier ?? sellerCourierShare(o ?? {}, o?.shipment?.cost));
-  const fee = Math.round((Number(o?.deliveryCharge ?? 0) + (sellerPays > 0 ? sellerPays : 0)) * 100);
+  const deliveryPaise = Math.round(Number(o?.deliveryCharge ?? 0) * 100);
+  const sellerSharePaise = Math.round(Math.max(0, sellerPays) * 100);
+  const fee = deliveryPaise + sellerSharePaise;
   const paymentId = String(o?.payment?.razorpayPaymentId ?? "");
   if (!o || fee <= 0 || !paymentId || o.shipment?.feeReversal) return;
   try {
@@ -326,13 +329,16 @@ async function keepDeliveryFee(orderId: string, cfg: ShippingConfig): Promise<vo
       ? items.find((x) => x.id === recorded)
       : items.find((x) => key10(x.notes?.sellerKey) === seller);
     if (!t) return; // no Route transfer: the payout run deducts it instead
-    // A transfer made from a settlement plan never carried the delivery money.
+    // Planned transfers have already deducted the seller's courier offer.
     if (t.notes?.settlement) {
-      logger.warn("[shipping] planned transfer; no delivery fee to take back", { orderId, transferId: t.id });
+      logger.info("[shipping] planned transfer; no fee to take back", { orderId, transferId: t.id });
       return;
     }
+    // New legacy-client transfers contain goods only. The seller's own courier
+    // offer is still owed, but the customer's delivery was never transferred.
+    const reversalDue = t.notes?.deliveryExcluded === "true" ? sellerSharePaise : fee;
     const left = Number(t.amount) - Number(t.amount_reversed ?? 0);
-    const amount = Math.min(fee, left);
+    const amount = Math.min(reversalDue, left);
     if (amount <= 0) return;
     const rev = await fetch(`https://api.razorpay.com/v1/transfers/${t.id}/reversals`, {
       method: "POST",

@@ -33,6 +33,18 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
 
   String get _catalogUrl => '${AppConfig.apiBaseUrl}/catalog';
 
+  Future<void> _callSupport() async {
+    final phone = Uri(scheme: 'tel', path: AppConfig.supportPhone);
+    try {
+      if (await launchUrl(phone, mode: LaunchMode.externalApplication)) return;
+    } catch (_) {}
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not open the phone app.')),
+      );
+    }
+  }
+
   Future<void> _openCatalog() async {
     try {
       if (await launchUrl(Uri.parse(_catalogUrl), mode: LaunchMode.externalApplication)) return;
@@ -115,10 +127,10 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
     final content = ref.watch(aboutContentProvider).value;
 
     final stats = [
-      ('2,800+', isHindi ? 'पंजीकृत उपयोगकर्ता' : 'Registered Users'),
-      ('275+', isHindi ? 'कृषि दुकानें' : 'Retail Stores'),
+      ('4,600+', isHindi ? 'पंजीकृत उपयोगकर्ता' : 'Registered Users'),
+      ('770+', isHindi ? 'कृषि दुकानें' : 'Retail Stores'),
       ('35+', isHindi ? 'निर्माता कंपनियाँ' : 'Manufacturers'),
-      ('145+', isHindi ? 'सूचीबद्ध उत्पाद' : 'Products Listed'),
+      ('200+', isHindi ? 'सूचीबद्ध उत्पाद' : 'Products Listed'),
     ];
 
     final values = [
@@ -258,6 +270,7 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
                 for (final item in [
                   isHindi ? 'उत्पाद खोजें और पास के विक्रेताओं की तुलना करें' : 'Discover products and compare nearby sellers',
                   isHindi ? 'डिलीवरी सहित कीमत देखें और दुकान चुनें' : 'See delivered prices and choose a store',
+                  isHindi ? 'शहर या पिन कोड से उत्पाद बेचने वाली नज़दीकी दुकान खोजें' : 'Find a nearby shop for a product by city or PIN code',
                   isHindi ? 'अपनी कृषि दुकान को ऑनलाइन दिखाएँ' : 'Bring your agri shop online',
                 ])
                   Padding(
@@ -379,6 +392,44 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
           // ── Contact form ─────────────────────────────────────────────────
           Text(isHindi ? 'हमसे संपर्क करें' : 'Get in Touch', style: AppTextStyles.heading3),
           const SizedBox(height: 12),
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: AppColors.primary,
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.call_outlined, color: Colors.white, size: 28),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(isHindi ? 'मदद के लिए सीधे कॉल करें' : 'Call us directly',
+                          style: AppTextStyles.bodyMedium.copyWith(color: Colors.white)),
+                      const SizedBox(height: 3),
+                      InkWell(
+                        onTap: _callSupport,
+                        child: Text('+91 86580 32751',
+                            style: AppTextStyles.bodySmall.copyWith(
+                              color: Colors.white,
+                              decoration: TextDecoration.underline,
+                              decorationColor: Colors.white,
+                            )),
+                      ),
+                    ],
+                  ),
+                ),
+                TextButton(
+                  onPressed: _callSupport,
+                  style: TextButton.styleFrom(foregroundColor: Colors.white),
+                  child: Text(isHindi ? 'कॉल करें' : 'Call now'),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
           Form(
             key: _formKey,
             child: Column(

@@ -12,7 +12,7 @@ import { StoreWithDistance, storeStocksProduct, computeStoreDistances } from '..
 import { normalizeUnit } from '../utils/weight';
 import { describeStates } from '../lib/sell-area';
 import { INDIAN_STATES } from '../dashboard/_types/delivery-settings';
-import { db, trackDirectionRequest, trackProductClick, trackStoreCall, fetchUserProfileByPhone, fetchStoreOnlineDelivery, fetchStoresForSellers, fetchAllProductSellers, type ProductSellerKey } from '../firebase';
+import { db, trackDirectionRequest, trackProductClick, trackStoreCall, fetchUserProfileByPhone, fetchStoreOnlineDelivery, fetchStoresForSellers, fetchAllProductSellers, type ProductSellerKey, type Store } from '../firebase';
 import { HelperIcon, HelperTooltip } from '../../components/helpers';
 import { useI18n } from '../i18n/I18nContext';
 import { StatusToast } from '../components/shared/status-toast';
@@ -770,6 +770,38 @@ export default function ProductDetailView({
   const [liveStoreRatings, setLiveStoreRatings] = useState<Record<string, { avg: number; count: number }>>({});
   const [activeImage, setActiveImage] = useState<string>('');
   const [shareToast, setShareToast] = useState<string | null>(null);
+  const [storeSearchDraft, setStoreSearchDraft] = useState('');
+  const [storeSearchLocation, setStoreSearchLocation] = useState<{ label: string; lat: number; lng: number } | null>(null);
+  const [storeSearchRadius, setStoreSearchRadius] = useState(25);
+  const [storeSearchBusy, setStoreSearchBusy] = useState(false);
+  const [storeSearchError, setStoreSearchError] = useState('');
+
+  const searchStoresNear = useCallback(async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const query = storeSearchDraft.trim();
+    if (query.length < 3) {
+      setStoreSearchError(t('productShopLocationRequired'));
+      return;
+    }
+    setStoreSearchBusy(true);
+    setStoreSearchError('');
+    try {
+      const response = await fetch(`/api/geocode/search?q=${encodeURIComponent(query)}`);
+      const data = await response.json() as { label?: string; lat?: number; lng?: number; error?: string };
+      if (!response.ok || typeof data.lat !== 'number' || typeof data.lng !== 'number') {
+        throw new Error(data.error || t('productShopLocationNotFound'));
+      }
+      setStoreSearchLocation({ label: data.label || query, lat: data.lat, lng: data.lng });
+      setStoreSearchRadius(25);
+      setMobileStoresExpanded(true);
+      setExpandedStoreId(null);
+      setSelectedOrderStoreId(null);
+    } catch (error) {
+      setStoreSearchError(error instanceof Error ? error.message : t('productShopLocationNotFound'));
+    } finally {
+      setStoreSearchBusy(false);
+    }
+  }, [storeSearchDraft, t]);
 
   // Organic Certified is authoritative from the CANONICAL product document only.
   // The prebuilt marketplaceCards the in-memory list comes from do not carry the
@@ -1064,6 +1096,13 @@ export default function ProductDetailView({
     [availableStores, fallbackStore],
   );
 
+  const storesFromSearchLocation = useMemo(
+    () => storeSearchLocation
+      ? computeStoreDistances(displayStores as Store[], storeSearchLocation)
+      : displayStores,
+    [displayStores, storeSearchLocation],
+  );
+
   // ── Per-variant pricing (single source of truth) ──────────────────────────
   // Resolve a store's OWN active discount % from the per-seller map. Keyed by
   // store userId → phone → store.id (same precedence used in the store cards).
@@ -1184,7 +1223,7 @@ export default function ProductDetailView({
   );
 
   const storeGroups = useMemo(() => {
-    const stocked = displayStores.filter((s) => resolveStoreVariant(s).stocked);
+    const stocked = storesFromSearchLocation.filter((s) => resolveStoreVariant(s).stocked);
     // Stores that can actually deliver go first. Someone on this page wants to
     // buy, and the list is distance-sorted — so a store willing to ship sat
     // wherever its pin fell, often below the 3-store mobile cutoff, while the
@@ -1196,7 +1235,7 @@ export default function ProductDetailView({
     const offline: typeof stocked = [];
     for (const s of stocked) (canOrderFrom(s) ? online : offline).push(s);
     return { online, offline };
-  }, [displayStores, resolveStoreVariant, canOrderFrom]);
+  }, [storesFromSearchLocation, resolveStoreVariant, canOrderFrom]);
 
   // ── Delivered price per seller (docs/delivered-price-architecture.md §4.5) ──
   // For the shopper's "Deliver to" pincode, each store that delivers is priced
@@ -1235,11 +1274,18 @@ export default function ProductDetailView({
   }, [deliveryOfferByStore, deliveredById]);
 
   const visibleStores = useMemo(() => {
+    if (storeSearchLocation) {
+      const near = [...storeGroups.online, ...storeGroups.offline]
+        .sort((a, b) => (a.distanceKm ?? Infinity) - (b.distanceKm ?? Infinity));
+      return storeSearchRadius > 0
+        ? near.filter((store) => (store.distanceKm ?? Infinity) <= storeSearchRadius)
+        : near;
+    }
     const ranked = rankDelivered(storeGroups.online.map((store) => ({ store, result: deliveredFor(store.id) })))
       .map((r) => r.store);
     return [...ranked, ...storeGroups.offline];
-  }, [storeGroups, deliveredFor]);
-  const cheapestDeliveredId = visibleStores.length > 1 && deliveredFor(visibleStores[0]!.id) ? visibleStores[0]!.id : null;
+  }, [storeGroups, deliveredFor, storeSearchLocation, storeSearchRadius]);
+  const cheapestDeliveredId = !storeSearchLocation && visibleStores.length > 1 && deliveredFor(visibleStores[0]!.id) ? visibleStores[0]!.id : null;
 
   // Compute the displayed price block (current price, MRP, savings, discount %,
   // "lowest nearby") for the CURRENTLY SELECTED variant only. Never uses the
@@ -1490,6 +1536,47 @@ export default function ProductDetailView({
               textKey="productStoreAvailability"
               ariaLabel="Available stores help"
             />
+          </div>
+
+          <div className="rounded-2xl border border-primary/20 bg-primary/5 p-3 md:p-4">
+            <label htmlFor="product-shop-location" className="block text-sm font-bold text-on-surface">
+              {t('productShopLocationTitle')}
+            </label>
+            <p className="mt-0.5 text-xs text-on-surface-variant">{t('productShopLocationHint')}</p>
+            <form onSubmit={searchStoresNear} className="mt-3 flex flex-col gap-2 sm:flex-row">
+              <input
+                id="product-shop-location"
+                type="search"
+                value={storeSearchDraft}
+                onChange={(event) => setStoreSearchDraft(event.target.value)}
+                placeholder={t('productShopLocationPlaceholder')}
+                maxLength={80}
+                className="min-w-0 flex-1 rounded-xl border border-outline-variant bg-white px-3 py-2.5 text-sm text-on-surface outline-none focus:border-primary"
+              />
+              <button type="submit" disabled={storeSearchBusy} className="rounded-xl bg-primary px-4 py-2.5 text-sm font-bold text-white disabled:opacity-60">
+                {storeSearchBusy ? t('productShopLocationSearching') : t('productShopLocationSearch')}
+              </button>
+            </form>
+            {storeSearchError && <p role="alert" className="mt-2 text-xs font-semibold text-red-700">{storeSearchError}</p>}
+            {storeSearchLocation && (
+              <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-on-surface-variant">
+                <span className="font-semibold text-primary">{t('productShopLocationNear')} {storeSearchLocation.label}</span>
+                <select
+                  aria-label={t('productShopLocationRadius')}
+                  value={storeSearchRadius}
+                  onChange={(event) => setStoreSearchRadius(Number(event.target.value))}
+                  className="rounded-lg border border-outline-variant bg-white px-2 py-1.5 text-xs text-on-surface"
+                >
+                  <option value={10}>10 km</option>
+                  <option value={25}>25 km</option>
+                  <option value={50}>50 km</option>
+                  <option value={0}>{t('productShopLocationAll')}</option>
+                </select>
+                <button type="button" onClick={() => { setStoreSearchLocation(null); setStoreSearchDraft(''); setStoreSearchError(''); setMobileStoresExpanded(false); }} className="font-bold text-primary underline underline-offset-2">
+                  {t('productShopLocationClear')}
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Store list — desktop only gets a capped height with internal scroll so a
@@ -1814,8 +1901,13 @@ export default function ProductDetailView({
             );
           }) : (
             <div className="p-5 rounded-2xl border-2 border-dashed border-surface-container flex flex-col items-center gap-2 text-center">
-              <span className="text-sm font-semibold text-on-surface">{t('currentlyUnavailable')}</span>
-              <span className="text-xs text-on-surface-variant">{t('productUnavailableDesc')}</span>
+              <span className="text-sm font-semibold text-on-surface">{storeSearchLocation ? t('productShopLocationNoStores') : t('currentlyUnavailable')}</span>
+              <span className="text-xs text-on-surface-variant">{storeSearchLocation ? t('productShopLocationTryWider') : t('productUnavailableDesc')}</span>
+              {storeSearchLocation && storeSearchRadius > 0 && (
+                <button type="button" onClick={() => setStoreSearchRadius(0)} className="text-xs font-bold text-primary underline underline-offset-2">
+                  {t('productShopLocationAll')}
+                </button>
+              )}
             </div>
           )}
           </div>

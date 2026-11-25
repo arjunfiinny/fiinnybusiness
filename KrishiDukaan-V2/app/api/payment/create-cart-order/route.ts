@@ -683,9 +683,8 @@ export async function POST(request: Request) {
       '| paise:', amountPaise);
 
     // Who gets which rupee (functions/src/payouts/settlement.ts). New clients
-    // only: their per-seller pricing is the server's own. Delivery the
-    // platform ships is never in the seller's transfer; commission is on goods
-    // only; a seller's free-delivery offer is their share of the courier cost.
+    // use the server's per-seller plan. Customer delivery stays with the
+    // platform in both courier and seller-delivery modes.
     const settlementPlans = new Map<string, SettlementPlan>();
     if (isNewClient) {
       for (const sp of sellerPricing) {
@@ -706,12 +705,17 @@ export async function POST(request: Request) {
       }
     }
 
-    // Each seller's payout share follows their OWN order total (items + added
-    // GST + their delivery) — what their order record will say. Legacy clients
-    // don't give us per-seller totals, so they keep the subtotal proportions.
+    // Legacy clients do not provide the GST/delivery split. Their Route pool is
+    // capped at the server-computed goods + added GST, so delivery cannot be
+    // allocated across sellers merely because the customer paid it in checkout.
+    // New clients use exact settlement plans; the full payment remains the cap.
+    const legacyGoodsPaise = Math.round(sellerPricing.reduce(
+      (sum, sp) => sum + sp.subtotal + sp.gstAdded, 0,
+    ) * 100);
+    const routeAmountPaise = isNewClient ? amountPaise : Math.min(amountPaise, Math.max(0, legacyGoodsPaise));
     const totalsSum = Array.from(totalBySeller.values()).reduce((a, b) => a + b, 0);
     const route = await buildRouteTransfers(
-      amountPaise,
+      routeAmountPaise,
       isNewClient && totalsSum > 0 ? totalBySeller : subtotalBySeller,
       await routePrefetch,
       settlementPlans.size > 0 ? settlementPlans : undefined,
@@ -965,10 +969,8 @@ async function buildRouteTransfers(
       return await planTransfers(orderAmountPaise, plans, config, prefetched);
     }
 
-    // Allocate the ACTUAL captured amount across sellers in proportion to their
-    // subtotals. Deriving each share from the order total rather than summing
-    // per-seller figures means delivery charges and any client/server rounding
-    // difference are distributed rather than left stranded.
+    // Allocate the goods-only transfer pool across sellers in proportion to
+    // their subtotals. Customer delivery stays in the platform balance.
     const shares = allocateShares(orderAmountPaise, Array.from(subtotalBySeller.entries()));
     if (shares.length === 0) return empty;
 
@@ -1005,7 +1007,13 @@ async function buildRouteTransfers(
         amount: split.transferPaise,
         currency: 'INR',
         on_hold: config.holdTransfers,
-        notes: { sellerKey: row.key, commissionPaise: String(split.commissionPaise) },
+        notes: {
+          sellerKey: row.key,
+          commissionPaise: String(split.commissionPaise),
+          // This legacy-client transfer pool was capped at goods. The courier
+          // engine must not reverse customer delivery out of it again.
+          deliveryExcluded: 'true',
+        },
       });
       splitSummary.push({
         sellerKey: row.key,
@@ -1031,7 +1039,7 @@ async function buildRouteTransfers(
 
 /**
  * Route transfers from settlement plans: each seller gets exactly their plan's
- * transferPaise. What is left of the payment (delivery the platform ships,
+ * transferPaise. What is left of the payment (customer delivery,
  * commission, a seller's courier share) stays with the platform. Same
  * guarantees as the proportional path: never more than the order amount, and
  * a seller with no linked account (or nothing left after fees) is skipped,

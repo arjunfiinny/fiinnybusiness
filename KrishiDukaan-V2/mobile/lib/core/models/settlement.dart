@@ -86,7 +86,7 @@ class SettlementPlan {
   /// Null when the order has no plan (old app builds, manual orders, anything
   /// paid before plans existed) or a malformed one: those keep the old rules.
   static SettlementPlan? fromMap(dynamic raw) {
-    if (raw is! Map || raw['v'] != 1) return null;
+    if (raw is! Map || (raw['v'] != 1 && raw['v'] != 2)) return null;
     int? asInt(dynamic v) => (v is int && v >= 0) ? v : (v is num && v == v.roundToDouble() && v >= 0 ? v.toInt() : null);
     final goods = asInt(raw['goodsPaise']);
     final transfer = asInt(raw['transferPaise']);

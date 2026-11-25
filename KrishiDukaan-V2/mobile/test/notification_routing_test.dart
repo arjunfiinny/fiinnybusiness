@@ -7,6 +7,13 @@ import 'package:krishidukaan_app/core/services/notification_service.dart';
 /// notification that does nothing when tapped.
 void main() {
   group('routeForNotification', () {
+    test('cart reminder and processed refund open the buyer destination', () {
+      expect(routeForNotification('cart_reminder', {}), '/cart');
+      expect(routeForNotification('payment_refunded', {'orderId': 'o1'}), '/orders/o1');
+      expect(routeForNotification('payment_refunded', {}), '/orders');
+      expect(routeForNotification('payment_refunded', {'orderId': 'a/b'}), '/orders/a%2Fb');
+    });
+
     test('order types', () {
       expect(routeForNotification('order', {}), '/dashboard/orders');
       expect(routeForNotification('order_update', {'orderId': 'o1'}), '/orders/o1');

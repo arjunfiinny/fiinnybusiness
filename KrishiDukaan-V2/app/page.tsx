@@ -1551,6 +1551,9 @@ export default function App() {
 
       const rzpOrder = await orderRes.json();
       console.log("[Checkout] rzpOrder:", { id: rzpOrder.id, amount: rzpOrder.amount, serverTotal: rzpOrder.serverTotal });
+      if (typeof rzpOrder.key_id !== "string" || !rzpOrder.key_id.startsWith("rzp_")) {
+        throw new Error("Payment configuration is unavailable. Please try again later.");
+      }
 
       // The server prices every line itself (seller's current price, pack size,
       // discount, GST, delivery). If that differs from the cart, say so before
@@ -1570,7 +1573,7 @@ export default function App() {
 
       // Step 2: Open Razorpay modal
       const rzp = new (window as any).Razorpay({
-        key: process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID,
+        key: rzpOrder.key_id,
         order_id: rzpOrder.id,
         amount: rzpOrder.amount,
         currency: "INR",
