@@ -124,6 +124,9 @@ class ListingRepository {
   ) async {
     final seen = <String>{};
     final listings = <ListingModel>[];
+    // Whether each store's listing is online, over ALL its entries (a store
+    // can appear twice; one online entry is enough, like the web).
+    final onlineByStore = availabilityOnlineByStore(rawAv);
 
     for (final entry in rawAv) {
       final av = entry as Map<String, dynamic>;
@@ -143,7 +146,7 @@ class ListingRepository {
           : (_isPhone(storeId) ? storeId : '');
 
       // Deduplicate by phone or storeId
-      final dedupKey = phoneHint.isNotEmpty ? phoneHint : storeId;
+      final dedupKey = availabilityStoreKey(av);
       if (dedupKey.isEmpty || seen.contains(dedupKey)) continue;
       seen.add(dedupKey);
 
@@ -190,6 +193,13 @@ class ListingRepository {
         stockQuantity: stockLevel != 'Out of Stock' ? 99 : 0,
         variants:     [],
         discount:     entryDiscount,
+        // Orderable online only if this listing is online AND the store has
+        // not switched online delivery off. The checkout server
+        // (create-cart-order) rejects anything else with seller_not_eligible;
+        // without this every availability store looked orderable, and the
+        // nearest one (often offline) was picked for "Buy now".
+        isOnline: (onlineByStore[dedupKey] ?? true) &&
+            profile?['onlineDelivery'] != false,
       ));
     }
 
@@ -437,4 +447,26 @@ class ListingRepository {
 
   static DiscountModel? _parseDiscount(Map<String, dynamic> d) =>
       DiscountModel.fromProductData(d);
+}
+
+/// The key a product's `availability[]` entry is grouped by (the store list's
+/// dedupe key): its store phone, else its storeId.
+String availabilityStoreKey(Map<String, dynamic> av) {
+  final storePhone = av['storePhone'] as String? ?? '';
+  return storePhone.isNotEmpty ? storePhone : (av['storeId'] as String? ?? '');
+}
+
+/// Store key → is that store's listing online. Only an explicit
+/// `isOnline: false` marks an entry offline (same as the web and the checkout
+/// server); a store with any online entry counts as online.
+Map<String, bool> availabilityOnlineByStore(List rawAv) {
+  final out = <String, bool>{};
+  for (final entry in rawAv) {
+    if (entry is! Map) continue;
+    final av = Map<String, dynamic>.from(entry);
+    final key = availabilityStoreKey(av);
+    if (key.isEmpty) continue;
+    out[key] = (out[key] ?? false) || av['isOnline'] != false;
+  }
+  return out;
 }
