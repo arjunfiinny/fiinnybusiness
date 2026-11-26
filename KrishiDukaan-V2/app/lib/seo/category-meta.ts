@@ -12,6 +12,12 @@ export interface CategoryMeta {
   slug: string;
   /** Canonical category name as stored on product docs, e.g. "Fertilizers" */
   name: string;
+  /**
+   * Other stored category names this page also lists. Sellers file products
+   * under names that have no page of their own ("Insecticides", "Fungicides"),
+   * and without these those products were linked from no category page.
+   */
+  aliases?: string[];
   /** Plural display heading */
   heading: string;
   /** 400–600 word indexable intro copy rendered above the product grid */
@@ -80,6 +86,7 @@ export const SEO_CATEGORIES: CategoryMeta[] = [
   {
     slug: "pesticides",
     name: "Pesticides",
+    aliases: ["Insecticides", "Fungicides", "Plant Protector"],
     heading: "Pesticides",
     intro:
       "Protect your crops with the right pesticides from KrishiDukan. We stock a comprehensive range of insecticides, acaricides and nematicides targeting sucking pests, chewing pests, mites and soil pests — covering cotton, soybean, paddy, wheat, vegetables, pulses and horticultural crops across India.\n\nEvery pesticide listing on KrishiDukan details the active ingredient and its concentration, chemical group and IRAC resistance management code, target pest or pest complex, mode of action (contact, systemic, translaminar or stomach poison), formulation type (EC, SC, WG, WP, SL, GR), recommended dosage per acre and per litre of water, crop safety notes, and the pre-harvest interval (PHI) — the minimum number of days between the last spray and harvest that ensures residues stay below legal maximum residue limits (MRLs). This information helps farmers choose the right product, rotate chemical groups across the season to prevent resistance, and comply with safe-use guidelines required by the Insecticides Act, 1968.\n\nInsecticide resistance is a serious and growing problem in Indian agriculture. In Bt cotton areas, whitefly (Bemisia tabaci) has developed resistance to multiple neonicotinoid molecules. Spotted bollworm has shown reduced sensitivity to some pyrethroid formulations. The IRAC group system — where each numbered group shares a common mode of action — is the most reliable resistance management tool available. Rotating between groups (e.g. Group 4A neonicotinoids → Group 28 diamides → Group 6 avermectins → Group 23 tetramic acids) across spray cycles prevents any single mechanism from selecting resistant individuals.\n\nCommonly available products include imidacloprid 17.8% SL, thiamethoxam 25% WG, chlorpyrifos 20% EC, acephate 75% SP, emamectin benzoate 5% SG, fipronil 5% SC, lambda-cyhalothrin, cypermethrin, profenofos, buprofezin, spiromesifen, flonicamid, chlorantraniliprole 18.5% SC and coragen. Products from manufacturers such as Bayer, Syngenta, UPL, PI Industries, Sumitomo, FMC and BASF are all available through KrishiDukan's verified seller network.\n\nSafe pesticide use means more than choosing the right molecule. Always wear chemical-resistant gloves, goggles and a mask during mixing and application. Never spray in high wind, during peak heat, or near water bodies. Strictly observe the PHI before harvest. Dispose of empty containers by triple-rinsing and puncturing, then surrendering to an authorised waste handler — do not reuse, burn or discard in open fields. Keep a usage record showing product name, batch number, date, dose and field treated for traceability and compliance. Browse KrishiDukan's pesticide listings, compare IRAC groups and active ingredients across products, and order from verified sellers who supply only registered, quality-tested formulations at competitive prices with doorstep delivery.",
@@ -134,6 +141,7 @@ export const SEO_CATEGORIES: CategoryMeta[] = [
   {
     slug: "bio-stimulants",
     name: "Bio-Stimulants",
+    aliases: ["Concentrated Carbon Bio-Stimulant", "Bio-Controller"],
     heading: "Bio-Stimulants",
     intro:
       "Boost crop growth and improve yield quality with bio-stimulants from KrishiDukan. Bio-stimulants are products derived from natural materials — seaweed extracts, humic and fulvic acids, amino acids, plant-based hormones and beneficial microorganism consortia — that improve a plant's ability to absorb nutrients, tolerate abiotic stress, and reach its genetic yield potential without simply adding more chemical fertilizer. They are widely used in horticulture, protected cultivation, and high-value field crops where optimising quality alongside yield is as important as maximising total production.\n\nUnlike fertilizers, bio-stimulants do not supply plant-available nutrients directly. Instead, they act on the plant's own physiology and on soil biology. Seaweed extracts containing natural cytokinins, betaines and mannitol improve root branching and elongation — a larger root system absorbs more water and nutrients from a given volume of soil. Humic and fulvic acids chelate micronutrients like zinc and iron into plant-available forms, increase cation exchange capacity of the soil, and stimulate beneficial soil bacteria and mycorrhizal fungi. Amino acid hydrolysates provide organic nitrogen and carbon that support root zone microflora and serve as precursors for plant hormone biosynthesis. Gibberellin and cytokinin plant growth regulators regulate cell elongation, tillering and fruit set at precisely the growth stages where applied hormones are most effective.\n\nKrishiDukan stocks bio-stimulants based on Ascophyllum nodosum and Sargassum seaweed extracts; leonardite-derived humic acid (12–15% humic acid content); fulvic acid concentrates (6–8%); enzymatic and acid-hydrolysed amino acid products; gibberellin (GA₃) in WG and liquid formulations; cytokinin (zeatin or kinetin-based) sprays; and polyamine products for fruit set and retention. Products are available as water-soluble powders (WSP), soluble concentrates (SL), and granules for soil incorporation or fertigation.\n\nField trial data from Indian agricultural universities shows 8–18% yield improvement in soybean, grape, pomegranate and vegetable crops from well-timed bio-stimulant programmes, with the strongest response at flowering and early fruit development stages. The key is application timing: seaweed or cytokinin products at flower bud initiation, amino acid or humic acid at early vegetative stage, and fulvic acid as a carrier during micronutrient foliar sprays.\n\nBio-stimulants work best as a complement to — not a replacement for — adequate macro and micronutrient supply, proper irrigation management and sound crop protection. Think of them as yield optimisers: they help crops perform closer to their genetic ceiling, particularly under conditions of mild stress, sub-optimal nutrition, or during critical windows like flowering and fruit development where marginal improvements in plant physiology have outsized effects on final yield and quality. Browse KrishiDukan's listings, compare products by active ingredient, dosage and crop stage, and order from verified sellers with doorstep delivery.",
@@ -215,6 +223,7 @@ export const SEO_CATEGORIES: CategoryMeta[] = [
   {
     slug: "other",
     name: "Other",
+    aliases: ["Kit", "Adjuvants"],
     heading: "Other Agriculture Products",
     intro:
       "Discover agriculture products at KrishiDukan that support every stage of farming — from soil health management and nursery establishment to pest monitoring, protected cultivation and post-harvest care. This category brings together the agri-inputs and farm supplies that sit outside the standard seed, fertilizer, crop-protection and equipment ranges but are just as important for running a productive and profitable farm.\n\nSoil health and pH management: Soils across central and southern India are increasingly acidic due to long-term use of ammoniacal fertilizers. Agricultural lime (calcium carbonate) at 200–500 kg/acre corrects soil pH, and dolomite (calcium and magnesium carbonate) simultaneously addresses magnesium deficiency common in acidic soils. Gypsum (calcium sulphate) is used for sodic soil reclamation in Maharashtra and Karnataka's black soils — it replaces sodium on exchange sites with calcium, improving soil structure and drainage. Coco peat and perlite are the standard nursery media for plug tray and polyhouse seedling production, providing excellent aeration and water retention without the weed seed risks of soil-based media.\n\nPest monitoring and biological management: Pheromone traps are an essential tool for threshold-based pest management — monitoring trap catches weekly tells you exactly when pest populations cross the economic threshold and a spray is warranted, allowing you to avoid calendar-based spraying and reduce the total number of chemical applications per season. Sticky yellow and blue traps capture adult whiteflies, thrips, fungus gnats and leaf miners in polyhouses and nurseries. Beauveria bassiana, Metarhizium anisopliae, Trichoderma viride, Bacillus thuringiensis (Bt) and Pseudomonas fluorescens are bio-pesticides and bio-control agents compatible with organic and Integrated Pest Management (IPM) programmes.\n\nGrowth regulators: Ethephon (ethylene-releasing compound) is registered for crop management in several fruits and cotton. Mepiquat chloride controls excessive vegetative growth in cotton, improving light interception and boll retention. Gibberellin (GA₃) increases fruit size and stem elongation in grapes when applied at the correct berry development stage. These require careful dose and timing management — browse individual product pages for crop-specific label directions.\n\nProtected cultivation accessories: Shade nets (25%, 50% or 75% shading), insect-proof netting (50 or 40 mesh), anti-hail nets, mulching films, drip tape laterals, inline drip emitters, micro-sprinklers, pressure gauges, sand filters and fertigation venturi injectors are all stocked by KrishiDukan suppliers. Every listing in this category includes detailed specifications, usage guidance and compatibility information. Browse by application type, crop system or problem to find exactly what your farm needs, and order from verified manufacturers and suppliers across India with competitive prices and doorstep delivery.",
@@ -243,8 +252,20 @@ export function getCategoryBySlug(slug: string): CategoryMeta | null {
   return SEO_CATEGORIES.find((c) => c.slug === s) ?? null;
 }
 
+/** The stored category names a category page lists: its own and its aliases. */
+export function categoryStoredNames(meta: CategoryMeta): string[] {
+  return [meta.name, ...(meta.aliases ?? [])];
+}
+
 /** Map an arbitrary stored category name to its SEO slug, or null if unknown. */
 export function categoryNameToSlug(name: string): string | null {
+  return categoryMetaForStoredName(name)?.slug ?? null;
+}
+
+/** The category page a stored category name belongs to (its own or an alias), or null. */
+export function categoryMetaForStoredName(name: string): CategoryMeta | null {
   const n = name.trim().toLowerCase();
-  return SEO_CATEGORIES.find((c) => c.name.toLowerCase() === n)?.slug ?? null;
+  return (
+    SEO_CATEGORIES.find((c) => categoryStoredNames(c).some((s) => s.toLowerCase() === n)) ?? null
+  );
 }

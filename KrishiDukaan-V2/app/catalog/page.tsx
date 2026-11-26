@@ -22,6 +22,7 @@ import {
 import { COMPANY, SITE_URL } from "../lib/legal-constants";
 import { PLAY_STORE_URL } from "../lib/store-links";
 import { CatalogPrintButton, CatalogShareButton } from "./_components/catalog-actions";
+import ProductLinkNav from "../components/seo/product-link-nav";
 import "./catalog.css";
 
 export const metadata: Metadata = {
@@ -81,6 +82,9 @@ function PageFooter({ number, light = false }: { number: string; light?: boolean
     </div>
   );
 }
+
+// Revalidated hourly: the product links below come from the product index.
+export const revalidate = 3600;
 
 export default function CatalogPage() {
   return (
@@ -317,6 +321,7 @@ export default function CatalogPage() {
           <PageFooter number="08" light />
         </article>
       </div>
+      <ProductLinkNav />
     </main>
   );
 }

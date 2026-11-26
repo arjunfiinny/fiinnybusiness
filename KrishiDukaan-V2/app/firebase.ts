@@ -2805,23 +2805,37 @@ export async function adminLinkProductsToCanonical(
   // separate card and vanish from the merged product. New copies inherit it
   // automatically (they are spread from the source doc at assignment time).
   const copyIds = await findCopyProductIds(ids);
-  const targetIds = Array.from(new Set([...ids, ...copyIds]));
+  // Copies first, the selected docs last: see commitProductWritesInChunks.
+  const targetIds = Array.from(new Set([...copyIds.filter((id) => !ids.includes(id)), ...ids]));
 
-  const batch = writeBatch(db);
-  for (const id of targetIds) {
-    batch.set(
-      doc(db, 'products', id),
-      {
-        canonicalId,
-        canonicalLinkedAt: serverTimestamp(),
-        canonicalLinkedBy: adminUid || 'admin',
-        updatedAt: serverTimestamp(),
-      },
-      { merge: true },
-    );
-  }
-  await batch.commit();
+  await commitProductWritesInChunks(targetIds, {
+    canonicalId,
+    canonicalLinkedAt: serverTimestamp(),
+    canonicalLinkedBy: adminUid || 'admin',
+    updatedAt: serverTimestamp(),
+  });
   return targetIds.length;
+}
+
+/**
+ * A write batch holds at most 500 writes, and a product with hundreds of
+ * seller copies (FASTER had 562) needs more than that. Commits in chunks of
+ * 450, in the order given. Callers put the selected docs LAST, so if a chunk
+ * fails the group's listable docs have not moved yet, and running the same
+ * link or unlink again finishes the job (each write is idempotent).
+ */
+const PRODUCT_WRITE_CHUNK = 450;
+async function commitProductWritesInChunks(
+  ids: string[],
+  data: Record<string, unknown>,
+): Promise<void> {
+  for (let i = 0; i < ids.length; i += PRODUCT_WRITE_CHUNK) {
+    const batch = writeBatch(db);
+    for (const id of ids.slice(i, i + PRODUCT_WRITE_CHUNK)) {
+      batch.set(doc(db, 'products', id), data, { merge: true });
+    }
+    await batch.commit();
+  }
 }
 
 /**
@@ -2859,21 +2873,13 @@ export async function adminUnlinkProductFromCanonical(productId: string): Promis
   // in adminLinkProductsToCanonical so the copies fall back to their name group
   // instead of being stranded on a canonicalId whose root no longer carries it.
   const copyIds = await findCopyProductIds([productId]);
-  const targetIds = Array.from(new Set([productId, ...copyIds]));
-  const batch = writeBatch(db);
-  for (const id of targetIds) {
-    batch.set(
-      doc(db, 'products', id),
-      {
-        canonicalId: deleteField(),
-        canonicalLinkedAt: deleteField(),
-        canonicalLinkedBy: deleteField(),
-        updatedAt: serverTimestamp(),
-      },
-      { merge: true },
-    );
-  }
-  await batch.commit();
+  const targetIds = Array.from(new Set([...copyIds.filter((id) => id !== productId), productId]));
+  await commitProductWritesInChunks(targetIds, {
+    canonicalId: deleteField(),
+    canonicalLinkedAt: deleteField(),
+    canonicalLinkedBy: deleteField(),
+    updatedAt: serverTimestamp(),
+  });
 }
 
 /**

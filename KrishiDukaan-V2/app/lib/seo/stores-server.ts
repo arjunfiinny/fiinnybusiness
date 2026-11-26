@@ -522,6 +522,41 @@ export async function storePathForPhone(phone: string): Promise<string | null> {
   return store ? storeUrlPath(store) : null;
 }
 
+/**
+ * The store pages of the shops behind these phones (a product card's sellers),
+ * in the order given, at most `max`. Shops without a page are skipped. [] on
+ * failure: a product page must render without its "sold at" list.
+ */
+export async function getStoresForPhones(
+  phones: string[],
+  max = 12,
+): Promise<{ name: string; city: string; path: string }[]> {
+  try {
+    const byTen = new Map<string, SeoStore>();
+    for (const s of await getAllStores()) {
+      for (const v of [s.phone, s.id]) {
+        if (v && /^\+?\d{10,13}$/.test(v)) {
+          const ten = v.replace(/\D/g, "").slice(-10);
+          if (!byTen.has(ten)) byTen.set(ten, s);
+        }
+      }
+    }
+    const out: { name: string; city: string; path: string }[] = [];
+    const seen = new Set<string>();
+    for (const phone of phones) {
+      const store = byTen.get(phone.replace(/\D/g, "").slice(-10));
+      if (!store || seen.has(store.id)) continue;
+      seen.add(store.id);
+      out.push({ name: store.name, city: store.city, path: storeUrlPath(store) });
+      if (out.length >= max) break;
+    }
+    return out;
+  } catch (err) {
+    console.warn("[stores-server] getStoresForPhones failed:", err);
+    return [];
+  }
+}
+
 export interface ResolvedStore {
   store: SeoStore;
   /** Where this store lives now, which may not be where it was asked for. */

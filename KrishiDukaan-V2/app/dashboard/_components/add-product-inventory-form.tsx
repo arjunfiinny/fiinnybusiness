@@ -28,6 +28,13 @@ import { ProductLicenceSection } from "./product-licence-section";
 import { licenceComplete, type ProductLicence } from "../../lib/product-licence";
 import { useEffectiveUser } from "../_context/effective-user-context";
 
+
+// Search engines rank pages that explain the product; at 300 characters (~45
+// words) no product page could. Firestore accepts any length; this is the
+// form's own limit. Keep in step with kDescriptionMaxLength in
+// mobile/lib/core/utils/product_validation.dart.
+const DESCRIPTION_MAX = 3000;
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 // Use the shared canonical category list
@@ -727,8 +734,8 @@ export function AddProductInventoryForm({
     if (!userId) return;
     if (!adminMode && !hasSeats) { setMessage({ type: "err", text: "No seats available. Buy more seats." }); return; }
     if (!name.trim() || !category) { setMessage({ type: "err", text: "Product name and category are required." }); return; }
-    if (description.trim().length > 0 && (description.trim().length < 20 || description.trim().length > 300)) {
-      setMessage({ type: "err", text: "Description must be between 20 and 300 characters." });
+    if (description.trim().length > 0 && (description.trim().length < 20 || description.trim().length > DESCRIPTION_MAX)) {
+      setMessage({ type: "err", text: `Description must be between 20 and ${DESCRIPTION_MAX} characters.` });
       return;
     }
 
@@ -1067,15 +1074,15 @@ export function AddProductInventoryForm({
                 <span className="font-medium text-on-surface flex items-center gap-1.5">
                   <AlignLeft className="h-3.5 w-3.5 text-on-surface-variant" /> {t('formDescriptionLabel')}
                 </span>
-                <textarea rows={3} disabled={isDisabled}
-                  className={`rounded-xl border bg-white px-3 py-2.5 text-on-surface outline-none focus:ring-2 disabled:opacity-50 resize-none ${description.trim().length > 0 && (description.trim().length < 20 || description.trim().length > 300) ? "border-red-400 focus:border-red-400 focus:ring-red-200" : "border-outline-variant/40 focus:border-primary focus:ring-primary/20"}`}
+                <textarea rows={6} disabled={isDisabled}
+                  className={`rounded-xl border bg-white px-3 py-2.5 text-on-surface outline-none focus:ring-2 disabled:opacity-50 resize-none ${description.trim().length > 0 && (description.trim().length < 20 || description.trim().length > DESCRIPTION_MAX) ? "border-red-400 focus:border-red-400 focus:ring-red-200" : "border-outline-variant/40 focus:border-primary focus:ring-primary/20"}`}
                   value={description} onChange={(e) => setDescription(e.target.value)}
                   placeholder={t('formDescPlaceholder')} />
                 <div className="flex justify-between items-center">
-                  {description.trim().length > 0 && (description.trim().length < 20 || description.trim().length > 300) ? (
-                    <span className="text-xs text-red-500">Description must be between 20 and 300 characters.</span>
+                  {description.trim().length > 0 && (description.trim().length < 20 || description.trim().length > DESCRIPTION_MAX) ? (
+                    <span className="text-xs text-red-500">Description must be between 20 and {DESCRIPTION_MAX} characters.</span>
                   ) : <span />}
-                  <span className={`text-xs ml-auto ${description.length > 300 ? "text-red-500 font-medium" : "text-on-surface-variant"}`}>{description.length}/300</span>
+                  <span className={`text-xs ml-auto ${description.length > DESCRIPTION_MAX ? "text-red-500 font-medium" : "text-on-surface-variant"}`}>{description.length}/{DESCRIPTION_MAX}</span>
                 </div>
               </div>
             </div>
