@@ -59,7 +59,7 @@ env:
 
   # ─── Razorpay (server-side) ────────────────────────────────────────────────
   - variable: RAZORPAY_KEY_ID
-    value: rzp_live_S1aAwIHZXLMSDG
+    value: rzp_live_U4gym2XAeWIMGm
 
   - variable: RAZORPAY_KEY_SECRET
     secret: RAZORPAY_KEY_SECRET
