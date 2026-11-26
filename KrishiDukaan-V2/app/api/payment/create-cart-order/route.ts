@@ -22,6 +22,7 @@ import {
 } from '../../../lib/cart-pricing';
 import { cheapestQuote, courierCheckoutEnabled, dropPincodeFrom, parcelKgFor, pickupPincodeFor } from '../../../lib/courier-quote';
 import { deliveryByDate } from '../../../lib/delivery-eta';
+import { OFFLINE_REROUTE, rerouteTarget } from '../../../lib/offline-reroute';
 import { lineDeliveryShare, manufacturerPhoneOf } from '../../../lib/free-delivery';
 import { loadActiveCampaign } from '../../../lib/delivery-campaign';
 import { planSettlement, type SettlementPlan } from '../../../../functions/src/payouts/settlement';
@@ -196,6 +197,39 @@ export async function POST(request: Request) {
     // Manufacturer licences, read once per product for the whole cart.
     const licence = licenceLoader(db);
     const networkLock = networkLockLoader(db);
+
+    // Products in OFFLINE_REROUTE only (Karan Arjun Power Plus): a line sent to a
+    // store that cannot deliver online goes to the store that does, so old app
+    // builds stop failing with seller_not_eligible. Everything else is untouched.
+    await Promise.all(items.map(async (item) => {
+      if (!item || !OFFLINE_REROUTE[String(item.productId ?? '')]) return;
+      try {
+        const sent = String(item.sellerPhone ?? '').trim() || String(item.sellerId ?? '').trim();
+        const target = OFFLINE_REROUTE[String(item.productId)];
+        const snap = await db.collection('products').doc(String(item.productId)).get();
+        const availability = Array.isArray(snap.data()?.availability)
+          ? (snap.data()!.availability as Record<string, unknown>[])
+          : [];
+        const online = new Map<string, boolean>();
+        await Promise.all([sent, target].filter((p) => SELLER_PHONE_RE.test(p)).map(async (p) => {
+          online.set(p, await fetchStoreOnlineDeliveryAdmin(db, p));
+        }));
+        const to = rerouteTarget({
+          productId: String(item.productId),
+          sentSeller: sent,
+          availability,
+          accountOnline: (p) => online.get(p) === true,
+        });
+        if (to) {
+          console.log('[create-cart-order] rerouted', item.productId, 'from', sent, 'to', to, '(store cannot deliver online)');
+          item.sellerPhone = to;
+          item.sellerId = to;
+        }
+      } catch (e) {
+        console.warn('[create-cart-order] reroute check failed; line left as sent', item.productId, e);
+      }
+    }));
+
     const itemResults = await Promise.all(items.map(async (item) => {
       const qty = Math.max(1, Math.floor(Number(item.qty) || 1));
       // `let`: resolved from the product doc below when the cart item carries
