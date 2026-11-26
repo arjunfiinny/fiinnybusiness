@@ -18,7 +18,10 @@ declare global {
   }
 }
 
-const RAZORPAY_KEY_ID = "rzp_live_S1aAwIHZXLMSDG";
+// Fallback only: the checkout uses the key_id returned by createPaymentOrder,
+// so the key the order was created with always matches the key checkout opens
+// with (a mismatch fails signature verification after a key rotation).
+const RAZORPAY_KEY_ID = "rzp_live_U4gym2XAeWIMGm";
 
 const plans = (cycle: "monthly" | "yearly") => [
   {
@@ -122,11 +125,11 @@ export default function SubscriptionPageClient() {
       // 1. Create order via Firebase Function
       const createOrder = httpsCallable(functions, "createPaymentOrder");
       const result: any = await createOrder({ plan: planId, cycle });
-      const { order_id, amount } = result.data;
+      const { order_id, amount, key_id } = result.data;
 
       // 2. Open Razorpay checkout
       const options = {
-        key: RAZORPAY_KEY_ID,
+        key: key_id || RAZORPAY_KEY_ID,
         amount,
         currency: "INR",
         name: "Fiinny",
