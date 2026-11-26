@@ -4,6 +4,8 @@ import '../../../core/providers/auth_provider.dart';
 import '../../../core/utils/date_range.dart';
 import '../data/dealer.dart';
 import '../data/dealer_repository.dart';
+import '../data/dealer_status.dart';
+import '../data/dealer_status_repository.dart';
 import '../data/dealer_visit.dart';
 import '../data/dealer_visit_repository.dart';
 
@@ -15,17 +17,44 @@ final dealerVisitRepositoryProvider = Provider<DealerVisitRepository>(
   (ref) => DealerVisitRepository(),
 );
 
-/// The shared active dealer master.
-final dealersProvider = FutureProvider<List<Dealer>>((ref) async {
-  return ref.watch(dealerRepositoryProvider).active();
+final dealerStatusRepositoryProvider = Provider<DealerStatusRepository>(
+  (ref) => DealerStatusRepository(),
+);
+
+final customDealerStatusesProvider = StreamProvider<List<String>>((ref) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return Stream.value(const []);
+  return ref.watch(dealerStatusRepositoryProvider).customStatuses(uid);
+});
+
+final dealerStatusHistoryProvider =
+    StreamProvider.family<List<DealerStatusChange>, String>((ref, dealerId) {
+      final uid = ref.watch(currentUidProvider);
+      if (uid == null) return Stream.value(const []);
+      return ref.watch(dealerStatusRepositoryProvider).history(uid, dealerId);
+    });
+
+/// Active dealers owned by the signed-in rep.
+final dealersProvider = StreamProvider<List<Dealer>>((ref) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return Stream.value(const []);
+  return ref.watch(dealerRepositoryProvider).active(uid);
 });
 
 /// A single dealer by id — backs the detail page.
-final dealerByIdProvider = FutureProvider.family<Dealer?, String>((
+final dealerByIdProvider = StreamProvider.family<Dealer?, String>((
   ref,
   dealerId,
-) async {
-  return ref.watch(dealerRepositoryProvider).byId(dealerId);
+) {
+  final uid = ref.watch(currentUidProvider);
+  if (uid == null) return Stream.value(null);
+  return ref
+      .watch(dealerRepositoryProvider)
+      .byId(dealerId)
+      .map(
+        (dealer) =>
+            dealer?.createdBy == uid && dealer?.active == true ? dealer : null,
+      );
 });
 
 /// dealerId -> the rep's most recent visit to it.

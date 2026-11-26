@@ -97,6 +97,14 @@ class _DealerCardState extends State<DealerCard> {
                     ),
                   ],
                 ),
+                if (d.status != null) ...[
+                  const SizedBox(height: 10),
+                  StatusChip(
+                    label: d.status!,
+                    color: AppColors.harvest,
+                    background: AppColors.harvestContainer,
+                  ),
+                ],
                 const SizedBox(height: 12),
                 if (d.phone.isNotEmpty)
                   _Line(icon: Icons.phone_outlined, text: d.phone),

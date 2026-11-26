@@ -12,12 +12,6 @@ class AppConfig {
     defaultValue: _isUat ? 'https://karan-arjun-uat.web.app' : 'https://krishidukan.com',
   );
 
-  // Razorpay test key — swap with live key via --dart-define in release build
-  static const razorpayKeyId = String.fromEnvironment(
-    'RAZORPAY_KEY_ID',
-    defaultValue: 'rzp_test_SmPxtEcNJ25LUj',
-  );
-
   static const googleMapsApiKey = String.fromEnvironment(
     'GOOGLE_MAPS_API_KEY',
     defaultValue: 'AIzaSyDh_Y67TDJc2KLLJ8Wcc2JvEeHzmfVL778',

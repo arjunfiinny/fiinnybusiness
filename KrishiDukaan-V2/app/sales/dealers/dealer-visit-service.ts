@@ -11,6 +11,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '../../firebase';
 import { getTodayIST } from '../day-session-service';
+import { normalizeDealerStatus } from './dealer-status';
 
 export const VISIT_PURPOSES = [
   'Pitching',
@@ -29,6 +30,7 @@ export type DealerVisit = {
   id: string;
   dealerId: string;
   dealerName: string;
+  dealerStatus?: string;
   salesExecutiveId: string;
   daySessionId?: string;
   visitSequence?: number;
@@ -61,6 +63,7 @@ function mapVisitDoc(d: { id: string; data: () => Record<string, unknown> }): De
     id:               d.id,
     dealerId:         String(data.dealerId ?? ''),
     dealerName:       String(data.dealerName ?? ''),
+    dealerStatus:     normalizeDealerStatus(data.dealerStatus) || undefined,
     salesExecutiveId: String(data.salesExecutiveId ?? ''),
     daySessionId:     data.daySessionId  ? String(data.daySessionId)  : undefined,
     visitSequence:    typeof data.visitSequence === 'number' ? data.visitSequence : undefined,
@@ -68,7 +71,7 @@ function mapVisitDoc(d: { id: string; data: () => Record<string, unknown> }): De
     purposeOther:     data.purposeOther  ? String(data.purposeOther)  : undefined,
     notes:            data.notes         ? String(data.notes)         : undefined,
     geo:              rawGeo ? { latitude: rawGeo.latitude, longitude: rawGeo.longitude } : null,
-    visitedAt:        data.visitedAt,
+    visitedAt:        data.visitedAt ?? data.createdAt,
     createdAt:        data.createdAt,
     updatedAt:        data.updatedAt,
   };
@@ -169,10 +172,12 @@ export async function fetchAllVisitsForExec(uid: string): Promise<DealerVisit[]>
   const q = query(
     collection(db, 'dealerVisits'),
     where('salesExecutiveId', '==', uid),
-    orderBy('visitedAt', 'desc'),
   );
   const snap = await getDocs(q);
-  return snap.docs.map((d) => mapVisitDoc(d as any));
+  return snap.docs.map(mapVisitDoc).sort((a, b) =>
+    ((b.visitedAt as Timestamp | undefined)?.toMillis?.() ?? 0) -
+    ((a.visitedAt as Timestamp | undefined)?.toMillis?.() ?? 0),
+  );
 }
 
 /**

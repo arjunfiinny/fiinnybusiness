@@ -13,6 +13,7 @@ import '../../../core/utils/currency_utils.dart';
 import '../../../core/widgets/empty_state.dart';
 import '../../marketplace/widgets/store_selector_sheet.dart';
 import '../../../core/widgets/back_or_home_button.dart';
+import '../../../core/widgets/support_call_card.dart';
 import '../../../core/services/analytics_service.dart';
 
 class CartScreen extends ConsumerStatefulWidget {
@@ -67,8 +68,13 @@ class _CartScreenState extends ConsumerState<CartScreen> {
             )
           : ListView.builder(
               padding: const EdgeInsets.all(16),
-              itemCount: items.length,
-              itemBuilder: (_, i) => _CartItemTile(item: items[i]),
+              itemCount: items.length + 1,
+              itemBuilder: (_, i) => i == items.length
+                  ? const Padding(
+                      padding: EdgeInsets.only(top: 12, bottom: 16),
+                      child: SupportCallCard(),
+                    )
+                  : _CartItemTile(item: items[i]),
             ),
       // In the Scaffold's bottomNavigationBar slot (not the body's Column) so
       // the floating "Added to cart" SnackBar — which dodges bottomNavigationBar
@@ -357,7 +363,7 @@ class _CartItemTile extends ConsumerWidget {
       context,
       catalogId: item.catalogId,
       title: 'Change store',
-      subtitle: 'Nearest stores first — pick where to buy',
+      subtitle: 'Compare nearby stores. Delivery updates after changing.',
       currentListingId: item.listingId,
       // Keep the size the line was bought at — changing store must not
       // silently re-price a 5L line at the 1L price.

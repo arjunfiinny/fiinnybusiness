@@ -7,15 +7,12 @@
  * so there is exactly one copy of these rules. The Flutter app mirrors only the
  * reader (settlementNet) and its tests pin the same numbers.
  *
- * THE RULES (owner, 16 Nov 2026)
+ * THE RULES (owner, updated 25 Nov 2026)
  *   - Commission is a % of the seller's GOODS (items + added GST), never of
  *     delivery.
- *   - When the platform ships (courier priced at checkout), the customer's
- *     delivery money never goes into the seller's transfer: the platform keeps
- *     it and pays the courier. The gateway fee on that delivery money is added
- *     to the customer's delivery charge, so the platform nets the full cost.
- *   - When the seller delivers (their own slab), that delivery charge is theirs
- *     and they bear the gateway fee on it, as on their goods.
+ *   - The customer's delivery money stays with KrishiDukan regardless of who
+ *     delivers. It never enters a new seller Route transfer. The seller's
+ *     gateway fee is calculated only on goods.
  *   - A seller's free/partial delivery offer is their share of the courier
  *     cost, deducted from their transfer at checkout.
  *   - Platform campaign (Option B): the seller still pays what they offered;
@@ -44,7 +41,7 @@ export interface SplitRates {
   feeBearer: "seller" | "platform";
 }
 
-export const SETTLEMENT_VERSION = 1;
+export const SETTLEMENT_VERSION = 2;
 
 /** A percentage of a paise amount, rounded UP to a whole paise (route-split.ts pctOfPaise). */
 export function pctOfPaise(paise: number, percent: number): number {
@@ -143,7 +140,7 @@ export interface SettlementPlan {
   deliveryTo: DeliveryTo;
   /** What the customer paid for delivery (gross-up included). */
   customerDeliveryPaise: number;
-  /** Delivery money that is the seller's (seller delivers), else 0. */
+  /** Legacy v1 only: delivery money included in the seller transfer. Always 0 in v2. */
   keptDeliveryPaise: number;
   commissionPaise: number;
   gatewayFeePaise: number;
@@ -182,11 +179,11 @@ export function planSettlement(input: {
   const goodsPaise = Math.max(0, toPaise(input.goods));
   const customerDeliveryPaise = Math.max(0, toPaise(input.customerDelivery));
   const platformShips = input.deliveryTo === "platform";
-  const keptDeliveryPaise = platformShips ? 0 : customerDeliveryPaise;
+  const keptDeliveryPaise = 0;
   const sellerCourierPaise = platformShips ? Math.max(0, toPaise(input.sellerCourier ?? 0)) : 0;
   const campaignPaise = platformShips ? Math.max(0, toPaise(input.campaign ?? 0)) : 0;
   const commissionPaise = pctOfPaise(goodsPaise, rates.commissionPercent);
-  const gatewayFee = rates.feeBearer === "seller" ? gatewayFeePaise(goodsPaise + keptDeliveryPaise, rates) : 0;
+  const gatewayFee = rates.feeBearer === "seller" ? gatewayFeePaise(goodsPaise, rates) : 0;
   const transferPaise = Math.max(
     0,
     goodsPaise + keptDeliveryPaise - commissionPaise - gatewayFee - sellerCourierPaise,
@@ -250,17 +247,16 @@ export interface SettlementAdjustment {
 }
 
 /**
- * The platform was going to ship but no courier booked, so the seller
- * delivers. They get the customer's delivery money (less the gateway fee on
- * it, as for any delivery money a seller keeps) and their offer share back,
- * since they now bear the whole delivery cost themselves. During a campaign
- * the customer paid nothing for delivery, so only the share comes back.
+ * The platform was going to ship but no courier booked. A v2 plan keeps the
+ * customer's delivery charge with KrishiDukan; only the seller's unused courier
+ * offer is returned. A v1 plan preserves its original promise for orders paid
+ * before this change.
  */
 export function selfDeliveryAdjustment(plan: SettlementPlan, sellerKey: string, at: string): SettlementAdjustment | null {
   if (plan.deliveryTo !== "platform") return null;
   const key = key10(sellerKey);
-  const delivery = plan.customerDeliveryPaise;
-  const feeOnDelivery = plan.rates.feeBearer === "seller" ? gatewayFeePaise(delivery, plan.rates) : 0;
+  const delivery = plan.v === 1 ? plan.customerDeliveryPaise : 0;
+  const feeOnDelivery = plan.v === 1 && plan.rates.feeBearer === "seller" ? gatewayFeePaise(delivery, plan.rates) : 0;
   // The share comes back only to the seller who made the offer.
   const share = key === plan.sellerKey ? plan.sellerCourierPaise : 0;
   const netPaise = Math.max(0, delivery - feeOnDelivery) + share;
@@ -625,14 +621,14 @@ export function normaliseRates(raw: Partial<SplitRates> | null | undefined): Spl
 /** A stored plan, or null when the document has none or a malformed one. */
 export function readPlan(raw: unknown): SettlementPlan | null {
   const d = raw as Partial<SettlementPlan> | null | undefined;
-  if (!d || typeof d !== "object" || d.v !== SETTLEMENT_VERSION) return null;
+  if (!d || typeof d !== "object" || (d.v !== 1 && d.v !== SETTLEMENT_VERSION)) return null;
   const int = (v: unknown) => (Number.isInteger(v) && (v as number) >= 0 ? (v as number) : null);
   const goods = int(d.goodsPaise);
   const transfer = int(d.transferPaise);
   if (goods === null || transfer === null) return null;
   if (d.deliveryTo !== "platform" && d.deliveryTo !== "seller") return null;
   return {
-    v: SETTLEMENT_VERSION,
+    v: d.v,
     sellerKey: key10(d.sellerKey),
     goodsPaise: goods,
     deliveryTo: d.deliveryTo,

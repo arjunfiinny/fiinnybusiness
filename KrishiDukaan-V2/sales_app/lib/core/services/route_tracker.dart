@@ -7,7 +7,8 @@ import '../../features/day_session/data/day_session.dart';
 import '../../features/day_session/data/day_session_repository.dart';
 import 'location_service.dart';
 
-/// Records where the rep actually is every 15 minutes while a day is open.
+/// Records fresh, accurate fixes at roughly 15-minute intervals while a day
+/// is open and the OS continues providing location updates.
 ///
 /// Why: the end-of-day distance used to be start → visits → end, i.e. the
 /// shortest road between the stops. A rep who took another road, or went
@@ -16,8 +17,8 @@ import 'location_service.dart';
 ///
 /// Android keeps this alive with a foreground service (hence the persistent
 /// notification); iOS uses background location updates. If the OS or the rep
-/// kills the app, tracking stops until the app is next opened — it then resumes
-/// from [ensureRunning] and immediately drops a fresh point.
+/// kills the app, tracking stops until the app is next opened. [ensureRunning]
+/// resumes the stream; the next usable fix is saved after the interval gap.
 class RouteTracker {
   RouteTracker._();
 
@@ -30,78 +31,115 @@ class RouteTracker {
   static StreamSubscription<Position>? _sub;
   static String? _sessionId;
   static DateTime? _lastSavedAt;
+  static int _generation = 0;
+  static final Set<Future<void>> _pendingWrites = {};
   static final _repo = DaySessionRepository();
 
   static bool isTrackingSession(String sessionId) => _sessionId == sessionId;
 
   /// Starts (or keeps) tracking for [sessionId]. [lastPointAt] is the time of
   /// the newest point already stored, so a restart doesn't double-record.
-  static Future<void> ensureRunning(
+  static Future<bool> ensureRunning(
     String sessionId, {
     DateTime? lastPointAt,
   }) async {
-    if (isTrackingSession(sessionId)) return;
-    await stop();
-    // Claimed before the first await below, so a second caller (Start Day and
-    // the session provider both fire on a new day) can't open a second stream.
+    if (isTrackingSession(sessionId)) return _sub != null;
+    final generation = ++_generation;
+    final oldSub = _sub;
+    _sub = null;
+    // Claim before awaiting cancellation so simultaneous callers cannot open
+    // two streams for the same session.
     _sessionId = sessionId;
-
     try {
+      await oldSub?.cancel();
+      if (_generation != generation) return false;
       if (!await Geolocator.isLocationServiceEnabled()) {
-        _sessionId = null;
-        return;
+        if (_generation == generation) _sessionId = null;
+        return false;
       }
+      if (_generation != generation) return false;
       var perm = await Geolocator.checkPermission();
       if (perm == LocationPermission.denied) {
         perm = await Geolocator.requestPermission();
       }
+      // Android needs a separate background grant for updates after the app
+      // leaves the screen. The foreground service still works when declined.
+      if (!kIsWeb &&
+          defaultTargetPlatform == TargetPlatform.android &&
+          perm == LocationPermission.whileInUse) {
+        perm = await Geolocator.requestPermission();
+      }
+      if (_generation != generation) return false;
       if (perm == LocationPermission.denied ||
           perm == LocationPermission.deniedForever) {
         _sessionId = null;
-        return;
+        return false;
       }
 
       _lastSavedAt = lastPointAt;
 
       _sub = Geolocator.getPositionStream(locationSettings: _settings()).listen(
-        (p) => _onPosition(sessionId, p),
-        // Tracking is best-effort: a stream error must never surface to the
-        // rep or affect starting/ending the day.
-        onError: (_) {},
-        cancelOnError: false,
+        (p) {
+          final write = _onPosition(sessionId, p);
+          _pendingWrites.add(write);
+          write.whenComplete(() => _pendingWrites.remove(write));
+        },
+        // A failed stream is no longer considered running, so reopening the
+        // app can start a fresh one.
+        onError: (_) {
+          if (_generation == generation) {
+            _sub = null;
+            _sessionId = null;
+          }
+        },
+        cancelOnError: true,
       );
+      return true;
     } catch (_) {
-      _sub = null;
-      _sessionId = null;
+      if (_generation == generation) {
+        _sub = null;
+        _sessionId = null;
+      }
+      return false;
     }
   }
 
   static Future<void> stop() async {
+    ++_generation;
     final sub = _sub;
     _sub = null;
     _sessionId = null;
     _lastSavedAt = null;
     await sub?.cancel();
+    // Cancellation does not await async Firestore callbacks. Wait before the
+    // closing route reads the saved points.
+    await Future.wait(_pendingWrites.toList());
   }
 
   static Future<void> _onPosition(String sessionId, Position p) async {
     if (_sessionId != sessionId) return;
     final now = DateTime.now();
+    final age = now.difference(p.timestamp);
+    if (age > const Duration(minutes: 2) ||
+        age < const Duration(seconds: -30)) {
+      return;
+    }
     final last = _lastSavedAt;
     if (last != null && now.difference(last) < _minGap) return;
+    if (p.accuracy > 200 || p.isMocked) return;
     _lastSavedAt = now;
     try {
       await _repo.addTrackPoint(
         sessionId,
         TrackPoint(
           point: LatLngPoint(p.latitude, p.longitude),
-          at: now,
+          at: p.timestamp,
           accuracyM: p.accuracy,
         ),
       );
     } catch (_) {
       // Allow the next event to retry instead of waiting out a full gap.
-      _lastSavedAt = last;
+      if (_sessionId == sessionId) _lastSavedAt = last;
     }
   }
 

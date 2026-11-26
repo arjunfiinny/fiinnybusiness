@@ -4,6 +4,9 @@ import { requireSection } from "../../../../../../lib/admin-auth";
 import { writeAuditLog, auditMeta } from "../../../../../../lib/audit-log-service";
 import { csvCell } from "../../../../../../admin/_lib/csv";
 
+import { groupSessionVisits, salesDate, timestampMs } from "../../../../../../admin/sales-team/sales-activity";
+import { normalizeDealerStatus } from "../../../../../../sales/dealers/dealer-status";
+
 type Params = { params: { execId: string } };
 
 export const dynamic = "force-dynamic";
@@ -36,17 +39,20 @@ export async function GET(req: NextRequest, { params }: Params) {
   const execDoc = await db.collection("users").doc(execId).get().catch(() => null);
   const execName = String(execDoc?.data()?.name ?? execDoc?.data()?.email ?? execId);
 
-  // Use the existing composite index: salesExecutiveId ASC + date ASC
-  // Date strings are YYYY-MM-DD so lexicographic ordering == chronological.
-  let sessionsQ = db
-    .collection("daySessions")
-    .where("salesExecutiveId", "==", execId)
-    .orderBy("date", "asc") as FirebaseFirestore.Query;
-
-  if (from) sessionsQ = sessionsQ.where("date", ">=", from);
-  if (to) sessionsQ = sessionsQ.where("date", "<=", to);
-
-  const sessionsSnap = await sessionsQ.get();
+  const [sessionsSnap, visitsSnap] = await Promise.all([
+    db.collection("daySessions").where("salesExecutiveId", "==", execId).orderBy("date", "asc").get(),
+    db.collection("dealerVisits").where("salesExecutiveId", "==", execId).get(),
+  ]);
+  const sessions = sessionsSnap.docs.map((doc) => {
+    const data = doc.data();
+    return { id: doc.id, date: String(data.date ?? ""), startedAt: data.startedAt, data };
+  });
+  const visits = visitsSnap.docs.map((doc) => {
+    const data = doc.data();
+    return { id: doc.id, daySessionId: data.daySessionId, visitedAt: data.visitedAt ?? data.createdAt, data };
+  }).sort((a, b) => timestampMs(a.visitedAt) - timestampMs(b.visitedAt));
+  const sessionsInRange = sessions.filter(({ date }) => (!from || date >= from) && (!to || date <= to));
+  const bySession = groupSessionVisits(sessions, visits);
 
   const actorDoc = await db.collection("users").doc(caller.uid).get().catch(() => null);
   const actorName = String(actorDoc?.data()?.name ?? actorDoc?.data()?.email ?? caller.uid);
@@ -56,78 +62,65 @@ export async function GET(req: NextRequest, { params }: Params) {
   if (type === "dealer-wise") {
     // Dealer-wise sessions CSV: one row per dealer visit per session
     // Joins: dealerVisits + dealers collections
-    const sessionIds = sessionsSnap.docs.map((d) => d.id);
-    const sessionDateMap = new Map<string, string>();
-    for (const s of sessionsSnap.docs) sessionDateMap.set(s.id, String(s.data().date ?? ""));
-
-    // Fetch all visits for this exec within the date range
-    let visitsQ = db
-      .collection("dealerVisits")
-      .where("salesExecutiveId", "==", execId)
-      .orderBy("visitedAt", "asc") as FirebaseFirestore.Query;
-    if (from) visitsQ = visitsQ.where("visitedAt", ">=", new Date(from));
-    if (to) {
-      const toDate = new Date(to);
-      toDate.setDate(toDate.getDate() + 1);
-      visitsQ = visitsQ.where("visitedAt", "<", toDate);
+    const byVisitId = new Map<string, string>();
+    for (const [sessionId, entries] of Array.from(bySession)) {
+      for (const entry of entries) byVisitId.set(entry.id, sessionId);
     }
-    const visitsSnap = await visitsQ.get();
+    const visitsInRange = visits.filter((visit) => {
+      const date = salesDate(visit.visitedAt);
+      return (!from || date >= from) && (!to || date <= to);
+    });
 
     // Collect all dealer IDs from visits
-    const dealerIds = Array.from(new Set(visitsSnap.docs.map((v) => String(v.data().dealerId ?? "")))).filter(Boolean);
+    const dealerIds = Array.from(new Set(visitsInRange.map((visit) => String(visit.data.dealerId ?? "")))).filter(Boolean);
 
     // Fetch dealer details for type, interest, ownerName, phone
     const dealerMap = new Map<string, Record<string, unknown>>();
     for (let i = 0; i < dealerIds.length; i += 30) {
       const chunk = dealerIds.slice(i, i + 30);
-      const dSnap = await db.collection("dealers").where("__name__", "in", chunk).get().catch(() => null);
-      if (dSnap) {
-        for (const dd of dSnap.docs) dealerMap.set(dd.id, dd.data());
+      const dSnap = await db.collection("dealers").where("__name__", "in", chunk).get();
+      for (const dd of dSnap.docs) {
+        if (dd.data().createdBy === execId) dealerMap.set(dd.id, dd.data());
       }
     }
 
     const headers = [
-      "Date", "Session ID", "Dealer Name", "Owner Name", "Phone",
-      "Visit Time", "Dealer Type", "Current Status", "Interest", "Purpose", "Notes",
+      "Date (IST)", "Visit ID", "Session ID", "Dealer ID", "Dealer Name at Visit", "Owner Name", "Phone",
+      "Visit Time (IST)", "Dealer Type", "Status at Visit", "Current Status", "Interest", "Purpose", "Notes", "Latitude", "Longitude",
     ];
     const rows: string[] = [headers.map(csvCell).join(",")];
 
     const interestMap: Record<string, string> = {
       low: "Low", considering: "Considering", veryInterested: "Very Interested",
     };
-    const statusMap: Record<string, string> = {
-      pitching: "Pitching", interested: "Interested", ongoing: "Ongoing",
-      pending: "Pending", completed: "Completed", closed: "Closed",
-      notInterested: "Not Interested",
-    };
-    function fmtStatus(s: string | undefined): string {
-      if (!s) return "";
-      return statusMap[s] ?? s.replace(/([A-Z])/g, " $1").replace(/^./, (c) => c.toUpperCase()).trim();
-    }
-
-    for (const v of visitsSnap.docs) {
-      const vd = v.data();
-      const sessionId = String(vd.daySessionId ?? "");
-      const date = sessionDateMap.get(sessionId) ?? String(vd.visitedAt?.toDate?.().toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" }) ?? "");
+    for (const visit of visitsInRange) {
+      const vd = visit.data;
+      const sessionId = byVisitId.get(visit.id) ?? visit.daySessionId ?? "";
+      const date = salesDate(visit.visitedAt);
       const dealer = dealerMap.get(String(vd.dealerId ?? "")) ?? {};
       rows.push([
         csvCell(date),
+        csvCell(visit.id),
         csvCell(sessionId),
+        csvCell(vd.dealerId),
         csvCell(vd.dealerName),
         csvCell(String(dealer.ownerName ?? "")),
         csvCell(String(dealer.phone ?? "")),
-        csvCell(formatTs(vd.visitedAt as any)),
+        csvCell(formatTs(visit.visitedAt)),
         csvCell(String(dealer.type ?? "retailer")),
-        csvCell(fmtStatus(dealer.status ? String(dealer.status) : undefined)),
+        csvCell(normalizeDealerStatus(vd.dealerStatus)),
+        csvCell(normalizeDealerStatus(dealer.status)),
         csvCell(interestMap[String(dealer.interest ?? "")] ?? String(dealer.interest ?? "")),
         csvCell(vd.purpose === "Other" ? String(vd.purposeOther ?? "Other") : String(vd.purpose ?? "")),
         csvCell(vd.notes),
+        csvCell(vd.geo?.latitude),
+        csvCell(vd.geo?.longitude),
       ].join(","));
     }
 
     const csv = rows.join("\r\n");
     const filename = `${safeName}_dealer_wise_sessions_${dateStr}.csv`;
-    const rowCount = visitsSnap.size;
+    const rowCount = visitsInRange.length;
 
     await writeAuditLog({
       actorId: caller.uid,
@@ -151,40 +144,20 @@ export async function GET(req: NextRequest, { params }: Params) {
     });
   }
 
-  // Default: one row per day session
   const headers = [
-    "Date", "Start Time", "End Time", "Duration",
-    "Visits Count", "Distance (km)", "Notes",
+    "Session ID", "Date (IST)", "Status", "Start Time (IST)", "End Time (IST)", "Duration",
+    "Visits Count", "Distance (km)", "Start Latitude", "Start Longitude", "End Latitude", "End Longitude",
   ];
   const rows: string[] = [headers.map(csvCell).join(",")];
-
-  // Fetch visit counts per session
-  let allVisitsQ = db
-    .collection("dealerVisits")
-    .where("salesExecutiveId", "==", execId) as FirebaseFirestore.Query;
-  if (from) allVisitsQ = allVisitsQ.where("visitedAt", ">=", new Date(from));
-  if (to) {
-    const toDate = new Date(to);
-    toDate.setDate(toDate.getDate() + 1);
-    allVisitsQ = allVisitsQ.where("visitedAt", "<", toDate);
-  }
-  const allVisitsSnap = await allVisitsQ.get();
-  const visitCountBySession = new Map<string, number>();
-  for (const v of allVisitsSnap.docs) {
-    const sid = String(v.data().daySessionId ?? "");
-    if (sid) visitCountBySession.set(sid, (visitCountBySession.get(sid) ?? 0) + 1);
-  }
-
-  for (const s of sessionsSnap.docs) {
-    const sd = s.data();
+  for (const session of sessionsInRange) {
+    const sd = session.data;
     rows.push([
-      csvCell(sd.date),
-      csvCell(formatTs(sd.startedAt as any)),
-      csvCell(formatTs(sd.endedAt as any)),
-      csvCell(fmtDuration(sd.totalWorkingMinutes as number | undefined)),
-      csvCell(visitCountBySession.get(s.id) ?? 0),
+      csvCell(session.id), csvCell(session.date), csvCell(sd.status),
+      csvCell(formatTs(sd.startedAt)), csvCell(formatTs(sd.endedAt)),
+      csvCell(fmtDuration(sd.totalWorkingMinutes)), csvCell(bySession.get(session.id)?.length ?? 0),
       csvCell(typeof sd.totalDistanceKm === "number" ? sd.totalDistanceKm.toFixed(2) : ""),
-      csvCell(""),
+      csvCell(sd.startGeo?.latitude), csvCell(sd.startGeo?.longitude),
+      csvCell(sd.endGeo?.latitude), csvCell(sd.endGeo?.longitude),
     ].join(","));
   }
 
@@ -201,7 +174,7 @@ export async function GET(req: NextRequest, { params }: Params) {
     entityId: execId,
     entityName: `${execName} — sessions CSV`,
     before: null,
-    after: { rowCount: sessionsSnap.size, from: from ?? null, to: to ?? null },
+    after: { rowCount: sessionsInRange.length, from: from ?? null, to: to ?? null },
     ...auditMeta(req),
   });
 

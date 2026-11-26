@@ -1,0 +1,167 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Product images (Retailers, Manufacturers, Admin)
+    match /product-images/{allPaths=**} {
+      allow read: if true;
+      allow write: if request.auth != null
+                   && request.resource.size < 10 * 1024 * 1024
+                   && request.resource.contentType.matches('image/.*');
+    }
+
+    // Profile logos & banners
+    match /profile-images/{allPaths=**} {
+      allow read: if true;
+      allow write: if request.auth != null
+                   && request.resource.size < 5 * 1024 * 1024
+                   && request.resource.contentType.matches('image/.*');
+    }
+
+    // Blog images
+    match /blog-images/{allPaths=**} {
+      allow read: if true;
+      allow write: if request.auth != null
+                   && request.resource.size < 10 * 1024 * 1024
+                   && request.resource.contentType.matches('image/.*');
+    }
+
+    // Blog cover images
+    match /blog-covers/{allPaths=**} {
+      allow read: if true;
+      allow write: if request.auth != null
+                   && request.resource.size < 10 * 1024 * 1024
+                   && request.resource.contentType.matches('image/.*');
+    }
+
+    // Homepage banner images (background, mobile background, product/foreground)
+    match /banner-images/{allPaths=**} {
+      allow read: if true;
+      allow write: if request.auth != null
+                   && request.resource.size < 10 * 1024 * 1024
+                   && request.resource.contentType.matches('image/.*');
+    }
+
+    // Crop Hub images (hero, crop icon, irrigation section, seed/product, video thumbnail)
+    match /hub-images/{allPaths=**} {
+      allow read: if true;
+      allow write: if request.auth != null
+                   && request.resource.size < 10 * 1024 * 1024
+                   && request.resource.contentType.matches('image/.*');
+    }
+
+    // AgriReels video — size limit intentionally omitted because
+    // request.resource.size is unreliable for putData() on Flutter Web.
+    match /reels/{docId}/video.mp4 {
+      allow read: if true;
+      allow write: if request.auth != null
+                   && request.resource.contentType.matches('video/.*');
+    }
+
+    // AgriReels thumbnail — separate from video.mp4 above because it's an
+    // image, not a video; the old single `reels/{docId}/{allPaths=**}` rule
+    // required `video/.*` for every file in the folder, which silently
+    // rejected thumb.jpg uploads (image/jpeg) from both web and mobile.
+    match /reels/{docId}/thumb.jpg {
+      allow read: if true;
+      allow write: if request.auth != null
+                   && request.resource.size < 2 * 1024 * 1024
+                   && request.resource.contentType.matches('image/.*');
+    }
+
+    // Online Orders Invoice
+    // Read is public — the URL is intentionally shared via WhatsApp / email.
+    // Write is restricted to authenticated users uploading a valid PDF under 2 MB.
+    match /invoices/{orderId}/{file} {
+      allow read:  if true;
+      allow write: if request.auth != null
+                   && request.resource.size < 2 * 1024 * 1024
+                   && request.resource.contentType == 'application/pdf';
+    }
+
+    // ── Seller KYC documents (PAN card, cancelled cheque, GST cert) ───────
+    //
+    // PRIVATE, unlike every other prefix in this file. Each rule above grants
+    // `read: if true` because the asset is meant to be public (product photos,
+    // invoices shared over WhatsApp). A PAN card or bank document is not, so
+    // do NOT copy the public-read pattern here.
+    //
+    // Keyed by the seller's own phone so ownership is provable from the path:
+    // Firebase Auth puts the E.164 number in the phone_number token claim for
+    // phone-auth users, which is how every seller signs in.
+    //
+    // ONLY the owning seller is granted access here. Admins are deliberately
+    // NOT matched in this rule: Storage rules cannot read Firestore, so the
+    // isAdmin() role check firestore.rules uses is unavailable, and this
+    // project sets no custom claims (verified — nothing calls
+    // setCustomUserClaims anywhere), so a `token.admin` check would silently
+    // never match. Admin review instead goes through a server route using the
+    // Admin SDK, which bypasses these rules and can check the role properly —
+    // and keeps document URLs short-lived rather than permanently readable.
+    //
+    // No delete: a submitted document must stay auditable. Re-uploading the
+    // same filename replaces it, which is the intended way to correct a file.
+    match /kyc/{phone}/{file} {
+      allow read: if request.auth != null
+                  && request.auth.token.phone_number == phone;
+      allow write: if request.auth != null
+                   && request.auth.token.phone_number == phone
+                   && request.resource.size < 5 * 1024 * 1024
+                   && (request.resource.contentType.matches('image/.*')
+                       || request.resource.contentType == 'application/pdf');
+    }
+
+    // ── Sales field-expense bills ────────────────────────────────────────
+    //
+    // Path is keyed by the rep's Auth uid, so ownership of a write is provable
+    // from the path itself — a rep can only ever write under their own prefix.
+    //
+    // READ is any signed-in user, NOT public and NOT owner-only. Storage rules
+    // cannot read Firestore, so the isAdmin() role check used in firestore.rules
+    // is unavailable here and this project sets no custom claims (nothing calls
+    // setCustomUserClaims) — an owner-only read would therefore lock the
+    // reviewing admin out of the very image they have to approve. Widening to
+    // "any signed-in user who knows the URL" is the deliberate trade: a fuel or
+    // food receipt is materially less sensitive than the PAN cards under /kyc/,
+    // which stay owner-only for that reason. If expense bills ever need to be
+    // as private as KYC, move admin review to a server route using the Admin
+    // SDK (as /kyc/ does) and tighten this to the owner.
+    //
+    // The file is named after the claim id, so replacing a bill overwrites in
+    // place; delete is allowed because withdrawing a PENDING claim should not
+    // leave its image orphaned in the bucket.
+    match /sales-expenses/{uid}/{file} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null
+                   && request.auth.uid == uid
+                   && request.resource.size < 5 * 1024 * 1024
+                   && request.resource.contentType.matches('image/.*');
+      allow delete: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // ── Sales dealer photos ──────────────────────────────────────────────
+    //
+    // Dealer photos live under the dealer document ID. Check that document's
+    // creator so a rep cannot read or replace another rep's photo by ID.
+    //
+    // Filename is fixed (`photo.<ext>`), so replacing a dealer's photo
+    // overwrites the same object rather than orphaning the old one.
+    match /dealers/{dealerId}/{file} {
+      allow read: if request.auth != null
+                  && (firestore.get(/databases/(default)/documents/dealers/$(dealerId)).data.createdBy == request.auth.uid
+                      || firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.role == 'admin'
+                      || (firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.role == 'team'
+                          && 'salesTeam' in firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.adminSections));
+      allow write: if request.auth != null
+                   && firestore.get(/databases/(default)/documents/dealers/$(dealerId)).data.createdBy == request.auth.uid
+                   && request.resource.size < 5 * 1024 * 1024
+                   && request.resource.contentType.matches('image/.*');
+    }
+
+    // Deny everything else
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

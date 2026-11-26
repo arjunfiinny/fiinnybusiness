@@ -37,7 +37,6 @@
             "NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID": "G-KPJCC681D5",
             "FIREBASE_PROJECT_ID": "karan-arjun-uat",
             "NEXT_PUBLIC_BASE_URL": "https://karan-arjun-uat.web.app",
-            "NEXT_PUBLIC_RAZORPAY_KEY_ID": "rzp_test_SmPxtEcNJ25LUj",
             "RAZORPAY_KEY_ID": "rzp_test_SmPxtEcNJ25LUj",
             "NEXT_PUBLIC_GOOGLE_MAPS_API_KEY": "AIzaSyDh_Y67TDJc2KLLJ8Wcc2JvEeHzmfVL778",
             "SMTP_HOST": "smtp.gmail.com",

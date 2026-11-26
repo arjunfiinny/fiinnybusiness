@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
 import '../../../core/constants/firestore_keys.dart';
+import '../../../core/services/route_tracker.dart';
 import 'sales_user.dart';
 
 /// Raised for a sign-in problem we want to show verbatim to the rep.
@@ -35,7 +36,10 @@ class SalesAuthRepository {
     }
   }
 
-  Future<void> signOut() => _auth.signOut();
+  Future<void> signOut() async {
+    await RouteTracker.stop();
+    await _auth.signOut();
+  }
 
   Future<void> sendPasswordReset(String email) async {
     try {

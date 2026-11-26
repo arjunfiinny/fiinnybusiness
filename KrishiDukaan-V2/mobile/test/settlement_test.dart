@@ -77,9 +77,19 @@ void main() {
     expect(v.transferPaise, 100522);
   });
 
+  test('new plans keep delivery with KrishiDukan', () {
+    final p = SettlementPlan.fromMap({
+      ...plan(goods: 100000, to: 'seller', customerDelivery: 5000, transfer: 95640),
+      'v': 2,
+      'keptDeliveryPaise': 0,
+    })!;
+    expect(settlementView(p, const []).transferPaise, 95640);
+    expect(settlementView(p, const []).gatewayFeePaise, 2360);
+  });
+
   test('untrusted documents', () {
     expect(SettlementPlan.fromMap(null), isNull);
-    expect(SettlementPlan.fromMap({...plan(goods: 1, to: 'platform', transfer: 0), 'v': 2}), isNull);
+    expect(SettlementPlan.fromMap({...plan(goods: 1, to: 'platform', transfer: 0), 'v': 3}), isNull);
     expect(SettlementPlan.fromMap({...plan(goods: 1, to: 'customer', transfer: 0)}), isNull);
     expect(SettlementAdjustment.listFrom([
       {'id': 'x', 'kind': 'self_delivery', 'netPaise': -5},

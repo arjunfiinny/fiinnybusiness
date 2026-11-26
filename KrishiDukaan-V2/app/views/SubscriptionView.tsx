@@ -430,9 +430,12 @@ export default function SubscriptionView({ user, role, onSuccess, onLogout }: Su
             : 'Unable to start payment right now. Please try again.',
         );
       }
+      if (typeof order.key_id !== 'string' || !order.key_id.startsWith('rzp_')) {
+        throw new Error('Payment configuration is unavailable. Please try again later.');
+      }
 
       const options = {
-        key: process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID,
+        key: order.key_id,
         amount: order.amount,
         currency: order.currency,
         name: 'KrishiDukan',

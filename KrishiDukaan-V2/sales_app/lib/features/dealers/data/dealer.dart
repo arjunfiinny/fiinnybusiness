@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../../../core/services/location_service.dart';
+import 'dealer_status.dart';
 
 /// What kind of trade partner this record is. The field team calls on
 /// retailers, distributors and manufacturers — the people who actually buy —
@@ -75,6 +76,8 @@ class Dealer {
   final bool active;
   final String createdBy;
   final DateTime? createdAt;
+  final DateTime? updatedAt;
+  final String? status;
 
   /// Optional shop/dealer photo. Absent on every dealer created before this
   /// field existed and on any the web has not been given an uploader for, so
@@ -97,6 +100,8 @@ class Dealer {
     required this.active,
     required this.createdBy,
     this.createdAt,
+    this.updatedAt,
+    this.status,
     this.imageUrl,
     this.imagePath,
     this.interest,
@@ -112,14 +117,28 @@ class Dealer {
       phone: '${d['phone'] ?? ''}',
       address: '${d['address'] ?? ''}',
       type: DealerType.from(d['type']),
-      geo: raw is GeoPoint ? LatLngPoint(raw.latitude, raw.longitude) : null,
+      geo: parseLocation(raw),
       active: d['active'] != false,
       createdBy: '${d['createdBy'] ?? ''}',
       createdAt: (d['createdAt'] as Timestamp?)?.toDate(),
+      updatedAt: (d['updatedAt'] as Timestamp?)?.toDate(),
+      status: DealerStatus.clean(d['status'] as String?),
       imageUrl: d['imageUrl'] as String?,
       imagePath: d['imagePath'] as String?,
       interest: DealerInterest.from(d['interest']),
     );
+  }
+
+  static LatLngPoint? parseLocation(Object? raw) {
+    if (raw is GeoPoint) return LatLngPoint(raw.latitude, raw.longitude);
+    if (raw is Map) {
+      final lat = raw['latitude'];
+      final lng = raw['longitude'];
+      if (lat is num && lng is num && lat.abs() <= 90 && lng.abs() <= 180) {
+        return LatLngPoint(lat.toDouble(), lng.toDouble());
+      }
+    }
+    return null;
   }
 
   /// Matches a free-text search across the fields a rep would actually type.
@@ -141,6 +160,8 @@ class DealerInput {
   final String address;
   final DealerType type;
   final LatLngPoint? geo;
+  final String? status;
+  final bool statusChanged;
 
   /// Null when the rep hasn't picked one — creation/edit must succeed either
   /// way, since this is optional.
@@ -153,6 +174,8 @@ class DealerInput {
     required this.address,
     required this.type,
     required this.geo,
+    this.status,
+    this.statusChanged = false,
     this.interest,
   });
 }

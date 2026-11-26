@@ -54,6 +54,7 @@ export {
   rebuildStoreDirectoryIfDirty,
 } from "./stores/directory";
 export { raiseAbandonedCheckoutEnquiries } from "./notifications/enquiries";
+export { remindAbandonedCarts, notifyCustomerRefundProcessed } from "./notifications/cart-refund";
 export { notifySellerOfOrderOffer, expireOrderReassignments, notifyOnAdminReassignment } from "./notifications/reassignment";
 export { generateInvoiceOnAccept, sweepMissingInvoices } from "./orders/invoices";
 export { shipOrderOnChange, shipmentSweep, courierWebhook } from "./shipping/triggers";
@@ -932,11 +933,11 @@ export const notifyCustomerOnOrderStatus = onDocumentWritten(
       ],
       rejected: [
         "Order declined ❌",
-        `${store} couldn't fulfil your order for ${itemSummary}. If you paid online, it's been refunded automatically.`,
+        `${store} couldn't fulfil your order for ${itemSummary}. If you paid online, your refund has been started. We'll notify you when it's processed.`,
       ],
       cancelled: [
         "Order cancelled",
-        `Your order for ${itemSummary} was cancelled. If you paid online, it's been refunded automatically.`,
+        `Your order for ${itemSummary} was cancelled. If you paid online, your refund has been started. We'll notify you when it's processed.`,
       ],
     };
     const msg = messages[status];

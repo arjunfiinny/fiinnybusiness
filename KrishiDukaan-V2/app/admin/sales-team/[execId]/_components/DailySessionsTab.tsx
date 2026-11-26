@@ -6,7 +6,6 @@ import { ArrowLeft, MapPin, Download, Loader2 } from "lucide-react";
 import { auth } from "../../../../firebase";
 import type { DaySession } from "../../../../sales/day-session-service";
 import type { DealerVisit } from "../../../../sales/dealers/dealer-visit-service";
-import { fetchVisitsForDate } from "../../../../sales/dealers/dealer-visit-service";
 import DaySessionCard from "../../../../../components/sales/DaySessionCard";
 import SessionSummary from "../../../../../components/sales/SessionSummary";
 import VisitTimeline from "../../../../../components/sales/VisitTimeline";
@@ -22,15 +21,13 @@ const RouteMap = dynamic(() => import("../../../../../components/sales/RouteMap"
 
 type Props = {
   sessions: DaySession[];
-  visitCountByDate: Map<string, number>;
+  visitsBySession: Map<string, DealerVisit[]>;
   execId: string;
-  execName: string;
 };
 
-export function DailySessionsTab({ sessions, visitCountByDate, execId, execName }: Props) {
+export function DailySessionsTab({ sessions, visitsBySession, execId }: Props) {
   const [selected, setSelected] = useState<DaySession | null>(null);
-  const [selectedVisits, setSelectedVisits] = useState<DealerVisit[]>([]);
-  const [detailLoading, setDetailLoading] = useState(false);
+  const selectedVisits = selected ? visitsBySession.get(selected.id) ?? [] : [];
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
   const [downloading, setDownloading] = useState<"sessions" | "dealer-wise" | null>(null);
@@ -40,20 +37,6 @@ export function DailySessionsTab({ sessions, visitCountByDate, execId, execName 
     if (toDate && s.date > toDate) return false;
     return true;
   });
-
-  const openSession = async (session: DaySession) => {
-    setSelected(session);
-    setDetailLoading(true);
-    setSelectedVisits([]);
-    try {
-      const v = await fetchVisitsForDate(execId, session.date);
-      setSelectedVisits(v);
-    } catch {
-      // Non-fatal — map/timeline render without visit points
-    } finally {
-      setDetailLoading(false);
-    }
-  };
 
   const downloadCsv = async (type: "sessions" | "dealer-wise") => {
     setDownloading(type);
@@ -93,7 +76,7 @@ export function DailySessionsTab({ sessions, visitCountByDate, execId, execName 
       <div className="space-y-4">
         <button
           type="button"
-          onClick={() => { setSelected(null); setSelectedVisits([]); }}
+          onClick={() => setSelected(null)}
           className="inline-flex items-center gap-1.5 rounded-xl border border-outline-variant/40 px-3 py-1.5 text-xs font-semibold text-on-surface hover:bg-surface-container transition-colors"
         >
           <ArrowLeft className="h-3.5 w-3.5" /> Back to sessions
@@ -103,13 +86,7 @@ export function DailySessionsTab({ sessions, visitCountByDate, execId, execName 
 
         <div>
           <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-outline">Route Map</p>
-          {detailLoading ? (
-            <div className="flex h-80 items-center justify-center rounded-2xl bg-surface-container ring-1 ring-outline/10">
-              <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
-            </div>
-          ) : (
-            <RouteMap session={selected} visits={selectedVisits} />
-          )}
+          <RouteMap session={selected} visits={selectedVisits} />
         </div>
 
         <div>
@@ -121,7 +98,7 @@ export function DailySessionsTab({ sessions, visitCountByDate, execId, execName 
               </span>
             )}
           </div>
-          {!detailLoading && <VisitTimeline session={selected} visits={selectedVisits} />}
+          <VisitTimeline session={selected} visits={selectedVisits} />
         </div>
       </div>
     );
@@ -191,8 +168,8 @@ export function DailySessionsTab({ sessions, visitCountByDate, execId, execName 
             <DaySessionCard
               key={session.id}
               session={session}
-              visitCount={visitCountByDate.get(session.date) ?? 0}
-              onClick={() => void openSession(session)}
+              visitCount={visitsBySession.get(session.id)?.length ?? 0}
+              onClick={() => setSelected(session)}
             />
           ))}
         </div>
