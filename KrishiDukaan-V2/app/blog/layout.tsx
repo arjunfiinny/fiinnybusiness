@@ -5,7 +5,14 @@ const SITE_URL =
   process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/$/, '') || 'https://krishidukan.com';
 
 export const metadata: Metadata = {
-  title: 'Blog — KrishiDukan | Agricultural Insights & Farming Tips',
+  // `absolute`: the root "%s | KrishiDukan" template would otherwise add a
+  // second "| KrishiDukan" to the index title.
+  // `template`: a layout title without one resets the template for everything
+  // below it, so every post's <title> had lost its "| KrishiDukan" suffix.
+  title: {
+    absolute: 'Blog — KrishiDukan | Agricultural Insights & Farming Tips',
+    template: '%s | KrishiDukan',
+  },
   description: 'Expert advice, crop guides, and agri-retail news from the KrishiDukan team. Helping Indian farmers make better decisions.',
   // Self-referencing canonical for the index. Only /blog inherits this —
   // app/blog/[slug]/page.tsx sets its own canonical in generateMetadata, and a

@@ -71,14 +71,31 @@ function mapPost(id: string, data: Record<string, unknown>): SeoBlogPost {
   };
 }
 
-/** All published posts (used for related-posts + slug fallback). [] on failure. */
+function timeOf(value: unknown): number {
+  const iso = toIso(value);
+  return iso ? Date.parse(iso) : 0;
+}
+
+/**
+ * All published posts, newest first. [] on failure.
+ *
+ * Firestore returns these in document-id order, which is effectively random —
+ * the /blog index took posts[0] as "Featured", so a June post sat on top of
+ * October ones. Sorted here so the index, related posts and anything else that
+ * lists posts agree on "latest".
+ */
 export async function getPublishedPosts(): Promise<SeoBlogPost[]> {
   try {
     const db = getClientDb();
     const snap = await getDocs(
       query(collection(db, "blogPosts"), where("status", "==", "published")),
     );
-    return snap.docs.map((d) => mapPost(d.id, d.data() as Record<string, unknown>));
+    return snap.docs
+      .map((d) => mapPost(d.id, d.data() as Record<string, unknown>))
+      .sort(
+        (a, b) =>
+          timeOf(b.publishedAt ?? b.createdAt) - timeOf(a.publishedAt ?? a.createdAt),
+      );
   } catch (err) {
     console.warn("[seo/blog-server] getPublishedPosts failed:", err);
     return [];

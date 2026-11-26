@@ -24,12 +24,29 @@ function formatDate(ts: unknown): string {
   } catch { return ""; }
 }
 
+// Tags are mostly Marathi/Hindi keyword phrases. The old chip style
+// (10px, uppercase, tracking-widest) was meant for short English labels: letter
+// spacing breaks Devanagari conjuncts apart and the text became unreadable.
 function TagChip({ tag }: { tag: string }) {
   return (
-    <span className="inline-block rounded-full bg-primary/10 text-primary px-2.5 py-0.5 text-[10px] font-black uppercase tracking-widest border border-primary/20">
+    <span className="inline-block max-w-full truncate rounded-full bg-primary/10 text-primary px-2.5 py-0.5 text-xs font-semibold border border-primary/20">
       {tag}
     </span>
   );
+}
+
+// Most covers are Unsplash URLs saved at w=600; the featured card stretched
+// them to ~1150px wide and they rendered blurry. Ask Unsplash for the width we
+// actually draw. Any other host is returned untouched.
+function coverAt(url: string, width: number): string {
+  try {
+    const u = new URL(url);
+    if (u.hostname !== "images.unsplash.com") return url;
+    u.searchParams.set("w", String(width));
+    return u.toString();
+  } catch {
+    return url;
+  }
 }
 
 export default async function BlogListPage() {
@@ -60,20 +77,17 @@ export default async function BlogListPage() {
         dangerouslySetInnerHTML={{ __html: JSON.stringify(blogLd) }}
       />
 
-      {/* Header */}
-      <div className="bg-[#0d2b09] py-16 px-4 text-center">
-        <Link href="/" className="inline-flex items-center gap-2 mb-8 text-white/60 text-sm font-semibold hover:text-white transition-colors">
-          ← Back to KrishiDukan
-        </Link>
-        <h1 className="text-4xl md:text-5xl font-black text-white mb-4">
+      {/* Header — the site header above already links home, so no back link. */}
+      <div className="bg-[#0d2b09] py-10 md:py-14 px-4 text-center">
+        <h1 className="text-3xl md:text-5xl font-black text-white mb-3">
           Krishi<span className="text-[#f4a500]">Dukan</span> Blog
         </h1>
-        <p className="text-white/70 max-w-xl mx-auto text-base">
+        <p className="text-white/70 max-w-xl mx-auto text-sm md:text-base">
           Expert farming advice, agri-retail insights, and crop guides — written for Indian farmers and agricultural businesses.
         </p>
       </div>
 
-      <div className="max-w-6xl mx-auto px-4 py-12">
+      <div className="max-w-6xl mx-auto px-4 py-10 md:py-12">
         {posts.length === 0 ? (
           <div className="text-center py-20 text-on-surface-variant">
             <p className="text-xl font-bold">No posts yet</p>
@@ -81,33 +95,38 @@ export default async function BlogListPage() {
           </div>
         ) : (
           <>
-            {/* Featured post */}
+            {/* Featured (latest) post — image beside the text on desktop, so the
+                cover is never stretched into a blurry full-width banner. */}
             {featured && (
-              <Link href={`/blog/${featured.slug}`} className="block mb-12 group">
-                <div className="rounded-3xl overflow-hidden border border-surface-container bg-white shadow-ambient hover:shadow-xl transition-shadow">
-                  {featured.coverImage && (
-                    <div className="aspect-[16/6] overflow-hidden bg-surface-container-low">
+              <Link href={`/blog/${featured.slug}`} className="block mb-10 group">
+                <div className="grid md:grid-cols-2 rounded-3xl overflow-hidden border border-surface-container bg-white shadow-ambient hover:shadow-xl transition-shadow">
+                  {featured.coverImage ? (
+                    <div className="aspect-video md:aspect-auto md:min-h-[320px] overflow-hidden bg-surface-container-low">
                       <img
-                        src={featured.coverImage}
+                        src={coverAt(featured.coverImage, 1200)}
                         alt={featured.title}
+                        fetchPriority="high"
                         className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                       />
                     </div>
+                  ) : (
+                    <div className="aspect-video md:aspect-auto bg-gradient-to-br from-primary/10 to-primary/5 flex items-center justify-center">
+                      <span className="text-5xl">🌿</span>
+                    </div>
                   )}
-                  <div className="p-8">
+                  <div className="p-6 md:p-8 flex flex-col justify-center min-w-0">
                     <div className="flex items-center gap-2 mb-3 flex-wrap">
-                      <span className="text-[10px] font-black uppercase tracking-widest text-primary bg-primary/10 border border-primary/20 rounded-full px-2.5 py-0.5">
-                        Featured
+                      <span className="text-[10px] font-black uppercase tracking-widest text-white bg-primary rounded-full px-2.5 py-0.5">
+                        Latest
                       </span>
                       {(featured.tags || []).slice(0, 2).map(t => <TagChip key={t} tag={t} />)}
                     </div>
-                    <h2 className="text-2xl md:text-3xl font-black text-on-surface mb-3 group-hover:text-primary transition-colors leading-tight">
+                    <h2 className="text-2xl md:text-3xl font-black text-on-surface mb-3 group-hover:text-primary transition-colors leading-snug">
                       {featured.title}
                     </h2>
-                    <p className="text-on-surface-variant text-base mb-4 line-clamp-2">{featured.excerpt}</p>
-                    <div className="flex items-center gap-3 text-xs text-on-surface-variant font-semibold">
-                      <span>{featured.author}</span>
-                      <span>·</span>
+                    <p className="text-on-surface-variant text-base mb-4 line-clamp-3">{featured.excerpt}</p>
+                    <div className="flex items-center gap-2 text-xs text-on-surface-variant font-semibold flex-wrap">
+                      {featured.author && <><span>{featured.author}</span><span>·</span></>}
                       <span>{formatDate(featured.publishedAt)}</span>
                       {featured.readTime && <><span>·</span><span>{featured.readTime} min read</span></>}
                     </div>
@@ -120,13 +139,13 @@ export default async function BlogListPage() {
             {rest.length > 0 && (
               <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
                 {rest.map((post) => (
-                  <Link key={post.id} href={`/blog/${post.slug}`} className="group block rounded-2xl border border-surface-container bg-white shadow-ambient hover:shadow-lg transition-shadow overflow-hidden">
+                  <Link key={post.id} href={`/blog/${post.slug}`} className="group flex flex-col rounded-2xl border border-surface-container bg-white shadow-ambient hover:shadow-lg transition-shadow overflow-hidden">
                     {post.coverImage ? (
                       <div className="aspect-video overflow-hidden bg-surface-container-low">
                         <img
                           loading="lazy"
                           decoding="async"
-                          src={post.coverImage}
+                          src={coverAt(post.coverImage, 800)}
                           alt={post.title}
                           className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                         />
@@ -136,7 +155,7 @@ export default async function BlogListPage() {
                         <span className="text-4xl">🌿</span>
                       </div>
                     )}
-                    <div className="p-5">
+                    <div className="p-5 flex flex-col flex-1 min-w-0">
                       <div className="flex flex-wrap gap-1.5 mb-3">
                         {(post.tags || []).slice(0, 2).map(t => <TagChip key={t} tag={t} />)}
                       </div>
@@ -144,9 +163,9 @@ export default async function BlogListPage() {
                         {post.title}
                       </h3>
                       <p className="text-sm text-on-surface-variant line-clamp-2 mb-4">{post.excerpt}</p>
-                      <div className="flex items-center gap-2 text-[10px] text-on-surface-variant font-semibold uppercase tracking-wider">
+                      <div className="mt-auto flex items-center gap-2 text-xs text-on-surface-variant font-semibold">
                         <span>{formatDate(post.publishedAt)}</span>
-                        {post.readTime && <><span>·</span><span>{post.readTime} min</span></>}
+                        {post.readTime && <><span>·</span><span>{post.readTime} min read</span></>}
                       </div>
                     </div>
                   </Link>
@@ -156,11 +175,8 @@ export default async function BlogListPage() {
           </>
         )}
       </div>
-
-      {/* Footer */}
-      <div className="border-t border-surface-container text-center py-8 text-xs text-on-surface-variant">
-        © {new Date().getFullYear()} KrishiDukan · Connecting Indian farmers with verified retailers
-      </div>
+      {/* No footer here — app/blog/layout.tsx renders <SiteFooter />, which
+          already carries the copyright line; this page used to print it twice. */}
     </div>
   );
 }
