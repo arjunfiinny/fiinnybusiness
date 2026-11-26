@@ -264,7 +264,17 @@ service cloud.firestore {
           (resource.data.role == 'retailer'     && request.resource.data.role == 'customer') ||
           (resource.data.role == 'retailer'     && request.resource.data.role == 'consumer') ||
           (resource.data.role == 'manufacturer' && request.resource.data.role in ['customer','consumer','retailer'])
-        )
+        ) &&
+        // Self-service can never grant privileges. `role` decides isAdmin(),
+        // isTeam() and isSalesExec() here AND requireAdmin() in the web API
+        // (refunds, payouts), and `adminSections` decides teamHas(). Only the
+        // self-service roles may be set by the user; admin/team/salesExecutive
+        // and section grants come from an admin (isAdmin() above) or the
+        // server (Admin SDK). Audit 2026-10-29: any OTP user could set
+        // role:'admin' on users/{phone} or users/{uid}.
+        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['role'])
+          || request.resource.data.role in ['customer', 'consumer', 'retailer', 'manufacturer']) &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['adminSections'])
       )
         // A helper adding a product bumps the shop's product counter — nothing else.
         || (staffActsFor(phone, 'products')
