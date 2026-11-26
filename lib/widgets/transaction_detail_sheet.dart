@@ -9,25 +9,18 @@ import '../core/ads/ad_service.dart'; // AdService (init + interstitials)
 /// Bottom sheet showing unified detail for ExpenseItem or IncomeItem
 /// - Content scrolls
 /// - Safe bottom padding keeps actions clear of system UI
-/// - Interstitials are cadenced via AdService
+/// - No interstitials here: a full-screen ad on Edit/Split interrupts the task
+///   the user just asked for and leads to accidental clicks (invalid traffic).
 class TransactionDetailSheet extends StatefulWidget {
   final dynamic tx; // ex.ExpenseItem or inc.IncomeItem
   final VoidCallback? onEdit;
   final VoidCallback? onSplit;
-
-  /// If true, will occasionally show an interstitial (cadenced by AdService).
-  final bool interstitialOnOpen;
-
-  /// If true, will occasionally show an interstitial when tapping Edit/Split.
-  final bool interstitialOnAction;
 
   const TransactionDetailSheet({
     super.key,
     required this.tx,
     this.onEdit,
     this.onSplit,
-    this.interstitialOnOpen = false,
-    this.interstitialOnAction = true,
   });
 
   @override
@@ -43,22 +36,6 @@ class _TransactionDetailSheetState extends State<TransactionDetailSheet> {
     super.initState();
     // ensure the GMA SDK is ready (safe to call more than once)
     AdService.initLater();
-
-    if (widget.interstitialOnOpen) {
-      AdService.I.maybeShowInterstitial(
-        minActions: 4,
-        minGap: const Duration(minutes: 2),
-      );
-    }
-  }
-
-  Future<void> _maybeInterOnAction() async {
-    if (widget.interstitialOnAction) {
-      await AdService.I.maybeShowInterstitial(
-        minActions: 3,
-        minGap: const Duration(minutes: 2),
-      );
-    }
   }
 
   String _amountText() {
@@ -392,10 +369,7 @@ class _TransactionDetailSheetState extends State<TransactionDetailSheet> {
                 children: [
                   Expanded(
                     child: OutlinedButton.icon(
-                      onPressed: () async {
-                        await _maybeInterOnAction();
-                        widget.onEdit?.call();
-                      },
+                      onPressed: () => widget.onEdit?.call(),
                       icon: const Icon(Icons.edit),
                       label: const Text('Edit'),
                     ),
@@ -404,10 +378,7 @@ class _TransactionDetailSheetState extends State<TransactionDetailSheet> {
                   if (_isExpense && widget.onSplit != null)
                     Expanded(
                       child: OutlinedButton.icon(
-                        onPressed: () async {
-                          await _maybeInterOnAction();
-                          widget.onSplit?.call();
-                        },
+                        onPressed: () => widget.onSplit?.call(),
                         icon: const Icon(Icons.call_split),
                         label: const Text('Split'),
                       ),

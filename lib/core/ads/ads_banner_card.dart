@@ -4,10 +4,11 @@ import 'package:flutter/scheduler.dart';
 
 import 'package:provider/provider.dart';
 import '../../services/subscription_service.dart';
+import 'ad_remote_config.dart';
 import 'ad_slots.dart';
 
-/// Decorative wrapper that keeps banner ad placements visible even while
-/// an ad is loading (or disabled remotely) by showing a placeholder card.
+/// Card around an inline banner. Shows nothing at all until an ad has loaded,
+/// and nothing when ads are off (premium, remote switch, no fill).
 class AdsBannerCard extends StatefulWidget {
   /// Identifier for the placement. Used in the default placeholder copy.
   final String placement;
@@ -39,7 +40,8 @@ class AdsBannerCard extends StatefulWidget {
   /// Alignment for both placeholder and banner.
   final Alignment alignment;
 
-  /// Custom placeholder widget. Falls back to [_DefaultAdPlaceholder].
+  /// No longer shown: the card stays hidden until an ad loads. Kept so
+  /// existing call sites compile.
   final Widget? placeholder;
 
   /// Duration for fade/size transitions.
@@ -81,6 +83,22 @@ class _AdsBannerCardState extends State<AdsBannerCard> with AutomaticKeepAliveCl
   @override
   bool get wantKeepAlive => true;
 
+  @override
+  void initState() {
+    super.initState();
+    AdRemoteConfig.I.addListener(_onRemoteConfig);
+  }
+
+  @override
+  void dispose() {
+    AdRemoteConfig.I.removeListener(_onRemoteConfig);
+    super.dispose();
+  }
+
+  void _onRemoteConfig() {
+    if (mounted) setState(() {});
+  }
+
   void _handleLoad(bool loaded) {
     if (!mounted) {
       _loaded = loaded;
@@ -114,56 +132,36 @@ class _AdsBannerCardState extends State<AdsBannerCard> with AutomaticKeepAliveCl
     final isPremium = Provider.of<SubscriptionService>(context).isPremium;
     if (isPremium) return const SizedBox.shrink();
 
-    final placeholder = widget.placeholder ??
-        _DefaultAdPlaceholder(placement: widget.placement, alignment: widget.alignment);
+    // Switched off from Firestore app/ads (or a team account): no empty card.
+    if (!AdRemoteConfig.I.adsAllowed) return const SizedBox.shrink();
 
-    return AnimatedContainer(
-      duration: widget.animationDuration,
-      curve: widget.animationCurve,
-      margin: widget.margin,
-      padding: widget.padding,
-      constraints: BoxConstraints(minHeight: widget.minHeight),
-      decoration: BoxDecoration(
-        color: widget.backgroundColor,
-        borderRadius: widget.borderRadius,
-        boxShadow: widget.boxShadow,
-      ),
-      child: Stack(
+    // The card is invisible and takes no space until an ad has actually
+    // loaded, so users never see an empty card with a spinner (slow load,
+    // no fill, suspended account). The slot stays mounted offstage so the
+    // ad can still load in the background.
+    return Visibility(
+      visible: _loaded,
+      maintainState: true,
+      maintainAnimation: true,
+      maintainSize: false,
+      child: Container(
+        margin: widget.margin,
+        padding: widget.padding,
+        constraints: BoxConstraints(minHeight: widget.minHeight),
+        decoration: BoxDecoration(
+          color: widget.backgroundColor,
+          borderRadius: widget.borderRadius,
+          boxShadow: widget.boxShadow,
+        ),
         alignment: widget.alignment,
-        children: [
-          AnimatedOpacity(
-            duration: widget.animationDuration,
-            curve: widget.animationCurve,
-            opacity: _loaded ? 0 : 1,
-            child: Align(alignment: widget.alignment, child: placeholder),
-          ),
-          AdsBannerSlot(
-            key: ValueKey('ads-banner-${widget.placement}'),
-            inline: widget.inline,
-            inlineMaxHeight: widget.inlineMaxHeight,
-            padding: EdgeInsets.zero,
-            alignment: widget.alignment,
-            onLoadChanged: _handleLoad,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _DefaultAdPlaceholder extends StatelessWidget {
-  final String placement;
-  final Alignment alignment;
-
-  const _DefaultAdPlaceholder({required this.placement, required this.alignment});
-
-  @override
-  Widget build(BuildContext context) {
-    return const SizedBox(
-      height: 24,
-      width: 24,
-      child: Center(
-        child: CircularProgressIndicator(strokeWidth: 2),
+        child: AdsBannerSlot(
+          key: ValueKey('ads-banner-${widget.placement}'),
+          inline: widget.inline,
+          inlineMaxHeight: widget.inlineMaxHeight,
+          padding: EdgeInsets.zero,
+          alignment: widget.alignment,
+          onLoadChanged: _handleLoad,
+        ),
       ),
     );
   }

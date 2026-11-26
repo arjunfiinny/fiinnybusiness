@@ -177,15 +177,39 @@ class SubscriptionItem {
     // Unify paused state
     final effectiveStatus = legacyPaused ? 'paused' : rawStatus;
 
+    // Docs auto-created/updated by RecurringEngine (from parsed SMS/Gmail)
+    // historically used brand / expectedAmount / nextDue / recurrence /
+    // lastPaidAt instead of this model's fields, so they showed up blank, ₹0
+    // and with a due date that never moved. Read both.
+    String prettyBrand(dynamic raw) {
+      final s = (raw ?? '').toString().trim();
+      if (s.isEmpty) return '';
+      return s
+          .toLowerCase()
+          .split(RegExp(r'[\s_\-]+'))
+          .where((w) => w.isNotEmpty)
+          .map((w) => w[0].toUpperCase() + w.substring(1))
+          .join(' ');
+    }
+
+    final title = (json['title'] as String? ?? '').trim();
+    final amount = (json['amount'] as num?)?.toDouble() ??
+        (json['expectedAmount'] as num?)?.toDouble() ??
+        0;
+    final nextDue = toDate(json['nextDueAt']) ?? toDate(json['nextDue']);
+
     return SubscriptionItem(
       id: id,
-      title: (json['title'] as String? ?? '').trim(),
-      amount: (json['amount'] as num?)?.toDouble() ?? 0,
+      title: title.isNotEmpty
+          ? title
+          : prettyBrand(json['provider'] ?? json['brand'] ?? json['merchant']),
+      amount: amount,
       type: (json['type'] as String? ?? 'subscription').toLowerCase(),
       frequency: (json['frequency'] as String? ??
               (json['rule'] is Map
                   ? ((json['rule'] as Map)['frequency'] as String?)
                   : null) ??
+              json['recurrence'] as String? ??
               'monthly')
           .toLowerCase(),
       currency: (json['currency'] as String?)?.toUpperCase() ?? 'INR',
@@ -196,8 +220,9 @@ class SubscriptionItem {
               ?.toInt()),
       anchorDate: toDate(json['anchorDate']) ??
           toDate((json['rule'] as Map?)?['anchorDate']) ??
+          toDate(json['lastPaidAt']) ??
           DateTime.now(),
-      nextDueAt: toDate(json['nextDueAt']),
+      nextDueAt: nextDue,
       paused: legacyPaused,
       autopay: (json['autopay'] as bool?) ?? false,
       provider: (json['provider'] as String?)?.trim(),

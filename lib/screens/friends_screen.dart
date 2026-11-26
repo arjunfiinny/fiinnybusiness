@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:lifemap/core/ads/ads_banner_card.dart';
 import 'package:lifemap/core/ads/ads_shell.dart';
@@ -236,6 +237,23 @@ class _FriendsScreenState extends State<FriendsScreen>
     _contactNames.addListener(_onContactNamesChanged);
     Future.microtask(
         () => FriendService().backfillNamesForUser(widget.userPhone));
+    Future.microtask(_repairFriendLinksOnce);
+  }
+
+  /// Re-links friendships whose reciprocal side was blocked by Firestore rules.
+  /// Runs once per phone per install (the flag is set only after it succeeds).
+  Future<void> _repairFriendLinksOnce() async {
+    final me = widget.userPhone;
+    if (me.isEmpty) return;
+    final key = 'friend_links_repair_v1_$me';
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (prefs.getBool(key) ?? false) return;
+      await FriendService().repairMutualLinks(me);
+      await prefs.setBool(key, true);
+    } catch (_) {
+      // Retry on the next open.
+    }
   }
 
   @override

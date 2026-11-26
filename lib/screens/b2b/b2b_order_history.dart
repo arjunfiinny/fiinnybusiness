@@ -180,8 +180,9 @@ class _B2BOrderHistoryScreenState extends State<B2BOrderHistoryScreen> {
                             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
                             itemCount: _filtered.length + (_filtered.length > 4 ? 1 : 0), // extra slot for mid-list ad
                             itemBuilder: (ctx, i) {
-                              // Insert ad after every 5th item
-                              if (i > 0 && i % 5 == 4) {
+                              // One ad slot after the 4th invoice (itemCount reserves exactly one).
+                              // The old `i % 5 == 4` showed an ad at 9, 14, ... and hid those invoices.
+                              if (_filtered.length > 4 && i == 4) {
                                 return const Padding(
                                   padding: EdgeInsets.symmetric(vertical: 8),
                                   child: AdsBannerCard(

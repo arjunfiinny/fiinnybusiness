@@ -84,21 +84,31 @@ export async function notify(
   }
 
   try {
-    let token: string | null = null;
+    // Every device the user is signed in on. This used to read one
+    // `fcmToken` from the first matching doc — a single slot each device
+    // overwrote on launch, so an iPhone stopped getting pushes the moment the
+    // same number opened the app on an Android phone (it still saw them in
+    // the in-app list, which is written above). Apps now also append to
+    // `fcmTokens`; `fcmToken` is still read for builds that only write it.
+    const owners = new Map<string, admin.firestore.DocumentReference[]>();
     for (const variant of phoneVariants(phone)) {
-      const snap = await db().collection("users").doc(variant).get();
-      const t = snap.exists
-        ? (snap.data()?.fcmToken as string | undefined)
-        : undefined;
-      if (t) {
-        token = t;
-        break;
+      const ref = db().collection("users").doc(variant);
+      const snap = await ref.get();
+      if (!snap.exists) continue;
+      const d = snap.data() ?? {};
+      const list = Array.isArray(d.fcmTokens) ? d.fcmTokens : [];
+      for (const t of [d.fcmToken, ...list]) {
+        if (typeof t !== "string" || !t) continue;
+        const refs = owners.get(t) ?? [];
+        if (!refs.includes(ref)) refs.push(ref);
+        owners.set(t, refs);
       }
     }
-    if (!token) return;
+    const tokens = Array.from(owners.keys());
+    if (tokens.length === 0) return;
 
-    await admin.messaging().send({
-      token,
+    const res = await admin.messaging().sendEachForMulticast({
+      tokens,
       notification: { title, body },
       data: { type, ...data },
       android: { priority: "high" },
@@ -109,6 +119,34 @@ export async function notify(
         payload: { aps: { sound: "default" } },
       },
     });
+
+    // Drop tokens of uninstalled apps so the list doesn't grow forever. Any
+    // other error (e.g. messaging/third-party-auth-error = the APNs key in
+    // Firebase is missing or wrong for the iOS app) is logged, not pruned.
+    const dead = new Set([
+      "messaging/registration-token-not-registered",
+      "messaging/invalid-registration-token",
+    ]);
+    await Promise.all(
+      res.responses.map(async (r, i) => {
+        if (r.success) return;
+        const token = tokens[i];
+        const code = r.error?.code ?? "";
+        if (!dead.has(code)) {
+          console.error(`[notify] push failed for ${phone}:`, r.error);
+          return;
+        }
+        for (const ref of owners.get(token) ?? []) {
+          const snap = await ref.get();
+          await ref.update({
+            fcmTokens: admin.firestore.FieldValue.arrayRemove(token),
+            ...(snap.data()?.fcmToken === token
+              ? { fcmToken: admin.firestore.FieldValue.delete() }
+              : {}),
+          });
+        }
+      })
+    );
   } catch (err) {
     console.error(`[notify] push failed for ${phone}:`, err);
   }

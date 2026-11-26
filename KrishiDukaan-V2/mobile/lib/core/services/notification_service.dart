@@ -124,6 +124,12 @@ class NotificationService {
 
   bool _initialized = false;
 
+  // The signed-in account this device's token belongs to, and that token.
+  // Tracked so a logout/login on the same phone moves the token to the new
+  // account — setup below runs only once per app process.
+  String? _userPhone;
+  String? _token;
+
   // A tap that LAUNCHED the app (getInitialMessage) arrives while the splash
   // screen is still up — and splash then calls `context.go('/')`, which
   // replaces the whole stack and silently threw the pushed screen away. That
@@ -142,8 +148,17 @@ class NotificationService {
   }
 
   Future<void> initialize(String userPhone, {GoRouter? router}) async {
-    if (_initialized) return;
+    if (_initialized) {
+      // Another account signed in on this device: register it here too.
+      if (userPhone != _userPhone) {
+        _userPhone = userPhone;
+        final token = _token;
+        if (token != null) await _saveToken(userPhone, token);
+      }
+      return;
+    }
     _initialized = true;
+    _userPhone = userPhone;
 
     // Permission request (Android 13+, iOS) — user may deny or block; non-fatal
     try {
@@ -232,7 +247,10 @@ class NotificationService {
     // Refresh listener FIRST: on iOS the FCM token only exists once Apple has
     // issued the APNs token, which can land a few seconds after launch; it
     // then arrives through onTokenRefresh even if getToken() below is early.
-    _fcm.onTokenRefresh.listen((t) => _saveToken(userPhone, t));
+    _fcm.onTokenRefresh.listen((t) {
+      final phone = _userPhone;
+      if (phone != null) _saveToken(phone, t);
+    });
     try {
       if (_isIOS) {
         // getToken() throws "apns-token-not-set" until APNs responds. Wait up
@@ -282,14 +300,39 @@ class NotificationService {
     );
   }
 
+  /// Stops this device receiving the signed-in account's pushes. Call BEFORE
+  /// FirebaseAuth.signOut() — the user doc is only writable while signed in.
+  Future<void> unregisterDevice() async {
+    final phone = _userPhone;
+    final token = _token;
+    _userPhone = null;
+    if (phone == null || phone.isEmpty || token == null) return;
+    try {
+      final ref = FirebaseFirestore.instance.collection('users').doc(phone);
+      final snap = await ref.get();
+      await ref.update({
+        'fcmTokens': FieldValue.arrayRemove([token]),
+        if (snap.data()?['fcmToken'] == token)
+          'fcmToken': FieldValue.delete(),
+      });
+    } catch (e) {
+      debugPrint('[NotificationService] token not removed on logout: $e');
+    }
+  }
+
   Future<void> _saveToken(String userPhone, String token) async {
+    _token = token;
     if (userPhone.isEmpty) return;
     try {
+      // `fcmTokens` holds every device the user is signed in on, so a phone
+      // and an iPhone on the same number both get pushes. `fcmToken` (one
+      // slot, last device wins) is kept for servers that only read it.
       await FirebaseFirestore.instance
           .collection('users')
           .doc(userPhone)
           .update({
         'fcmToken': token,
+        'fcmTokens': FieldValue.arrayUnion([token]),
         'fcmUpdatedAt': FieldValue.serverTimestamp(),
       });
     } catch (_) {

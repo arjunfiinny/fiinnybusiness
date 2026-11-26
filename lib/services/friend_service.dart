@@ -333,6 +333,69 @@ class FriendService {
     await batch.commit();
   }
 
+  /// One-time repair for friendships added while Firestore rules blocked the
+  /// cross-user writes (Jan-Nov 2026): the friend was saved in MY list only,
+  /// with no global pair and no reciprocal entry in THEIR list, so they never
+  /// saw me and re-adding failed with "already exists".
+  ///
+  /// For each friend in my list who has an account: create the pair and, if
+  /// missing, my entry in their list. Never overwrites a name they set.
+  /// One failing friend doesn't stop the rest, but if any failed (e.g. the new
+  /// rules aren't deployed yet) it throws at the end so the caller retries later.
+  /// Returns the number of friendships repaired.
+  Future<int> repairMutualLinks(String myPhone) async {
+    if (myPhone.isEmpty || !myPhone.startsWith('+')) return 0;
+    var repaired = 0;
+    var failed = 0;
+    final friends = await getFriendsCollection(myPhone).get();
+    if (friends.docs.isEmpty) return 0;
+    final myName = await _userProfileName(myPhone);
+
+    for (final f in friends.docs) {
+      final friendPhone = f.id.trim();
+      if (friendPhone.isEmpty ||
+          friendPhone == myPhone ||
+          !friendPhone.startsWith('+')) {
+        continue;
+      }
+      try {
+        final pairRef = _pairs.doc(_pairId(myPhone, friendPhone));
+        if ((await pairRef.get()).exists) continue;
+        if (!await _userExists(friendPhone)) continue; // claimed at their signup
+
+        final theirEntry = getFriendsCollection(friendPhone).doc(myPhone);
+        final hasEntry = (await theirEntry.get()).exists;
+
+        final batch = _firestore.batch();
+        batch.set(
+            pairRef,
+            {
+              'a': myPhone,
+              'b': friendPhone,
+              'createdAt': FieldValue.serverTimestamp(),
+            },
+            SetOptions(merge: true));
+        if (!hasEntry) {
+          batch.set(theirEntry, {
+            'phone': myPhone,
+            'name': myName,
+            'avatar': '👤',
+            'source': 'repair',
+            'createdAt': FieldValue.serverTimestamp(),
+          });
+        }
+        await batch.commit();
+        repaired++;
+      } catch (_) {
+        failed++; // rules not deployed yet / offline
+      }
+    }
+    if (failed > 0) {
+      throw StateError('repairMutualLinks: $failed of ${friends.docs.length} failed');
+    }
+    return repaired;
+  }
+
   Future<void> backfillNamesForUser(String userPhone) async {
     final snapshot = await getFriendsCollection(userPhone).get();
     for (final doc in snapshot.docs) {

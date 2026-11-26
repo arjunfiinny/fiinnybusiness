@@ -26,6 +26,7 @@ import './ingest/entity_resolution_service.dart';
 import './ingest_filters.dart' as filt; // ✅ stronger filtering helpers
 import 'parsers/gmail_parser_logic.dart';
 import 'parsers/gmail_dtos.dart';
+import 'recurring/recurring_engine.dart';
 
 // Merge policy: OFF (for testing), ENRICH (recommended), SILENT (current behavior)
 enum ReconcilePolicy { off, mergeEnrich, mergeSilent }
@@ -974,6 +975,14 @@ class GmailService {
         'categoryConfidence': enriched.confidence,
         'sourceRecord': sourceMeta,
       }, SetOptions(merge: true));
+
+      // Subscriptions + card trackers, same hooks the SMS path runs. Gmail
+      // never called these, so Gmail-only users (all of iOS) never saw their
+      // subscriptions roll forward.
+      try {
+        await RecurringEngine.maybeAttachToSubscription(userId, expRef.id);
+        await RecurringEngine.markPaidIfInWindow(userId, expRef.id);
+      } catch (_) {}
 
       // Loan check for single transaction
       if (finalCategory == 'Payments' &&

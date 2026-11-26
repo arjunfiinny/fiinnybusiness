@@ -32,6 +32,11 @@ class CreditCardService {
     final q = await _cardsCol(userId).orderBy('bankName').get();
     return q.docs
         .map((d) => CreditCardModel.fromJson({'id': d.id, ...d.data()}))
+        // Placeholder cards that Gmail parsing used to create when it couldn't
+        // read the bank or card digits ("UNKNOWN ••XXXX"). No longer created;
+        // hide the ones already stored.
+        .where((c) => !(c.bankName.toUpperCase() == 'UNKNOWN' &&
+            c.last4Digits.toUpperCase() == 'XXXX'))
         .toList();
   }
 

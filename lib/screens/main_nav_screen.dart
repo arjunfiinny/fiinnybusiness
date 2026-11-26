@@ -6,6 +6,7 @@ import 'expenses_screen.dart';
 import 'friends_screen.dart';
 import 'package:lifemap/sharing/screens/sharing_screen.dart';
 import 'package:lifemap/services/user_service.dart';
+import 'package:lifemap/services/push/push_service.dart';
 
 class MainNavScreen extends StatefulWidget {
   final String userPhone;
@@ -35,6 +36,11 @@ class _MainNavScreenState extends State<MainNavScreen>
   @override
   void initState() {
     super.initState();
+    // Push: ask permission + save this device's token now that the user is
+    // signed in and onboarded. After the first frame so the prompt doesn't
+    // interrupt the screen mounting.
+    WidgetsBinding.instance.addPostFrameCallback(
+        (_) => unawaited(PushService.registerSignedInUser()));
     _iconData = const [
       Icons.dashboard_rounded,
       Icons.list_alt_rounded,

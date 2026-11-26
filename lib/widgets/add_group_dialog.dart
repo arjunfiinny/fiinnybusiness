@@ -9,7 +9,6 @@ import 'package:image_picker/image_picker.dart';
 import '../utils/firebase_error_mapper.dart';
 import '../utils/permissions_helper.dart';
 import '../utils/phone_number_utils.dart';
-import 'ads/sleek_ad_card.dart';
 import 'add_friend_dialog.dart';
 
 import '../services/group_service.dart';
@@ -832,11 +831,6 @@ class _AddGroupDialogState extends State<AddGroupDialog> {
                     ],
 
                     const SizedBox(height: 14),
-
-                    const SleekAdCard(
-                      margin: EdgeInsets.only(top: 6),
-                      radius: 12,
-                    ),
 
                     // Actions
                     Row(

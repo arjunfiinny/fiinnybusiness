@@ -7,7 +7,6 @@ import 'package:lifemap/ui/theme/small_typography_overlay.dart';
 import '../../models/friend_model.dart';
 import '../../models/group_model.dart';
 import '../../services/contact_name_service.dart';
-import '../ads/sleek_ad_card.dart';
 
 enum QuickCreateSegment { friends, groups, newEntry }
 
@@ -214,11 +213,6 @@ class _QuickCreatePickSheetState extends State<_QuickCreatePickSheet> {
                       )
                     else
                       _buildContent(isWide: false),
-                    const SizedBox(height: 12),
-                    const SleekAdCard(
-                      margin: EdgeInsets.only(top: 4),
-                      radius: 16,
-                    ),
                   ],
                 ),
               ),

@@ -11,6 +11,7 @@ import 'package:flutter/foundation.dart'
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import '../../services/ad_config.dart';
 import 'ad_ids.dart';
+import 'ad_remote_config.dart';
 
 /// Default to false. Enable special diagnostics explicitly with
 /// --dart-define=DIAG_BUILD=true (does not skip iOS init).
@@ -48,7 +49,43 @@ class AdService {
   bool _adsEnabled = false;
   Future<void>? _inFlightInit;
 
-  bool get isEnabled => _adsEnabled;
+  /// SDK initialised AND ads allowed right now by the remote `app/ads` doc
+  /// (master switch, team accounts in `noAdsUsers`).
+  bool get isEnabled => _adsEnabled && AdRemoteConfig.I.adsAllowed;
+
+  bool _remoteListenerAttached = false;
+
+  void _attachRemoteListener() {
+    if (_remoteListenerAttached) return;
+    _remoteListenerAttached = true;
+    AdRemoteConfig.I.addListener(_onRemoteConfigChanged);
+  }
+
+  void _onRemoteConfigChanged() {
+    if (!_adsEnabled) return;
+    unawaited(_applyRequestConfiguration());
+    if (!AdRemoteConfig.I.interstitialsAllowed) {
+      _inter?.dispose();
+      _inter = null;
+    }
+    if (!AdRemoteConfig.I.rewardedAllowed) {
+      _rewarded?.dispose();
+      _rewarded = null;
+    } else {
+      preloadRewarded();
+    }
+  }
+
+  Future<void> _applyRequestConfiguration() {
+    return MobileAds.instance.updateRequestConfiguration(
+      RequestConfiguration(
+        // Team phones listed in Firestore app/ads.testDeviceIds get test ads,
+        // so their own views/taps never count against the AdMob account.
+        testDeviceIds: AdRemoteConfig.I.testDeviceIds,
+        maxAdContentRating: MaxAdContentRating.pg,
+      ),
+    );
+  }
 
   Future<void> init() {
     if (_adsEnabled) {
@@ -117,6 +154,16 @@ class AdService {
       _ready = false;
       return;
     }
+    _attachRemoteListener();
+    await AdRemoteConfig.I.ensureLoaded();
+    if (!AdRemoteConfig.I.adsAllowed) {
+      // Switched off remotely (or this is a team account): make no ad requests.
+      // A later banner load calls initLater() again, so turning the switch
+      // back on resumes ads without a restart.
+      _adsEnabled = false;
+      _ready = false;
+      return;
+    }
     try {
       // --- Google UMP Consent Flow ---
       final consentManager = ConsentInformation.instance;
@@ -146,18 +193,12 @@ class AdService {
               return true;
             }());
             
-            // Optimization for Android 13+ / iOS 14+
-            await MobileAds.instance.updateRequestConfiguration(
-              RequestConfiguration(
-                testDeviceIds: <String>[],
-                // Ensure we don't accidentally restrict ads if consent was granted
-                maxAdContentRating: MaxAdContentRating.pg, 
-              ),
-            );
-            
+            await _applyRequestConfiguration();
+
             _adsEnabled = true;
             _ready = true;
-            preloadInterstitial();
+            // Interstitials are loaded lazily by maybeShowInterstitial(); no
+            // screen shows one at the moment, so don't request them up front.
             preloadRewarded();
           } else {
             debugPrint('[AdService] UMP Consent state does not allow ad requests yet.');
@@ -222,7 +263,7 @@ class AdService {
 
   // ---------- Preload ----------
   void preloadInterstitial() {
-    if (!_adsEnabled || _inter != null) {
+    if (!isEnabled || !AdRemoteConfig.I.interstitialsAllowed || _inter != null) {
       return;
     }
     final unitId = AdIds.interstitial;
@@ -252,7 +293,7 @@ class AdService {
   }
 
   void preloadRewarded() {
-    if (!_adsEnabled || _rewarded != null) {
+    if (!isEnabled || !AdRemoteConfig.I.rewardedAllowed || _rewarded != null) {
       return;
     }
     final unitId = AdIds.rewarded;
@@ -282,11 +323,14 @@ class AdService {
   }
 
   // ---------- Interstitial logic ----------
+  /// Shows an interstitial at a natural break, frequency-capped.
+  /// Only call this AFTER a task finishes (e.g. a save completed) — never on
+  /// a button tap that should do something else, and never as a reward.
   Future<void> maybeShowInterstitial({
     int minActions = 6,
-    Duration minGap = const Duration(minutes: 2),
+    Duration minGap = const Duration(minutes: 3),
   }) async {
-    if (!_adsEnabled) {
+    if (!isEnabled || !AdRemoteConfig.I.interstitialsAllowed) {
       return;
     }
     _actionsSinceInter++;
@@ -297,6 +341,7 @@ class AdService {
         _inter != null;
 
     if (!allowed) {
+      preloadInterstitial();
       return;
     }
 
@@ -307,38 +352,17 @@ class AdService {
     _actionsSinceInter = 0;
   }
 
-  /// Forces an interstitial to show if loaded, bypassing frequency caps.
-  /// Returns [true] if shown, [false] if not ready/enabled.
-  Future<bool> showInterstitialForce() async {
-    if (!_adsEnabled) {
-      return false;
-    }
-    final ad = _inter;
-    if (ad == null) {
-      preloadInterstitial();
-      return false;
-    }
-    _inter = null;
-    // We wrap show in a completer or just await it.
-    // The Google Mobile Ads SDK `show()` returns Future<void>.
-    // It doesn't tell us when it's closed easily here without the full screen content callback logic,
-    // BUT the callback handled in preloadInterstitial is what reloads the ad.
-    // For blocking flow (await until closed), the SDK's show() DOES NOT wait for close. It just shows.
-    // However, usually we want to wait for user to close it.
-    // The SDK doc says: "The Future completes when the ad is shown."
-    // So we can't await dismissal here easily without more complex logic.
-    // user said: "watch add for that ... 5 second". Interstitials are appropriate.
-    // We will return true immediately and let the ad overlay.
-    await ad.show();
-    _lastInterShown = DateTime.now();
-    _actionsSinceInter = 0;
-    return true;
-  }
-
   // ---------- Rewarded logic ----------
+  /// A rewarded ad is loaded and allowed — offer it to the user (opt-in).
+  bool get isRewardedReady =>
+      isEnabled && AdRemoteConfig.I.rewardedAllowed && _rewarded != null;
+
+  /// Shows the loaded rewarded ad and completes when the user CLOSES it,
+  /// with true only if they earned the reward. (The SDK's show() resolves as
+  /// soon as the ad appears, so awaiting it alone always reported false.)
   Future<bool> showRewarded(
       {required void Function(int, String) onReward}) async {
-    if (!_adsEnabled) {
+    if (!isEnabled || !AdRemoteConfig.I.rewardedAllowed) {
       return false;
     }
     final ad = _rewarded;
@@ -347,11 +371,31 @@ class AdService {
       return false;
     }
     _rewarded = null;
-    bool granted = false;
-    await ad.show(onUserEarnedReward: (ad, rewardItem) {
-      granted = true;
-      onReward(rewardItem.amount.toInt(), rewardItem.type);
-    });
-    return granted;
+    var granted = false;
+    final closed = Completer<bool>();
+    ad.fullScreenContentCallback = FullScreenContentCallback(
+      onAdDismissedFullScreenContent: (ad) {
+        ad.dispose();
+        preloadRewarded();
+        if (!closed.isCompleted) closed.complete(granted);
+      },
+      onAdFailedToShowFullScreenContent: (ad, err) {
+        ad.dispose();
+        preloadRewarded();
+        if (!closed.isCompleted) closed.complete(false);
+      },
+    );
+    try {
+      await ad.show(onUserEarnedReward: (ad, rewardItem) {
+        granted = true;
+        onReward(rewardItem.amount.toInt(), rewardItem.type);
+      });
+    } catch (err) {
+      debugPrint('[AdService] showRewarded failed: $err');
+      ad.dispose();
+      preloadRewarded();
+      return false;
+    }
+    return closed.future;
   }
 }

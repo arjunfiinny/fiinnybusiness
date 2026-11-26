@@ -29,37 +29,52 @@ export const onFriendExpenseMirrored = onDocumentCreated(
         const data = snap.data();
 
         // Only trigger if this expense was Mirrored (created by someone else)
-        if (!data.mirroredFrom) return;
+        const fromPhone = typeof data.mirroredFrom === "string" ? data.mirroredFrom.trim() : "";
+        if (!fromPhone || fromPhone === friendPhone) return;
 
-        const createdBy = data.createdBy; // The friend who added the expense
-        const amount = data.amount;
-        const note = data.note || "Shared Expense";
-
-        // Get Friend's Token
+        // Recipient: token lives on users/{phone} (the app saves it there).
         const friendDoc = await db.collection("users").doc(friendPhone).get();
         const token = friendDoc.data()?.fcmToken;
-
         if (!token) return;
+
+        // Respect the recipient's notification settings.
+        const prefsDoc = await db.doc(`users/${friendPhone}/prefs/notifications`).get();
+        if (prefsDoc.exists && prefsDoc.get("push_enabled") === false) return;
+
+        // Sender's display name (previously used `createdBy`, which the app
+        // never sets, so the title read "New Expense from undefined").
+        const fromDoc = await db.collection("users").doc(fromPhone).get();
+        const fromName = String(fromDoc.get("name") || "").trim() || "A friend";
+
+        const amountNum = Math.round(Number(data.amount || 0));
+        const amount = `₹${amountNum.toLocaleString("en-IN")}`;
+        const label = String(data.title || data.label || data.note || "").trim();
+        const isSettlement = String(data.type || "").toLowerCase() === "settlement";
+
+        const title = isSettlement
+            ? `${fromName} recorded a settlement`
+            : `${fromName} added a shared expense`;
+        const body = isSettlement
+            ? `${amount} settled with you. Tap to see your balance.`
+            : `${label ? `"${label}" · ` : ""}${amount}. Tap to see what you owe.`;
 
         try {
             await fcm.send({
                 token: token,
-                notification: {
-                    title: `New Expense from ${createdBy}`,
-                    body: `You owe ₹${amount} for "${note}".`,
-                },
+                notification: { title, body },
                 android: {
+                    priority: "high",
                     notification: {
-                        channelId: "fiinny_social",
+                        // Must be a channel the app creates (fiinny_social never existed).
+                        channelId: "fiinny_default",
                         tag: `friend_expense_${event.params.expenseId}`,
-                        clickAction: "FLUTTER_NOTIFICATION_CLICK"
-                    }
+                    },
                 },
                 data: {
-                    type: "friend_expense",
+                    type: isSettlement ? "friend_settlement" : "friend_expense",
                     expenseId: event.params.expenseId,
-                    deeplink: "app://friends", // Open Friend tab to settle
-                }
+                    deeplink: "app://friends", // Opens the Friends screen
+                },
             });
             logger.info(`Sent friend mirror notif to ${friendPhone}`);
         } catch (e) {

@@ -55,6 +55,8 @@ import 'screens/subscriptions/add_subscription_screen.dart';
 
 import 'screens/b2b/b2b_dashboard.dart'; // [NEW] Native B2B Mode
 import 'screens/b2b/pos_billing.dart';
+import 'screens/friends_screen.dart';
+import 'sharing/screens/sharing_screen.dart';
 import 'screens/b2b/inventory_screen.dart';
 import 'screens/b2b/b2b_khata_dashboard.dart';
 import 'screens/b2b/b2b_khata_detail.dart';
@@ -98,10 +100,12 @@ final Map<String, WidgetBuilder> appRoutes = {
     return GmailLinkScreen(userPhone: args);
   },
 
-  // ------- Deeplink targets (kept as safe stubs for now) -------
+  // ------- Deeplink targets (push notification taps) -------
+  // These used to be "(stub)" placeholder pages, so tapping a friend or
+  // partner notification led nowhere.
   '/partner-dashboard': (_) =>
-      const _SimpleStubScreen(title: 'Partner Dashboard'),
-  '/friends': (_) => const _SimpleStubScreen(title: 'Friends & Settle Up'),
+      SharingScreen(currentUserPhone: _signedInPhone()),
+  '/friends': (_) => FriendsScreen(userPhone: _signedInPhone()),
   '/budget': (ctx) {
     final phone = ModalRoute.of(ctx)?.settings.arguments as String? ?? '';
     return BudgetingScreen(userId: phone);
@@ -623,21 +627,10 @@ class _BadRouteArgsScreen extends StatelessWidget {
   }
 }
 
-class _SimpleStubScreen extends StatelessWidget {
-  final String title;
-  const _SimpleStubScreen({required this.title});
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: Text(title)),
-      body: Center(
-        child: Text(
-          '$title (stub)\nReplace this route with your real screen anytime.',
-          textAlign: TextAlign.center,
-          style: Theme.of(context).textTheme.bodyMedium,
-        ),
-      ),
-    );
-  }
+/// Phone the app keys user data by (falls back to uid, as onGenerateRoute does).
+String _signedInPhone() {
+  final u = FirebaseAuth.instance.currentUser;
+  final phone = u?.phoneNumber ?? '';
+  return phone.isNotEmpty ? phone : (u?.uid ?? '');
 }
+

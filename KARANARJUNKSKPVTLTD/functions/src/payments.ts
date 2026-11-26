@@ -3,6 +3,7 @@
 // invoke these via the Firebase Hosting service agent (no `allUsers`) so the browser
 // reaches them same-origin at /api/saas/* without hitting Google's IAM invoker 403.
 import { onRequest } from 'firebase-functions/v2/https';
+import { defineSecret } from 'firebase-functions/params';
 import * as logger from 'firebase-functions/logger';
 import * as admin from 'firebase-admin';
 // Use the modular FieldValue/Timestamp. The Functions emulator wraps the Admin
@@ -31,15 +32,22 @@ const ALLOWED_ORIGINS = [
 const cors = corsLib({ origin: ALLOWED_ORIGINS, methods: ['POST', 'OPTIONS'] });
 
 // ─── Credentials (lazy) ────────────────────────────────────────────────────────
-// Resolved inside each handler — never at module load — so the deploy-time local
-// analysis step (which runs without env vars) doesn't crash on startup.
+// Razorpay keys live in Secret Manager (`firebase functions:secrets:set
+// RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` on karanarjun-pvt-ltd) — the same
+// Razorpay account KrishiDukan uses. They are never in code or .env files.
+// Read inside each handler, never at module load, so the deploy-time analysis
+// step (which has no secret values) does not crash.
+const RAZORPAY_KEY_ID = defineSecret('RAZORPAY_KEY_ID');
+const RAZORPAY_KEY_SECRET = defineSecret('RAZORPAY_KEY_SECRET');
+const FN_OPTS = { region: 'asia-south1', secrets: [RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET] };
+
 function getKeyId(): string {
-  const v = process.env.RAZORPAY_KEY_ID;
+  const v = RAZORPAY_KEY_ID.value() || process.env.RAZORPAY_KEY_ID;
   if (!v) throw httpError(500, 'Payment gateway not configured (RAZORPAY_KEY_ID missing)');
   return v;
 }
 function getKeySecret(): string {
-  const v = process.env.RAZORPAY_KEY_SECRET;
+  const v = RAZORPAY_KEY_SECRET.value() || process.env.RAZORPAY_KEY_SECRET;
   if (!v) throw httpError(500, 'Payment gateway not configured (RAZORPAY_KEY_SECRET missing)');
   return v;
 }
@@ -252,7 +260,7 @@ function withCors(
 }
 
 // ─── getSaaSSubscription ──────────────────────────────────────────────────────
-export const getSaaSSubscription = onRequest({ region: 'asia-south1' }, withCors(async (req, res) => {
+export const getSaaSSubscription = onRequest(FN_OPTS, withCors(async (req, res) => {
     if (req.method !== 'POST') { res.status(405).json({ error: 'Method not allowed' }); return; }
     const decoded = await authenticate(req);
     const { tenantId } = req.body as { tenantId?: string };
@@ -273,7 +281,7 @@ export const getSaaSSubscription = onRequest({ region: 'asia-south1' }, withCors
 // ─── createSaaSOrder ──────────────────────────────────────────────────────────
 // Creates a Razorpay order. Returns order_id + the PUBLIC key_id only.
 // The secret key never leaves this function.
-export const createSaaSOrder = onRequest({ region: 'asia-south1' }, withCors(async (req, res) => {
+export const createSaaSOrder = onRequest(FN_OPTS, withCors(async (req, res) => {
     if (req.method !== 'POST') { res.status(405).json({ error: 'Method not allowed' }); return; }
     const decoded = await authenticate(req);
 
@@ -321,7 +329,7 @@ export const createSaaSOrder = onRequest({ region: 'asia-south1' }, withCors(asy
 // ─── verifySaaSPayment ────────────────────────────────────────────────────────
 // Validates the Razorpay signature server-side (HMAC-SHA256), then writes the
 // subscription to Firestore. The client never writes subscription data.
-export const verifySaaSPayment = onRequest({ region: 'asia-south1' }, withCors(async (req, res) => {
+export const verifySaaSPayment = onRequest(FN_OPTS, withCors(async (req, res) => {
     if (req.method !== 'POST') { res.status(405).json({ error: 'Method not allowed' }); return; }
     const decoded = await authenticate(req);
 

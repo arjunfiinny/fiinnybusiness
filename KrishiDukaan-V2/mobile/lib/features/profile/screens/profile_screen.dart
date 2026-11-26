@@ -10,6 +10,7 @@ import '../../../core/providers/locale_provider.dart';
 import '../../../core/models/staff_session.dart';
 import '../../../core/models/user_model.dart';
 import '../../../core/providers/user_provider.dart';
+import '../../../core/services/notification_service.dart';
 import '../../../core/widgets/app_brand_icon.dart';
 import '../../../core/widgets/app_top_bar.dart';
 import '../../dashboard/providers/dashboard_provider.dart';
@@ -466,6 +467,7 @@ class _ProfileBody extends ConsumerWidget {
         // Logout
         OutlinedButton.icon(
           onPressed: () async {
+            await NotificationService().unregisterDevice();
             await FirebaseAuth.instance.signOut();
             if (context.mounted) context.go('/');
           },

@@ -1080,11 +1080,16 @@ class SmsIngestor {
       if (instrument == 'Credit Card' ||
           network != null ||
           _isCreditCard(body)) {
-        _accountState.updateCreditCardState(
+        try {
+          await EntityResolutionService().resolveCreditCard(
             userId: userPhone,
             bankName: bank ?? 'UNKNOWN',
-            last4: last4 ?? 'XXXX',
-            currentOutstanding: outst);
+            last4: last4 ?? '',
+            currentBalance: outst,
+          );
+        } catch (e) {
+          _log('[EntityResolution] outstanding update failed: $e');
+        }
       }
     }
 
@@ -1135,6 +1140,24 @@ class SmsIngestor {
             }
           }
         }, SetOptions(merge: true));
+
+        // Keep the card itself current: amount due, minimum, due date, and a
+        // new cycle clears last month's "Paid". Before, statement SMS only
+        // wrote bill_reminders, so cards showed old dues forever.
+        try {
+          await EntityResolutionService().resolveCreditCard(
+            userId: userPhone,
+            bankName: bank ?? 'UNKNOWN',
+            last4: last4 ?? '',
+            cardType: 'Credit Card',
+            totalDue: bill.totalDue ?? total,
+            minDue: bill.minDue,
+            dueDate: bill.dueDate,
+            statementDate: bill.statementEnd,
+          );
+        } catch (e) {
+          _log('[EntityResolution] statement update failed: $e');
+        }
 
         // Optional: legacy expense write (hidden from analytics) for backward-compat UI
         if (writeBillAsExpense) {
@@ -1220,6 +1243,20 @@ class SmsIngestor {
 
         // Also check for "Total Due" specific patterns if needed, but postBal usually grabs the main currency amount found.
 
+        // A credit on a credit card that reads like a bill payment (not a
+        // refund/reversal/cashback) pays down the bill.
+        double? paymentAmount;
+        if (direction == 'credit' && amountInr != null && amountInr > 0) {
+          final bl = body.toLowerCase();
+          final isPaymentCue = RegExp(
+                  r'payment|paid|received|credited towards|thank you')
+              .hasMatch(bl);
+          final isRefundCue =
+              RegExp(r'refund|reversal|reversed|cashback|chargeback')
+                  .hasMatch(bl);
+          if (isPaymentCue && !isRefundCue) paymentAmount = amountInr;
+        }
+
         try {
           await EntityResolutionService().resolveCreditCard(
             userId: userPhone,
@@ -1230,6 +1267,8 @@ class SmsIngestor {
             currentBalance: outstanding,
             totalDue: totalDue,
             dueDate: dueDate,
+            paymentAmount: paymentAmount,
+            paymentAt: ts,
           );
         } catch (e) {
           _log('[EntityResolution] Error resolving CC: $e');

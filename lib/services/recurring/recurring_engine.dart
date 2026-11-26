@@ -2,6 +2,7 @@
 import 'dart:math' as math;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import '../categorization/category_rules.dart';
 import '../expense_service.dart';
@@ -391,14 +392,24 @@ class RecurringEngine {
     final found = await subCol.where('brand', isEqualTo: brand).limit(1).get();
 
     if (found.docs.isEmpty) {
+      final firstNext = rollFrom(when, 'monthly', _monthlyDays);
       await subCol.add({
         'brand': brand,
         'slug': brand.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '-'),
         'recurrence': 'monthly',
         'expectedAmount': amount,
         'tolerancePct': 12,
-        'nextDue':
-            Timestamp.fromDate(when.add(const Duration(days: _monthlyDays))),
+        'nextDue': Timestamp.fromDate(firstNext),
+        // Fields the Subscriptions screen (SubscriptionItem) reads:
+        'provider': brand,
+        'amount': amount,
+        'type': 'subscription',
+        'frequency': 'monthly',
+        'currency': 'INR',
+        'anchorDate': Timestamp.fromDate(when),
+        'nextDueAt': Timestamp.fromDate(firstNext),
+        'status': 'active',
+        'autopay': hasAutopayCue(note),
         'lastPaidAt': Timestamp.fromDate(when),
         'active': true,
         'needsConfirmation': true,
@@ -427,13 +438,12 @@ class RecurringEngine {
 
     if (okAmt) {
       final rec = (sub['recurrence'] as String?) ?? 'monthly';
-      final next = rec == 'yearly'
-          ? when.add(const Duration(days: _yearlyDays))
-          : when.add(const Duration(days: _monthlyDays));
+      final next = rollFrom(when, rec, _periodDaysFor(sub, rec));
       await subRef.set({
         'expectedAmount': expected == 0 ? amount : expected,
         'lastPaidAt': Timestamp.fromDate(when),
         'nextDue': Timestamp.fromDate(next),
+        'nextDueAt': Timestamp.fromDate(next),
         'history': FieldValue.arrayUnion([
           {
             'expenseId': expenseId,
@@ -499,12 +509,11 @@ class RecurringEngine {
 
     if (inWindow && okAmt) {
       final rec = (sub['recurrence'] as String?) ?? 'monthly';
-      final rolled = rec == 'yearly'
-          ? nextDue.add(const Duration(days: _yearlyDays))
-          : nextDue.add(const Duration(days: _monthlyDays));
+      final rolled = rollFrom(nextDue, rec, _periodDaysFor(sub, rec));
       await subRef.set({
         'lastPaidAt': Timestamp.fromDate(when),
         'nextDue': Timestamp.fromDate(rolled),
+        'nextDueAt': Timestamp.fromDate(rolled),
         'history': FieldValue.arrayUnion([
           {
             'expenseId': expenseId,
@@ -519,11 +528,94 @@ class RecurringEngine {
     }
   }
 
+  /// Letters/digits only, upper-cased: "Netflix India" -> "NETFLIXINDIA".
+  @visibleForTesting
+  static String brandKey(dynamic raw) =>
+      (raw ?? '').toString().toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
+
+  /// Same brand if equal, or one contains the other (min 4 chars), so a
+  /// manual "Netflix" matches a parsed "NETFLIX.COM" / "NETFLIXINDIA".
+  @visibleForTesting
+  static bool sameBrand(String a, String b) {
+    if (a.isEmpty || b.isEmpty) return false;
+    if (a == b) return true;
+    if (a.length < 4 || b.length < 4) return false;
+    return a.contains(b) || b.contains(a);
+  }
+
+  static DateTime? _tsDate(dynamic v) {
+    if (v is Timestamp) return v.toDate();
+    if (v is DateTime) return v;
+    if (v is String) return DateTime.tryParse(v);
+    return null;
+  }
+
+  /// Next due after a payment on [paidAt], by calendar month/year where the
+  /// subscription is monthly/yearly (fixed day counts drifted every month).
+  @visibleForTesting
+  static DateTime rollFrom(DateTime paidAt, String recurrence, int periodDays) {
+    DateTime addMonths(int m) {
+      final y = paidAt.year + ((paidAt.month - 1 + m) ~/ 12);
+      final mo = ((paidAt.month - 1 + m) % 12) + 1;
+      final lastDay = DateTime(y, mo + 1, 0).day;
+      return DateTime(y, mo, math.min(paidAt.day, lastDay), paidAt.hour,
+          paidAt.minute);
+    }
+
+    switch (recurrence) {
+      case 'monthly':
+        return addMonths(1);
+      case 'quarterly':
+        return addMonths(3);
+      case 'yearly':
+      case 'annual':
+        return addMonths(12);
+      case 'weekly':
+        return paidAt.add(const Duration(days: 7));
+      default:
+        return paidAt.add(Duration(days: periodDays > 0 ? periodDays : _monthlyDays));
+    }
+  }
+
+  static int _periodDaysFor(Map<String, dynamic> sub, String recurrence) {
+    final explicit = (sub['periodDays'] as num?)?.toInt() ??
+        (sub['intervalDays'] as num?)?.toInt();
+    if (explicit != null && explicit > 0) return explicit;
+    switch (recurrence) {
+      case 'weekly':
+        return 7;
+      case 'quarterly':
+        return 91;
+      case 'yearly':
+      case 'annual':
+        return _yearlyDays;
+      default:
+        return _monthlyDays;
+    }
+  }
+
+  static bool _isInactive(Map<String, dynamic> sub) {
+    final status = (sub['status'] ?? '').toString().toLowerCase();
+    if (status == 'paused' || status == 'cancelled' || status == 'canceled' ||
+        status == 'ended') {
+      return true;
+    }
+    if (sub['paused'] == true) return true;
+    if (sub['active'] == false) return true;
+    return false;
+  }
+
   static Future<String?> _matchAndUpdateSubscription(
     String userId,
     String expenseId,
     Map<String, dynamic> data,
   ) async {
+    // Already linked (both hooks run for every parsed payment): never roll
+    // the due date twice for the same expense.
+    final linked = data['linkedSubscriptionId'];
+    if (linked is String && linked.isNotEmpty && linked != 'PENDING') {
+      return linked;
+    }
     final amount = (data['amount'] as num?)?.toDouble() ?? 0.0;
     if (amount <= 0) return null;
     final when = (data['date'] as Timestamp?)?.toDate() ?? DateTime.now();
@@ -551,27 +643,42 @@ class RecurringEngine {
     final db = FirebaseFirestore.instance;
     final subCol =
         db.collection('users').doc(userId).collection('subscriptions');
-    final snapshot = await subCol.where('active', isEqualTo: true).get();
+    // All subscriptions, not just `active == true`: the ones users add
+    // themselves (SubscriptionItem) never had `active`/`brand`, so payments
+    // were never matched to them and their due dates went stale.
+    final snapshot = await subCol.get();
     if (snapshot.docs.isEmpty) return null;
+
+    final candBrandKey = brandKey(candidateBrand);
+    final candKeyKey = brandKey(candidateKey);
 
     String? matchedId;
     for (final doc in snapshot.docs) {
       final sub = doc.data();
+      if (_isInactive(sub)) continue;
       final subBrand = (sub['brand'] ?? '').toString().toUpperCase();
       final subKey = (sub['merchantKey'] ?? subBrand).toString().toUpperCase();
+      final subNames = <String>{
+        brandKey(sub['brand']),
+        brandKey(sub['merchantKey']),
+        brandKey(sub['provider']),
+        brandKey(sub['title']),
+      }..remove('');
       final subInstrument = _normInstrument(sub['instrument']);
       final subLast4 = _normalizeLast4(sub['cardLast4']?.toString());
       final subNetwork =
           (sub['instrumentNetwork'] ?? '').toString().toUpperCase();
-      final expected = (sub['expectedAmount'] as num?)?.toDouble() ?? amount;
+      final expected = (sub['expectedAmount'] as num?)?.toDouble() ??
+          (sub['amount'] as num?)?.toDouble() ??
+          amount;
       final tolPct =
           ((sub['tolerancePct'] as num?)?.toDouble() ?? 15.0) / 100.0;
-      final periodDays = (sub['periodDays'] as num?)?.toInt() ?? _monthlyDays;
-      final recurrence =
-          (sub['recurrence'] as String?)?.toLowerCase() ?? 'monthly';
-      final Timestamp? nextDueTs =
-          sub['nextDue'] is Timestamp ? sub['nextDue'] as Timestamp : null;
-      final DateTime? nextDue = nextDueTs?.toDate();
+      final recurrence = ((sub['recurrence'] ?? sub['frequency']) as String?)
+              ?.toLowerCase() ??
+          'monthly';
+      final periodDays = _periodDaysFor(sub, recurrence);
+      final DateTime? nextDue =
+          _tsDate(sub['nextDueAt']) ?? _tsDate(sub['nextDue']);
 
       bool brandMatch = false;
       if (candidateBrand.isNotEmpty) {
@@ -579,6 +686,10 @@ class RecurringEngine {
       }
       if (!brandMatch && candidateKey.isNotEmpty) {
         brandMatch = candidateKey == subBrand || candidateKey == subKey;
+      }
+      if (!brandMatch) {
+        brandMatch = subNames.any(
+            (n) => sameBrand(n, candBrandKey) || sameBrand(n, candKeyKey));
       }
       if (!brandMatch) continue;
 
@@ -636,11 +747,12 @@ class RecurringEngine {
         preview.removeRange(0, preview.length - 8);
       }
 
-      final newNextDue =
-          when.add(Duration(days: periodDays > 0 ? periodDays : _monthlyDays));
+      final newNextDue = rollFrom(when, recurrence, periodDays);
       final updates = <String, dynamic>{
         'lastPaidAt': Timestamp.fromDate(when),
+        // nextDueAt is what the Subscriptions screen shows; nextDue is legacy.
         'nextDue': Timestamp.fromDate(newNextDue),
+        'nextDueAt': Timestamp.fromDate(newNextDue),
         'history': FieldValue.arrayUnion([historyEntry]),
         'historyPreview': preview,
         'expectedAmount': expected == 0 ? amount : expected,

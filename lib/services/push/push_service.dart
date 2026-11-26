@@ -126,7 +126,10 @@ class PushService {
           print('[PushService] FCM token: $token');
         }
         await _saveToken(token);
-        _messaging.onTokenRefresh.listen(_saveToken);
+        if (!_tokenRefreshHooked) {
+          _tokenRefreshHooked = true;
+          _messaging.onTokenRefresh.listen(_saveToken);
+        }
       } catch (e) {
         if (kDebugMode) {
           // ignore: avoid_print
@@ -479,18 +482,77 @@ class PushService {
     return (hours, minutes);
   }
 
+  static String? _lastToken;
+  static bool _tokenRefreshHooked = false;
+
+  /// Call once the signed-in user is past onboarding (MainNavScreen does).
+  /// Sets up channels + permission (first time), then stores this device's
+  /// FCM token on the user's profile. Safe to call repeatedly.
+  ///
+  /// Before this existed, init() only ran from the reminder / notification
+  /// settings screens, so almost no user ever had a token.
+  static Future<void> registerSignedInUser() async {
+    if (kIsWeb) return;
+    try {
+      await init();
+      if (!_lastKnownPermissionStatus) return;
+      final token = _lastToken ?? await _messaging.getToken();
+      await _saveToken(token);
+      if (!_tokenRefreshHooked) {
+        _tokenRefreshHooked = true;
+        _messaging.onTokenRefresh.listen(_saveToken);
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        // ignore: avoid_print
+        print('[PushService] registerSignedInUser failed: $e');
+      }
+    }
+  }
+
+  /// Stores the token on users/{phone} — the doc every notification function
+  /// reads (recipients are phone numbers). It used to go to users/{uid}, which
+  /// no sender looks at.
+  ///
+  /// Uses update(), never set(): creating users/{phone} here would make the
+  /// auth gate treat a not-yet-onboarded user as onboarded.
   static Future<void> _saveToken(String? token) async {
-    if (token == null) return;
-    final uid = FirebaseAuth.instance.currentUser?.uid;
-    if (uid == null) return;
-    await FirebaseFirestore.instance.collection('users').doc(uid).set({
-      'fcmToken': token,
-      'fcmTokenUpdatedAt': DateTime.now().millisecondsSinceEpoch,
-    }, SetOptions(merge: true));
+    if (token == null || token.isEmpty) return;
+    _lastToken = token;
+    final user = FirebaseAuth.instance.currentUser;
+    final phone = (user?.phoneNumber ?? '').trim();
+    if (user == null || phone.isEmpty) return;
+
+    final users = FirebaseFirestore.instance.collection('users');
+    try {
+      await users.doc(phone).update({
+        'fcmToken': token,
+        'fcmTokenUpdatedAt': DateTime.now().millisecondsSinceEpoch,
+      });
+    } catch (e) {
+      // Profile not created yet (still onboarding) — registerSignedInUser()
+      // runs again from the main screen.
+      if (kDebugMode) {
+        // ignore: avoid_print
+        print('[PushService] token not saved yet: $e');
+      }
+      return;
+    }
+
+    // Drop the copy the old code left on users/{uid} so the daily-engagement
+    // job (which scans every user doc) doesn't notify this device twice.
+    if (user.uid != phone) {
+      try {
+        await users.doc(user.uid).update({
+          'fcmToken': FieldValue.delete(),
+          'fcmTokenUpdatedAt': FieldValue.delete(),
+        });
+      } catch (_) {/* no uid doc: nothing to clean */}
+    }
 
     if (kDebugMode) {
       // ignore: avoid_print
-      print('[PushService] Saved FCM token for $uid');
+      print('[PushService] Saved FCM token for $phone');
     }
   }
 

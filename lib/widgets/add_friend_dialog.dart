@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_contacts/flutter_contacts.dart';
 
 import '../core/ads/ads_shell.dart';
-import 'ads/sleek_ad_card.dart';
 import '../services/friend_service.dart';
 import '../utils/firebase_error_mapper.dart';
 import '../utils/permissions_helper.dart';
@@ -490,11 +489,6 @@ class _AddFriendDialogState extends State<AddFriendDialog> {
                     ],
 
                     const SizedBox(height: 16),
-
-                    const SleekAdCard(
-                      margin: EdgeInsets.only(top: 6),
-                      radius: 12,
-                    ),
 
                     // Actions
                     Row(

@@ -24,6 +24,56 @@ service cloud.firestore {
         );
     }
 
+    // -- Fiinny social helpers (friends, splits, groups, sharing) --
+    // Users are keyed by verified E.164 phone (authPhone()). All cross-user
+    // writes below are limited to "your own entry in their data", and only
+    // when a relationship exists. Proven in scripts/rules-tests/fiinny-social.test.mjs.
+    function hasPhone() {
+      return authPhone() != "";
+    }
+    // Strict owner check (no resource.data.uid fallback) for nested paths.
+    function isStrictOwner(uid) {
+      return authed() && (request.auth.uid == uid || uid == authPhone());
+    }
+    // The caller has `other` in their own friend list (after this write/batch).
+    function iListFriend(other) {
+      return existsAfter(/databases/$(database)/documents/users/$(authPhone())/friends/$(other));
+    }
+    function groupMembers(gid) {
+      return get(/databases/$(database)/documents/groups/$(gid)).data.get('memberPhones', []);
+    }
+    function groupMembersAfter(gid) {
+      return getAfter(/databases/$(database)/documents/groups/$(gid)).data.get('memberPhones', []);
+    }
+    function isGroupMember(gid, phone) {
+      return gid is string && gid != ""
+        && exists(/databases/$(database)/documents/groups/$(gid))
+        && phone in groupMembers(gid);
+    }
+    // A split/group expense (never a purely personal one).
+    function isSharedExpense(d) {
+      return d.get('friendIds', []).size() > 0
+        || (d.get('groupId', null) is string && d.get('groupId', '') != '');
+    }
+    // The caller may put/remove a split copy in `owner`'s ledger when owner is
+    // in the caller's friend list, or both are members of the expense's group.
+    function canMirrorExpense(owner, d) {
+      return hasPhone() && owner != authPhone() && isSharedExpense(d)
+        && (iListFriend(owner)
+            || (isGroupMember(d.get('groupId', ''), owner)
+                && isGroupMember(d.get('groupId', ''), authPhone())));
+    }
+    // Partner sharing: users/{owner}/sharedPartners/{caller} is active and grants `key`.
+    function partnerGrants(owner, key) {
+      let link = /databases/$(database)/documents/users/$(owner)/sharedPartners/$(authPhone());
+      return hasPhone() && exists(link)
+        && get(link).data.get('status', '') == 'active'
+        && get(link).data.get('permissions', {}).get(key, false) == true;
+    }
+    function approvedReq(reqId) {
+      return getAfter(/databases/$(database)/documents/partner_requests/$(reqId)).data;
+    }
+
     // --- secure only partner_requests (unchanged) ---
     match /partner_requests/{reqId} {
       // Only the sender can create a pending request
@@ -45,6 +95,14 @@ service cloud.firestore {
                          (resource.data.fromUserPhone == authPhone()
                           && request.resource.data.status == 'cancelled')
                        );
+      // Either side may revoke an approved partnership (removePartner).
+      allow update: if authed()
+                    && resource.data.status == 'approved'
+                    && request.resource.data.status == 'revoked'
+                    && (resource.data.fromUserPhone == authPhone()
+                        || resource.data.toUserPhone == authPhone())
+                    && request.resource.data.fromUserPhone == resource.data.fromUserPhone
+                    && request.resource.data.toUserPhone == resource.data.toUserPhone;
 
       // Only participants can read
       allow get, list: if authed()
@@ -90,10 +148,25 @@ service cloud.firestore {
     // User Expenses
     match /users/{uid}/expenses/{docId} {
       allow read, write: if isUserOwner(uid);
+      // Sharing partner with the Transactions permission may read.
+      allow read: if partnerGrants(uid, 'tx');
+      // A friend / group member writes the split copy into this ledger.
+      // `mirroredFrom` names the sender in the friend's push notification,
+      // so it must be the writer's own phone (no spoofed senders).
+      allow create: if canMirrorExpense(uid, request.resource.data)
+                    && request.resource.data.get('mirroredFrom', authPhone()) == authPhone();
+      allow update: if canMirrorExpense(uid, resource.data)
+                    && canMirrorExpense(uid, request.resource.data)
+                    && request.resource.data.get('mirroredFrom', authPhone()) == authPhone();
+      allow delete: if canMirrorExpense(uid, resource.data);
+      // Deleting a split copy that was never written (blocked since Jan 2026)
+      // is a no-op; allow it so "delete everywhere" batches don't fail.
+      allow delete: if hasPhone() && uid != authPhone() && resource == null;
     }
     // User Incomes
     match /users/{uid}/incomes/{docId} {
       allow read, write: if isUserOwner(uid);
+      allow read: if partnerGrants(uid, 'tx');
     }
     // User Goals
     match /users/{uid}/goals/{docId} {
@@ -110,6 +183,40 @@ service cloud.firestore {
     // User Friends
     match /users/{uid}/friends/{docId} {
       allow read, write: if isUserOwner(uid);
+      // Your own entry in someone's friend list (the reciprocal mirror):
+      // readable/removable by you, writable while they are in YOUR list.
+      allow get, delete: if hasPhone() && docId == authPhone();
+      allow create, update: if hasPhone() && docId == authPhone() && uid != authPhone()
+                            && request.resource.data.get('phone', docId) == docId
+                            && iListFriend(uid);
+    }
+    // Groups mirrored into each member's subtree (GroupService.addGroup).
+    match /users/{uid}/groups/{gid} {
+      allow read, write: if isUserOwner(uid);
+      allow create, update: if hasPhone()
+                            && authPhone() in groupMembersAfter(gid)
+                            && uid in groupMembersAfter(gid);
+      allow delete: if hasPhone()
+                    && (authPhone() in groupMembers(gid) || authPhone() in groupMembersAfter(gid));
+    }
+    // Partner links. The other party may touch only THEIR entry in your list:
+    // accept (tied to an approved request, same permissions), reject/cancel, or remove.
+    match /users/{uid}/sharedPartners/{pid} {
+      allow read, write: if isUserOwner(uid);
+      allow delete: if hasPhone() && pid == authPhone();
+      allow create, update: if hasPhone() && pid == authPhone() && uid != authPhone()
+        && (
+          request.resource.data.get('status', '') in ['rejected', 'cancelled']
+          || (
+            request.resource.data.get('status', '') == 'active'
+            && request.resource.data.get('approvedRequestId', null) is string
+            && approvedReq(request.resource.data.approvedRequestId).status == 'approved'
+            && approvedReq(request.resource.data.approvedRequestId).fromUserPhone == uid
+            && approvedReq(request.resource.data.approvedRequestId).toUserPhone == authPhone()
+            && request.resource.data.get('permissions', {})
+                 == approvedReq(request.resource.data.approvedRequestId).get('permissions', {})
+          )
+        );
     }
     // User Credit Cards
     match /users/{uid}/credit_cards/{docId} {
@@ -130,6 +237,11 @@ service cloud.firestore {
     // Catch-all for any other user subcollections
     match /users/{uid}/{subcollection}/{docId} {
       allow read, write: if isUserOwner(uid);
+    }
+    // Deeper owner-only paths, e.g. users/{me}/friends/{f}/recurring/{id}
+    // (previously no rule matched, so even the owner was denied).
+    match /users/{uid}/{subcollection}/{docId}/{rest=**} {
+      allow read, write: if isStrictOwner(uid);
     }
     
     // ╔══════════════════════════════════════════════════════════╗
@@ -252,7 +364,46 @@ service cloud.firestore {
 
     // Groups & Shared (Authenticated users only, more complex logic can be added later)
     match /groups/{groupId} {
-      allow read, write: if authed(); 
+      allow read, write: if authed();
+
+      // groups/{id}/expenses, /recurring, ... : members only
+      match /{sub}/{docId} {
+        allow read, write: if hasPhone() && authPhone() in groupMembers(groupId);
+      }
+    }
+    // Flat copy of group expenses (ExpenseService._groupExpenses)
+    match /group_expenses/{expId} {
+      allow read, delete: if hasPhone()
+                          && isGroupMember(resource.data.get('groupId', ''), authPhone());
+      allow create, update: if hasPhone()
+                            && isGroupMember(request.resource.data.get('groupId', ''), authPhone());
+    }
+    // Friend invites, id "{inviterPhone}_{friendPhone}" (FriendService).
+    match /friend_links/{linkId} {
+      function linkParts() { return linkId.split('_'); }
+      function isLinkParty() {
+        return hasPhone() && linkParts().size() == 2
+          && (linkParts()[0] == authPhone() || linkParts()[1] == authPhone());
+      }
+      allow read: if hasPhone()
+                  && (resource.data.get('inviterPhone', '') == authPhone()
+                      || resource.data.get('friendPhone', '') == authPhone());
+      allow create, update: if isLinkParty()
+        && request.resource.data.get('inviterPhone', linkParts()[0]) == linkParts()[0]
+        && request.resource.data.get('friendPhone', linkParts()[1]) == linkParts()[1];
+      allow delete: if false;
+    }
+    // Friendship edges, id "{lowerPhone}__{higherPhone}".
+    match /friends_pairs/{pairId} {
+      function pairParts() { return pairId.split('__'); }
+      function isPairParty() {
+        return hasPhone() && pairParts().size() == 2
+          && (pairParts()[0] == authPhone() || pairParts()[1] == authPhone());
+      }
+      allow read, delete: if isPairParty();
+      allow create, update: if isPairParty()
+        && request.resource.data.get('a', '') in pairParts()
+        && request.resource.data.get('b', '') in pairParts();
     }
     match /shared_expenses/{expId} {
        allow read, write: if authed();
@@ -265,6 +416,115 @@ service cloud.firestore {
        allow read, write: if authed();
     }
     
+    // Fiinny ad controls (kill switch, team no-ads UIDs, test devices, same-account
+    // unit overrides). Read by the app before login; edited only from the
+    // Firebase console, which bypasses rules. Holds no personal data.
+    match /app/ads {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // -- Fiinny top-level collections the app uses (restored 2026-11-16) --
+    // The repo rules never listed these; the previously deployed ruleset must
+    // have allowed them. Deploying the repo rules on 2026-11-14 denied them and
+    // silently stopped SMS/Gmail transaction sync (IngestIndexService.claim()
+    // treats a denied claim as "duplicate" and skips the payment).
+    function myIds() {
+      return [authPhone(), request.auth.uid];
+    }
+    function ownsField(d, field) {
+      return authed() && d.get(field, '') in myIds();
+    }
+
+    // Transaction de-dupe keys: ingest_index/{phone}/keys/{key}
+    match /ingest_index/{phone}/{rest=**} {
+      allow read, write: if isStrictOwner(phone);
+    }
+    // Spend limits: limits/{phone}_{period}
+    match /limits/{limitId} {
+      allow read, write: if hasPhone() && limitId.split('_')[0] == authPhone();
+    }
+    // Crisis mode: survival_mode/{userId}
+    match /survival_mode/{userId} {
+      allow read, write: if isStrictOwner(userId);
+    }
+    // Shared merchant-name overrides: read-only for app users.
+    match /config/{docId}/{rest=**} {
+      allow read: if authed();
+      allow write: if false;
+    }
+    // Legacy per-user collections keyed by a userId field.
+    match /insights/{id} {
+      allow read, update, delete: if ownsField(resource.data, 'userId');
+      allow create: if ownsField(request.resource.data, 'userId');
+    }
+    match /assets/{id} {
+      allow read, update, delete: if ownsField(resource.data, 'userId');
+      allow create: if ownsField(request.resource.data, 'userId');
+    }
+    match /loans/{id} {
+      allow read, update, delete: if ownsField(resource.data, 'userId');
+      allow create: if ownsField(request.resource.data, 'userId');
+    }
+    // Legacy top-level expenses/incomes (ActivityService/BalanceService).
+    match /expenses/{id} {
+      allow read: if authed()
+        && (ownsField(resource.data, 'source')
+            || ownsField(resource.data, 'ownerUserId')
+            || authPhone() in resource.data.get('friendIds', []));
+      allow create: if ownsField(request.resource.data, 'source')
+        || ownsField(request.resource.data, 'ownerUserId');
+      allow update, delete: if ownsField(resource.data, 'source')
+        || ownsField(resource.data, 'ownerUserId');
+    }
+    match /incomes/{id} {
+      allow read: if authed()
+        && (ownsField(resource.data, 'source')
+            || ownsField(resource.data, 'ownerUserId')
+            || authPhone() in resource.data.get('friendIds', []));
+      allow create: if ownsField(request.resource.data, 'source')
+        || ownsField(request.resource.data, 'ownerUserId');
+      allow update, delete: if ownsField(resource.data, 'source')
+        || ownsField(resource.data, 'ownerUserId');
+    }
+    // Recurring items in a shared friend thread: the friend named in the path
+    // may read/write them (acceptFriendInvite + mirrorToFriend write into the
+    // other person's users/{owner}/friends/{me}/recurring).
+    match /users/{uid}/friends/{fid}/recurring/{rid} {
+      allow read, write: if hasPhone() && fid == authPhone();
+    }
+    // Website blog (website/lib/blog-service.ts): public read; writes only by
+    // the admin emails in website/lib/admin-config.ts.
+    match /posts/{postId} {
+      allow read: if true;
+      allow write: if authed()
+        && request.auth.token.email_verified == true
+        && request.auth.token.email in [
+             'founder@fiinny.com', 'admin@fiinny.com',
+             'karanarjunpvt@gmail.com', 'atanpure44542@gmail.com'];
+    }
+    // "Report this transaction" feedback: write-only.
+    match /reported_transactions/{id} {
+      allow create: if authed();
+    }
+    // Share invites addressed by an unguessable token.
+    match /invites/{token} {
+      allow read, create, update: if authed();
+    }
+    // Chat threads (same access as the existing `chats` rule).
+    match /conversations/{threadId}/{rest=**} {
+      allow read, write: if authed();
+    }
+    match /conversations/{threadId} {
+      allow read, write: if authed();
+    }
+    match /group_chats/{groupId}/{rest=**} {
+      allow read, write: if authed();
+    }
+    match /group_chats/{groupId} {
+      allow read, write: if authed();
+    }
+
     // --- Default Deny (CASA Requirement) ---
     // Block all other access by default. 
     // "Closed unless open" policy.

@@ -75,9 +75,35 @@ class EntityResolutionService {
   // 💳 Credit Cards
   // ---------------------------------------------------------------------------
 
-  /// Resolve a Credit Card from raw signals.
-  /// Returns the persistent model.
-  Future<CreditCardModel> resolveCreditCard({
+  /// Bank name reduced to its core so "HDFC Bank", "HDFCBANK" and "hdfc"
+  /// match (exact-name matching created duplicate cards that took the
+  /// updates while the user's real card went stale).
+  @visibleForTesting
+  static String bankKey(String raw) {
+    var k = raw.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
+    for (final w in const [
+      'CREDITCARDS',
+      'CREDITCARD',
+      'CARDS',
+      'CARD',
+      'BANKLTD',
+      'LIMITED',
+      'LTD',
+      'BANK',
+    ]) {
+      if (k.endsWith(w) && k.length > w.length) {
+        k = k.substring(0, k.length - w.length);
+      }
+    }
+    return k;
+  }
+
+  static bool _isRealLast4(String v) => RegExp(r'^\d{4}$').hasMatch(v.trim());
+
+  /// Resolve a Credit Card from raw signals and apply any state we caught
+  /// (limits, statement, payment). Returns null when the signal can't be
+  /// tied to one card (we no longer invent "UNKNOWN ••XXXX" cards).
+  Future<CreditCardModel?> resolveCreditCard({
     required String userId,
     required String bankName,
     required String last4,
@@ -86,42 +112,62 @@ class EntityResolutionService {
     double? availableLimit,
     double? totalLimit,
     double? totalDue,
+    double? minDue,
     DateTime? dueDate,
+    DateTime? statementDate,
     double? currentBalance, // Outstanding amount
+    double? paymentAmount, // Bill payment received on the card
+    DateTime? paymentAt,
   }) async {
-    // 1. Try to find existing
-    // CreditCardService doesn't have findAccount(bank, last4) yet,
-    // so we use the updateCardMetadataByMatch logic essentially, but we need the object.
-
-    // We'll implement a quick lookup helper here or in the service.
-    // For now, let's fetch all and filter (cached/scoped usually okay for individual users).
     final cards = await _cardService.getUserCards(userId);
-    final match = cards.cast<CreditCardModel?>().firstWhere(
-          (c) =>
-              c?.bankName.toUpperCase() == bankName.toUpperCase() &&
-              c?.last4Digits == last4,
-          orElse: () => null,
-        );
+    final bankKnown =
+        bankName.trim().isNotEmpty && bankName.toUpperCase() != 'UNKNOWN';
+    final last4Known = _isRealLast4(last4);
+    final bankK = bankKnown ? bankKey(bankName) : '';
+
+    CreditCardModel? match;
+    if (last4Known) {
+      final byLast4 =
+          cards.where((c) => c.last4Digits.trim() == last4.trim()).toList();
+      if (bankKnown) {
+        final both =
+            byLast4.where((c) => bankKey(c.bankName) == bankK).toList();
+        if (both.isNotEmpty) match = both.first;
+      }
+      // Bank name missing/spelled differently but only one card has these digits.
+      if (match == null && byLast4.length == 1) match = byLast4.first;
+    } else if (bankKnown) {
+      final byBank = cards.where((c) => bankKey(c.bankName) == bankK).toList();
+      if (byBank.length == 1) match = byBank.first;
+    }
 
     if (match != null) {
-      // 2. Update state if provided
-      // We process updates even if we just found it.
       await _updateCreditCardState(
         userId,
-        match.id,
+        match,
         availableLimit: availableLimit,
         totalLimit: totalLimit,
         totalDue: totalDue,
+        minDue: minDue,
         dueDate: dueDate,
+        statementDate: statementDate,
         currentBalance: currentBalance,
+        paymentAmount: paymentAmount,
+        paymentAt: paymentAt,
       );
-
-      // Return the potentially updated model (fetched fresh or just modified in memory)
-      // For strict correctness, we assume service update worked.
       return match;
     }
 
-    // 3. Not Found -> Create New
+    // Can't create a real card without both a bank and real last 4 digits.
+    if (!bankKnown || !last4Known) return null;
+    // A payment alone isn't enough to create a card.
+    if (paymentAmount != null &&
+        totalDue == null &&
+        availableLimit == null &&
+        totalLimit == null) {
+      return null;
+    }
+
     final id =
         '${bankName.toUpperCase().replaceAll(' ', '')}-${last4.trim()}-CC';
 
@@ -134,7 +180,8 @@ class EntityResolutionService {
       dueDate: dueDate ??
           DateTime.now().add(const Duration(days: 20)), // Placeholder
       totalDue: totalDue ?? 0.0,
-      minDue: 0.0,
+      minDue: minDue ?? 0.0,
+      statementDate: statementDate,
       creditLimit: totalLimit,
       availableCredit: availableLimit,
       currentBalance: currentBalance, // Initial outstanding
@@ -146,33 +193,74 @@ class EntityResolutionService {
     return newCard;
   }
 
-  /// Helper to push state updates to an existing card
+  /// Helper to push state updates to an existing card.
+  ///
+  /// - A statement with a later due date starts a new cycle: clears the old
+  ///   "Paid" flag (it used to stay "Paid" forever after one manual mark).
+  /// - A payment that covers the amount due marks the bill paid.
   Future<void> _updateCreditCardState(
     String userId,
-    String cardId, {
+    CreditCardModel card, {
     double? availableLimit,
     double? totalLimit,
     double? totalDue,
+    double? minDue,
     DateTime? dueDate,
+    DateTime? statementDate,
     double? currentBalance,
+    double? paymentAmount,
+    DateTime? paymentAt,
   }) async {
     if (availableLimit == null &&
         totalLimit == null &&
         totalDue == null &&
+        minDue == null &&
         dueDate == null &&
-        currentBalance == null) {
+        statementDate == null &&
+        currentBalance == null &&
+        paymentAmount == null) {
       return;
     }
+    final now = DateTime.now();
 
     final updates = <String, dynamic>{
       if (availableLimit != null) 'availableCredit': availableLimit,
       if (totalLimit != null) 'creditLimit': totalLimit,
       if (totalLimit != null || availableLimit != null)
-        'limitUpdatedAt': DateTime.now().toIso8601String(),
+        'limitUpdatedAt': now.toIso8601String(),
       if (totalDue != null) 'totalDue': totalDue,
+      if (minDue != null) 'minDue': minDue,
       if (dueDate != null) 'dueDate': dueDate.toIso8601String(),
+      if (statementDate != null)
+        'statementDate': statementDate.toIso8601String(),
       if (currentBalance != null) 'currentBalance': currentBalance,
     };
+
+    // New statement cycle?
+    final newCycle = dueDate != null &&
+        dueDate.isAfter(card.dueDate.add(const Duration(days: 2)));
+    if (newCycle) {
+      updates['isPaid'] = false;
+      updates['paidDate'] = FieldValue.delete();
+      if (totalDue != null) updates['lastStatementBalance'] = totalDue;
+    }
+
+    // Bill payment received on the card.
+    if (paymentAmount != null && paymentAmount > 0) {
+      final paidOn = paymentAt ?? now;
+      updates['lastPaymentAmount'] = paymentAmount;
+      updates['lastPaymentAt'] = paidOn.toIso8601String();
+      final due = totalDue ?? card.totalDue;
+      if (!newCycle && due > 0 && paymentAmount >= due - 1) {
+        updates['isPaid'] = true;
+        updates['paidDate'] = paidOn.toIso8601String();
+      }
+      final outstanding = currentBalance ?? card.currentBalance;
+      if (currentBalance == null && outstanding != null) {
+        updates['currentBalance'] =
+            (outstanding - paymentAmount).clamp(0.0, double.infinity);
+      }
+    }
 
     // Also derive "Current Balance" (Outstanding) if we have Total & Available
     // Outstanding = Total Limit - Available Limit
@@ -183,16 +271,16 @@ class EntityResolutionService {
       final outstanding =
           (totalLimit - availableLimit).clamp(0.0, double.infinity);
       updates['currentBalance'] = outstanding;
-      updates['balanceUpdatedAt'] = DateTime.now().toIso8601String();
-    } else if (currentBalance != null) {
-      updates['balanceUpdatedAt'] = DateTime.now().toIso8601String();
+      updates['balanceUpdatedAt'] = now.toIso8601String();
+    } else if (updates.containsKey('currentBalance')) {
+      updates['balanceUpdatedAt'] = now.toIso8601String();
     }
 
     await FirebaseFirestore.instance
         .collection('users')
         .doc(userId)
         .collection('credit_cards')
-        .doc(cardId)
+        .doc(card.id)
         .set(updates, SetOptions(merge: true));
   }
 

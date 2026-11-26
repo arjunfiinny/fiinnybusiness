@@ -911,16 +911,43 @@ class _DashboardScreenState extends State<DashboardScreen>
       final isPremium =
           Provider.of<SubscriptionService>(context, listen: false).isPremium;
 
-      // Limit: 3 free syncs per day (unless Premium)
-      if (count >= 3 && !isPremium) {
-        // Force watch Ad
-        final shown = await AdService.I.showInterstitialForce();
-        if (shown) {
-          // Success (monetized)
-        } else {
-          // Ad not ready or failed? Let them sync anyway (generous).
+      // Limit: 3 free syncs per day (unless Premium).
+      // Past the limit we OFFER a rewarded ad (opt-in). A forced interstitial
+      // used as a reward breaks AdMob policy, so that path is gone. If no
+      // rewarded ad is loaded (none configured, no fill, switched off remotely)
+      // the sync stays free, as before.
+      if (count >= 3 && !isPremium && AdService.I.isRewardedReady) {
+        final watch = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Daily free syncs used'),
+            content: const Text(
+                "You've used today's 3 free syncs. Watch a short ad to sync again?"),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Not now'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Watch ad'),
+              ),
+            ],
+          ),
+        );
+        if (watch != true) return;
+        final earned =
+            await AdService.I.showRewarded(onReward: (_, __) {});
+        if (!earned) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                  content: Text('Watch the full ad to unlock another sync.')),
+            );
+          }
+          return;
         }
-      } else {
+      } else if (count < 3 || isPremium) {
         // Free sync
         await prefs.setInt(todayKey, count + 1);
       }

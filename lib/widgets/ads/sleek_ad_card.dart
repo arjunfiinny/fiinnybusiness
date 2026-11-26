@@ -7,6 +7,7 @@ import 'package:provider/provider.dart';
 import 'package:lifemap/services/subscription_service.dart';
 
 import '../../core/ads/ad_ids.dart';
+import '../../core/ads/ad_remote_config.dart';
 import '../../core/ads/ad_service.dart';
 import '../../core/ads/adaptive_banner.dart';
 import '../../core/ads/web_house_ad_card.dart';
@@ -38,14 +39,20 @@ class _SleekAdCardState extends State<SleekAdCard> {
   @override
   void initState() {
     super.initState();
+    AdRemoteConfig.I.addListener(_onRemoteConfig);
     _listenForFlags();
     _ensureAdInitialization();
   }
 
   @override
   void dispose() {
+    AdRemoteConfig.I.removeListener(_onRemoteConfig);
     _flagSubscription?.cancel();
     super.dispose();
+  }
+
+  void _onRemoteConfig() {
+    if (mounted) setState(() {});
   }
 
   void _listenForFlags() {
@@ -117,6 +124,10 @@ class _SleekAdCardState extends State<SleekAdCard> {
     }
 
     if (!_flagEnabled) {
+      return const SizedBox.shrink();
+    }
+
+    if (!kIsWeb && !AdRemoteConfig.I.adsAllowed) {
       return const SizedBox.shrink();
     }
 

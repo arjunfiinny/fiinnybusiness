@@ -2,6 +2,24 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "kd-deploy-prod-build",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": [
+        "/c",
+        "cd /d C:\\kd-deploy\\KrishiDukaan-V2 && npx next start --port 3005"
+      ],
+      "port": 3005
+    },
+    {
+      "name": "kd-reels-dedupe",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": [
+        "/c",
+        "cd /d C:\\lifemap\\.claude\\worktrees\\kd-reels-video-dedupe\\KrishiDukaan-V2 && npm run dev -- --port 3007"
+      ],
+      "port": 3007
+    },
+    {
       "name": "krishidukan-dev",
       "runtimeExecutable": "cmd",
       "runtimeArgs": [

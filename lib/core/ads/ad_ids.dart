@@ -2,6 +2,8 @@
 // import 'dart:io';
 import 'package:flutter/foundation.dart';
 
+import 'ad_remote_config.dart';
+
 /// Toggle to force TEST ads even in release (handy for QA/internal builds).
 /// Use: --dart-define=FORCE_TEST_ADS=true
 const bool forceTestAds =
@@ -83,6 +85,30 @@ class AdIds {
     return pattern.hasMatch(value);
   }
 
+  static bool get _isAndroid => defaultTargetPlatform == TargetPlatform.android;
+
+  /// Publisher part of an id: "ca-app-pub-1234567890123456".
+  static String _publisherOf(String id) {
+    final m = RegExp(r'^(ca-app-pub-\d{16})[~/]').firstMatch(id);
+    return m?.group(1) ?? '';
+  }
+
+  /// Remote override from Firestore `app/ads.units`, used only for real ads and
+  /// only when it belongs to the same AdMob account as the compiled app ID.
+  static String _resolve(AdUnitKind kind, String compiled) {
+    if (!_useReal) return compiled;
+    final override =
+        AdRemoteConfig.I.unitOverride(kind, android: _isAndroid);
+    if (override == null || !_looksConfigured(override)) return compiled;
+    final realAppId = _isAndroid ? _androidAppIdReal : _iosAppIdReal;
+    if (_publisherOf(override) != _publisherOf(realAppId)) {
+      debugPrint('[AdIds] ignoring ${kind.name} override from another AdMob '
+          'account; it cannot serve under the compiled app ID.');
+      return compiled;
+    }
+    return override;
+  }
+
   static String get appId => kIsWeb
       ? ''
       : (defaultTargetPlatform == TargetPlatform.android
@@ -91,19 +117,19 @@ class AdIds {
 
   static String get banner => kIsWeb
       ? ''
-      : (defaultTargetPlatform == TargetPlatform.android
+      : _resolve(AdUnitKind.banner, defaultTargetPlatform == TargetPlatform.android
           ? (_useReal ? _androidBannerReal : _androidBannerTest)
           : (_useReal ? _iosBannerReal : _iosBannerTest));
 
   static String get interstitial => kIsWeb
       ? ''
-      : (defaultTargetPlatform == TargetPlatform.android
+      : _resolve(AdUnitKind.interstitial, defaultTargetPlatform == TargetPlatform.android
           ? (_useReal ? _androidInterReal : _androidInterTest)
           : (_useReal ? _iosInterReal : _iosInterTest));
 
   static String get native => kIsWeb
       ? ''
-      : (defaultTargetPlatform == TargetPlatform.android
+      : _resolve(AdUnitKind.native, defaultTargetPlatform == TargetPlatform.android
           ? (_useReal ? _androidNativeReal : _androidNativeTest)
           : (_useReal
               ? _iosNativeReal
@@ -111,7 +137,7 @@ class AdIds {
 
   static String get rewarded => kIsWeb
       ? ''
-      : (defaultTargetPlatform == TargetPlatform.android
+      : _resolve(AdUnitKind.rewarded, defaultTargetPlatform == TargetPlatform.android
           ? (_useReal ? _androidRewardReal : _androidRewardTest)
           : (_useReal ? _iosRewardReal : _iosRewardTest));
 }

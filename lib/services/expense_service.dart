@@ -96,14 +96,14 @@ class ExpenseService {
         if (friendPhone != userPhone) {
           final mirrorDoc =
               getExpensesCollection(friendPhone).doc(expenseWithId.id);
-          await mirrorDoc.set(expenseWithId
-              .copyWith(
+          await mirrorDoc.set(_asMirror(
+              expenseWithId.copyWith(
                 payerId: expense.payerId,
                 amount: entry.value,
                 friendIds: [userPhone],
                 groupId: expense.groupId,
-              )
-              .toJson());
+              ),
+              userPhone));
         }
       }
     } else {
@@ -112,7 +112,7 @@ class ExpenseService {
         if (friendPhone != userPhone) {
           final mirrorDoc =
               getExpensesCollection(friendPhone).doc(expenseWithId.id);
-          await mirrorDoc.set(expenseWithId.toJson());
+          await mirrorDoc.set(_asMirror(expenseWithId, userPhone));
         }
       }
     }
@@ -129,6 +129,12 @@ class ExpenseService {
 
   void _notify() => globalUpdate.value++;
 
+  /// JSON for a friend's copy of a shared expense. `mirroredFrom` tells the
+  /// onFriendExpenseMirrored Cloud Function to notify that friend; without it
+  /// splits added from the dialogs never produced a notification.
+  Map<String, dynamic> _asMirror(ExpenseItem e, String fromPhone) =>
+      e.toJson()..['mirroredFrom'] = fromPhone;
+
   /// Add with sync (same as dialog variant, kept for compatibility)
   Future<String> addExpenseWithSync(
       String userPhone, ExpenseItem expense) async {
@@ -143,14 +149,14 @@ class ExpenseService {
         if (friendPhone != userPhone) {
           final mirrorDoc =
               getExpensesCollection(friendPhone).doc(expenseWithId.id);
-          await mirrorDoc.set(expenseWithId
-              .copyWith(
+          await mirrorDoc.set(_asMirror(
+              expenseWithId.copyWith(
                 payerId: expense.payerId,
                 amount: entry.value,
                 friendIds: [userPhone],
                 groupId: expense.groupId,
-              )
-              .toJson());
+              ),
+              userPhone));
         }
       }
     } else {
@@ -158,7 +164,7 @@ class ExpenseService {
         if (friendPhone != userPhone) {
           final mirrorDoc =
               getExpensesCollection(friendPhone).doc(expenseWithId.id);
-          await mirrorDoc.set(expenseWithId.toJson());
+          await mirrorDoc.set(_asMirror(expenseWithId, userPhone));
         }
       }
     }
@@ -252,7 +258,7 @@ class ExpenseService {
           amount: amount,
           friendIds: [userPhone],
         );
-        batch.set(mirrorDoc, mirror.toJson());
+        batch.set(mirrorDoc, _asMirror(mirror, userPhone));
       });
     } else {
       for (final phone in currentParticipants) {
@@ -260,7 +266,7 @@ class ExpenseService {
           continue;
         }
         final mirrorDoc = getExpensesCollection(phone).doc(expense.id);
-        batch.set(mirrorDoc, expense.toJson());
+        batch.set(mirrorDoc, _asMirror(expense, userPhone));
       }
     }
 

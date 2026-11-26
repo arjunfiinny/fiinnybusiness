@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:share_plus/share_plus.dart';
-import '../../core/ads/ads_banner_card.dart';
 import '../../services/b2b_offline_sync_service.dart';
 import '../../services/b2b_language_service.dart';
 import '../../services/local_database_helper.dart';
@@ -496,16 +495,6 @@ class _POSBillingScreenState extends State<POSBillingScreen> {
                         );
                       },
                     ),
-            ),
-            const AdsBannerCard(
-              placement: 'b2b_pos_billing',
-              inline: false,
-              inlineMaxHeight: 60,
-              margin: EdgeInsets.all(16.0),
-              padding: EdgeInsets.zero,
-              backgroundColor: Colors.transparent,
-              boxShadow: [],
-              minHeight: 60,
             ),
           ],
         ),
