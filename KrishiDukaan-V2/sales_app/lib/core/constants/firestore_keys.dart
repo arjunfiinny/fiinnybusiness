@@ -21,6 +21,8 @@ class Collections {
 
   /// One doc per free-text note a rep leaves against a dealer. New in this app.
   static const dealerNotes = 'dealerNotes';
+  static const dealerStatusHistory = 'dealerStatusHistory';
+  static const dealerStatusOptions = 'dealerStatusOptions';
 
   static const users = 'users';
   static const uidIndex = 'uidIndex';

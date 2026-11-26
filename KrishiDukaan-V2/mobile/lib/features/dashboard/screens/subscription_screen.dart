@@ -662,7 +662,10 @@ class _SubscriptionScreenState extends ConsumerState<SubscriptionScreen> {
       if (order['error'] != null) throw Exception(order['error']);
 
       // Use the key the backend used to create the order so they always match.
-      final razorpayKey = order['key_id'] as String? ?? AppConfig.razorpayKeyId;
+      final razorpayKey = order['key_id'] as String?;
+      if (razorpayKey == null || !razorpayKey.startsWith('rzp_')) {
+        throw Exception('Payment configuration is unavailable. Please try again later.');
+      }
       _razorpayOrderId = order['id'] as String?;
       _razorpayAmount = (order['amount'] as num?)?.toInt();
 

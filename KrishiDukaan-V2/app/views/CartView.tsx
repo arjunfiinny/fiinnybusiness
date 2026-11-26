@@ -12,6 +12,9 @@ import { HelperIcon } from "../../components/helpers";
 import { ShieldCheck, CreditCard, Lock } from "lucide-react";
 import { calcDiscount } from "../utils/discount";
 import { resolveVariant } from "../lib/cart-pricing";
+import { onlineStoreChoices } from "../lib/best-online-store";
+import { offerFor, useDeliveredOffers } from "../lib/delivered-price-client";
+import { useDeliverTo } from "../lib/deliver-to";
 import { parseVariantWeightKg } from "../utils/weight";
 import { computeLinePricing } from "../utils/gst";
 import { resolveDeliverySlabs, chargeFromSlabs, type DeliveryType } from "../utils/delivery";
@@ -621,6 +624,25 @@ function StorePickerInline({
 }) {
   const { loading, onlineStores, offlineStores } = useStoreAvailability(product, stores);
   const [showOfflineModal, setShowOfflineModal] = useState(false);
+  const deliverTo = useDeliverTo();
+  const quoteChoices = onlineStoreChoices(
+    product,
+    onlineStores.map((store) => ({ ...store, onlineDelivery: true })),
+    variantUnit,
+  );
+  const offerByStore = new Map(quoteChoices.map((choice) => {
+    const entry = choice.entry ?? {
+      storeId: choice.store.id,
+      storePhone: choice.store.phone,
+      stockLevel: 'In Stock',
+    };
+    return [choice.store.id, offerFor(product, entry, variantUnit || product.unit || '', choice.finalPrice)] as const;
+  }));
+  const delivered = useDeliveredOffers(
+    Array.from(offerByStore.values()).filter((offer): offer is NonNullable<typeof offer> => offer !== null),
+    deliverTo?.pincode ?? null,
+    !loading,
+  );
 
   if (loading) {
     return (
@@ -654,6 +676,9 @@ function StorePickerInline({
       <p className="text-[10px] font-black uppercase tracking-widest text-on-surface-variant mb-1.5">
         {currentSellerId ? t('cartChangeStoreLabel') : t('cartSelectStoreForDelivery')}
       </p>
+      <p className="mb-2 text-xs text-on-surface-variant">
+        Compare nearby stores. Delivery and your total update when you change sellers.
+      </p>
       <div className="flex flex-col gap-1.5">
         {onlineStores.map((store) => {
           const phone = (store as any).phone as string | undefined;
@@ -673,7 +698,7 @@ function StorePickerInline({
                 ? product.sellerDiscounts[phone]
                 : (store.id && product.sellerDiscounts?.[store.id])
                   ? product.sellerDiscounts[store.id]
-                  : 0;
+                  : availability?.discountPct ?? 0;
 
           // Resolve the selected pack size through the SAME resolver the checkout
           // backend uses, so the price shown, the price charged and the order all
@@ -692,6 +717,8 @@ function StorePickerInline({
           const { finalPrice: discountedPrice } = calcDiscount(rawPrice, storeDiscountPct);
           const displayPrice = storeDiscountPct > 0 ? discountedPrice : rawPrice;
           const hasDiscount = storeDiscountPct > 0;
+          const offer = offerByStore.get(store.id);
+          const quote = offer ? delivered.get(offer.id) : null;
 
           return (
             <button
@@ -730,6 +757,9 @@ function StorePickerInline({
                     <span className="inline-flex items-center gap-0.5 text-green-700">
                       <ICONS.Delivery className="w-3 h-3" /> {t('cartOnline')}
                     </span>
+                    {quote?.status === 'ok' && typeof quote.total === 'number' && (
+                      <span className="font-bold text-primary">₹{quote.total.toLocaleString('en-IN')} delivered for 1 pack</span>
+                    )}
                   </div>
                 </div>
                 {isCurrent ? (

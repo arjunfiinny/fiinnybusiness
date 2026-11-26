@@ -54,6 +54,16 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('shows ten buyers in the last two months when stats say so', (tester) async {
+    await tester.pumpWidget(host(BuyStats.fromMap({
+      'show': {'count': 10, 'label': '10', 'days': 60},
+      'recent': <Map<String, Object>>[],
+    })));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('10 people bought this', findRichText: true), findsOneWidget);
+    expect(find.textContaining('in the last 2 months', findRichText: true), findsOneWidget);
+  });
+
   testWidgets('takes no space when there is nothing to show', (tester) async {
     await tester.pumpWidget(host(null));
     await tester.pumpAndSettle();

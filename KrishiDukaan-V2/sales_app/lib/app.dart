@@ -3,12 +3,39 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'core/router/app_router.dart';
 import 'core/theme/app_theme.dart';
+import 'features/day_session/providers/day_session_providers.dart';
 
-class KrishiDukaanSalesApp extends ConsumerWidget {
+class KrishiDukaanSalesApp extends ConsumerStatefulWidget {
   const KrishiDukaanSalesApp({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<KrishiDukaanSalesApp> createState() =>
+      _KrishiDukaanSalesAppState();
+}
+
+class _KrishiDukaanSalesAppState extends ConsumerState<KrishiDukaanSalesApp>
+    with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      ref.invalidate(currentSessionProvider);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return MaterialApp.router(
       title: 'KrishiDukaan Sales',
       debugShowCheckedModeBanner: false,

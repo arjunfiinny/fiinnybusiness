@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { FieldValue } from "firebase-admin/firestore";
+import { FieldValue, GeoPoint } from "firebase-admin/firestore";
 import { getAdminDb } from "../../../../../lib/firebase-admin";
 import { requireSection } from "../../../../../lib/admin-auth";
 import { writeAuditLog, auditMeta } from "../../../../../lib/audit-log-service";
@@ -44,6 +44,11 @@ export async function PATCH(req: NextRequest, { params }: Params) {
     return NextResponse.json({ error: "Invalid phone number." }, { status: 400 });
   }
 
+  if (geo && (!Number.isFinite(geo.latitude) || !Number.isFinite(geo.longitude) ||
+      Math.abs(geo.latitude) > 90 || Math.abs(geo.longitude) > 180)) {
+    return NextResponse.json({ error: "Invalid dealer location." }, { status: 400 });
+  }
+
   const db = getAdminDb();
   const ref = db.collection("dealers").doc(dealerId);
   const snap = await ref.get();
@@ -61,7 +66,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   };
   if (interest !== undefined) update.interest = interest || null;
   if (geo !== undefined) {
-    update.geo = geo ? { latitude: geo.latitude, longitude: geo.longitude } : null;
+    update.geo = geo ? new GeoPoint(geo.latitude, geo.longitude) : null;
   }
 
   const changedFields = Object.keys(update).filter(

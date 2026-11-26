@@ -9,14 +9,23 @@ web route and this app are two clients of one dataset: a day started on the web
 can be ended in the app, and a visit logged in the app appears in the web
 timeline. Nothing here is a private copy.
 
+Route points are best effort: Android uses a location foreground service and
+iOS uses background location updates while an open day is being tracked. A
+force-quit, revoked location permission, disabled GPS, or an OS suspension can
+leave gaps. The resulting road distance follows the recorded points, but does
+not reconstruct unobserved travel between them. The browser does not record
+periodic points; its end-day calculation currently uses only start, visits and
+end. The web team must include `daySessions.trackPoints` if it needs the same
+distance when a mobile-started day is closed in the browser.
+
 ---
 
 ## What it does
 
 | Module | What a rep does | Storage |
 |---|---|---|
-| **Day session** | Start Day / End Day with a GPS stamp at each end. Ending the day resolves the road route over start → every visit in order → end and stores the distance and polyline. | `daySessions` |
-| **Dealer visits** | Browse the shared dealer master, add and edit dealers, and record a visit with purpose, notes and a fresh GPS fix. | `dealers`, `dealerVisits` |
+| **Day session** | Start Day / End Day with GPS stamps. During an open day, the app records route points at roughly 15-minute intervals when the OS supplies a fresh fix. Ending the day routes through those points and visits in time order; if road routing fails, distance is left unset. | `daySessions` |
+| **Dealer visits** | Browse dealers created by the signed-in rep, choose a preset or custom status when adding a dealer, and update that status during a GPS-stamped visit. Every status change has a history event. | `dealers`, `dealerVisits`, `dealerStatusHistory`, `dealerStatusOptions` |
 | **Daily sessions** | History of every working day, each with a route map and a visit timeline. | `daySessions` + `dealerVisits` |
 | **Attendance** | Present / half day / leave / week off / holiday per day. Start Day marks present automatically; the screen is for corrections. | `salesAttendance` |
 | **Expenses** | Claim travel, fuel, food, lodging, toll and mobile costs with a bill photo, and track approval. | `salesExpenses` + Storage |
@@ -27,6 +36,34 @@ the same ones that work on `krishidukan.com/sales`. Access is gated on the
 `salesExecutive` or `admin` role, resolved from `users/{uid}` or, for
 phone-based accounts, `uidIndex/{uid}` → `users/{phone}` — mirroring
 `isSalesExec()` in `firestore.rules`.
+
+## Dealer status contract for the web team
+
+The mobile app writes a dealer's current status as `dealers/{dealerId}.status`.
+Preset values are `Pitching`, `Interested`, `Ongoing`, `Pending`, `Completed`,
+`Closed`, and `Not Interested`. Custom values are plain display strings of at
+most 50 characters. Existing dealers may have no status. A visit stores its
+status snapshot in `dealerVisits/{visitId}.dealerStatus`.
+
+Each status change creates an immutable `dealerStatusHistory/{changeId}` document
+with `dealerId`, `salesExecutiveId` (the dealer's `createdBy` UID),
+`fromStatus` (nullable), `toStatus`, `source` (`CREATED`, `EDIT`, `VISIT`, or
+`ADMIN_EDIT`), `changedBy` (actor UID), `changedAt` (server timestamp), and
+optional `visitId`. The app writes the dealer, visit and history together in a
+batch or transaction. Admin status edits should write `source: ADMIN_EDIT` and
+the history event in the same batch. Reusable custom choices live in
+`dealerStatusOptions/{execUid}.statuses` as a string array.
+
+The app listens to dealer, note, custom status and status-history documents, so
+admin edits and removals appear in open dealer screens. Use `active: false` to
+hide a dealer while retaining its visit and status history. The web Sales Team
+CRUD, status filters, and CSV/Excel exports are separate web work.
+
+Before the owner-scoped `firestore.rules` in this change are deployed, the web
+sales portal must query active dealers with `createdBy == signed-in UID` and
+dealer notes with `salesExecutiveId == signed-in UID`. Its current unscoped
+queries will otherwise be denied. Updated mobile builds must also reach users
+before those rules are enabled.
 
 ## Layout
 
@@ -39,7 +76,7 @@ lib/
     auth/        login, role gate, access-denied
     dashboard/   Start/End Day, today at a glance, module list
     day_session/ session history, detail, route map, visit timeline
-    dealers/     dealer master, visit logging
+    dealers/     rep-owned dealers, visit logging
     attendance/  daily marking + record
     expenses/    claims, bill upload
     reports/     derived summary

@@ -1,7 +1,9 @@
 # Delivery money: who pays the courier, who gets what
 
-Status: design agreed with the owner on 16 Nov 2026. UAT branch only
-(`feat/courier-automation-uat`). Nothing here is in production.
+Status: original design agreed on 16 Nov 2026. On 25 Nov the owner clarified
+that **all customer delivery payments belong to KrishiDukan**, including when
+the seller delivers. New settlement plans use version 2. Previously recorded
+version 1 plans remain readable with their original amounts.
 
 ## 1. The rules (owner's decisions)
 
@@ -9,8 +11,8 @@ Status: design agreed with the owner on 16 Nov 2026. UAT branch only
 |---|---|
 | Commission | **2%** of the seller's goods (items + added GST). Never on delivery. |
 | Gateway fee (~2% + 18% GST = 2.36%) | Seller bears it on the money they receive. On delivery the platform keeps, it is **added to the customer's delivery charge** (gross-up), so the platform nets the full courier cost. |
-| Delivery money | **Never in the seller's Route transfer** when the platform ships. It stays with the platform, which pays the courier. |
-| Courier choice | Cheaper of Delhivery / Shiprocket; if one doesn't serve, the other. If neither serves, the **seller delivers** with their own slab charge, and that charge is theirs. |
+| Delivery money | **Never in the seller's Route transfer**, regardless of who delivers. It stays with KrishiDukan. |
+| Courier choice | Cheaper of Delhivery / Shiprocket; if one doesn't serve, the other. If neither serves, the **seller delivers**; the customer's delivery payment still belongs to KrishiDukan. |
 | Scenario 1 | Customer pays delivery. |
 | Scenario 2 | Seller offers free (or %) delivery: their share of the courier cost is deducted from their payout. |
 | Scenario 3 | Platform campaign: free delivery on everything for a period. Platform pays the courier. |
@@ -51,9 +53,9 @@ Razorpay order is created:
 goods            = subtotal + gstAdded                  (what the seller sold)
 deliveryTo       = "platform" (courier priced) | "seller" (seller's slab)
 customerDelivery = what the customer pays for delivery (gross-up included)
-keptDelivery     = deliveryTo == seller ? customerDelivery : 0
+keptDelivery     = 0                                  (version 2)
 commission       = ceil(goods × 2%)
-gatewayFee       = ceil((goods + keptDelivery) × 2%) + ceil(that × 18%)
+gatewayFee       = ceil(goods × 2%) + ceil(that × 18%)
 sellerCourier    = seller's agreed share of the courier cost (scenario 2 / B)
 campaign         = platform's planned share under a campaign (budget)
 transfer         = goods + keptDelivery − commission − gatewayFee − sellerCourier
@@ -73,9 +75,11 @@ the payment attempt to `order.settlement`. Clients can never write `settlement`
 or `settlementAdjustments` (firestore.rules). The courier engine stamps it itself
 if a seller accepts before the trigger ran (same idempotent function).
 
-Orders without a plan (old app builds that don't send per-seller pricing, manual
-admin orders, everything paid before this ships) keep **today's behaviour
-unchanged**, including the claw-back. Nothing old is re-interpreted.
+Old recorded orders without a plan keep their original payout rules. For new
+payments made by old app builds, `create-cart-order` caps the Route transfer
+pool at server-priced goods and GST. It tags these transfers as excluding
+delivery, so courier booking cannot reverse that delivery a second time.
+Manual admin orders without a plan still use their existing payout rules.
 
 ### 3.4 One invariant: later changes only ever ADD money for the seller
 
@@ -85,7 +89,7 @@ idempotent by id), so the platform never has to claw money back in the normal fl
 
 | Event | Adjustment for the seller who delivers |
 |---|---|
-| Courier-priced order, but no courier books (not serviceable / booking failed / automation off) → seller delivers | + customer's delivery charge (less gateway fee on it) + their courier share (they now bear their own cost) |
+| Courier-priced order, but no courier books (not serviceable / booking failed / automation off) → seller delivers | + their unused courier-share offer only; KrishiDukan retains the customer's delivery payment. For historical version 1 plans, the original delivery adjustment still applies. |
 | Courier booked cheaper than the checkout quote | + the part of their share they no longer owe |
 | Order reassigned to a new seller | new seller's transfer = their goods (no offer share; the platform pays the courier, as today) |
 

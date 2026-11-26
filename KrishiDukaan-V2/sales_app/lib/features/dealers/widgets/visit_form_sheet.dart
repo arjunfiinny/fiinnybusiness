@@ -4,6 +4,7 @@ import '../../../core/constants/app_colors.dart';
 import '../../../core/services/location_service.dart';
 import '../data/dealer.dart';
 import '../data/dealer_visit.dart';
+import 'dealer_status_field.dart';
 
 /// What the rep entered when marking a visit. The location is captured by the
 /// sheet itself rather than passed in, so the coordinates belong to the moment
@@ -13,26 +14,40 @@ class VisitDraft {
   final String? purposeOther;
   final String? notes;
   final LatLngPoint geo;
+  final String status;
+  final bool statusChanged;
 
   const VisitDraft({
     required this.purpose,
     this.purposeOther,
     this.notes,
     required this.geo,
+    required this.status,
+    required this.statusChanged,
   });
 }
 
 class VisitFormSheet extends StatefulWidget {
-  const VisitFormSheet({super.key, required this.dealer});
+  const VisitFormSheet({
+    super.key,
+    required this.dealer,
+    this.customStatuses = const [],
+  });
 
   final Dealer dealer;
+  final List<String> customStatuses;
 
-  static Future<VisitDraft?> show(BuildContext context, Dealer dealer) {
+  static Future<VisitDraft?> show(
+    BuildContext context,
+    Dealer dealer, {
+    List<String> customStatuses = const [],
+  }) {
     return showModalBottomSheet<VisitDraft>(
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
-      builder: (_) => VisitFormSheet(dealer: dealer),
+      builder: (_) =>
+          VisitFormSheet(dealer: dealer, customStatuses: customStatuses),
     );
   }
 
@@ -45,6 +60,8 @@ class _VisitFormSheetState extends State<VisitFormSheet> {
   final _notesController = TextEditingController();
 
   String? _purpose;
+  String? _status;
+  bool _statusChanged = false;
   LatLngPoint? _geo;
   bool _locating = true;
   String? _geoError;
@@ -53,6 +70,7 @@ class _VisitFormSheetState extends State<VisitFormSheet> {
   @override
   void initState() {
     super.initState();
+    _status = widget.dealer.status;
     // Start the GPS fix immediately: it is the slowest part of logging a visit,
     // and by the time the rep has picked a purpose it is usually already done.
     _capture();
@@ -89,6 +107,10 @@ class _VisitFormSheetState extends State<VisitFormSheet> {
       setState(() => _formError = 'Describe the purpose of the visit.');
       return;
     }
+    if (_status == null) {
+      setState(() => _formError = 'Select the dealer status.');
+      return;
+    }
     if (_geo == null) {
       setState(
         () => _formError = _locating
@@ -104,6 +126,8 @@ class _VisitFormSheetState extends State<VisitFormSheet> {
         purposeOther: _otherController.text,
         notes: _notesController.text,
         geo: _geo!,
+        status: _status!,
+        statusChanged: _statusChanged,
       ),
     );
   }
@@ -212,6 +236,17 @@ class _VisitFormSheetState extends State<VisitFormSheet> {
                 onChanged: (_) => setState(() => _formError = null),
               ),
             ],
+
+            const SizedBox(height: 18),
+            DealerStatusField(
+              initialStatus: widget.dealer.status,
+              customStatuses: widget.customStatuses,
+              onChanged: (value) => setState(() {
+                _status = value;
+                _statusChanged = true;
+                _formError = null;
+              }),
+            ),
 
             const SizedBox(height: 18),
             const _Label('Notes (optional)'),

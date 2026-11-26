@@ -779,18 +779,25 @@ export default function MarketView({
                     <PriceTag value={dp} size="md" prefix={(product.availability?.length ?? 0) > 1 ? "From" : undefined} />
                     <DeliveredPriceLine product={product} className="mt-1" />
                   </div>
-                  {product.sellMode !== "offline_store_only" && (() => {
+                  {product.sellMode !== "offline_store_only" && product.isOnline !== false && (() => {
                     const inCart = cartItems.some((ci) => ci.productId === product.id);
                     if (inCart) {
                       return (
                         <div onClick={(e) => e.stopPropagation()} className="mt-2">
-                          {/* Mobile: single compact in-cart button */}
-                          <button
-                            onClick={(e) => { e.stopPropagation(); onGoToCart?.(); }}
-                            className="md:hidden w-full border-2 border-green-600 text-green-700 text-xs font-bold py-1.5 rounded-lg hover:bg-green-600 hover:text-white transition-colors"
-                          >
-                            ✓ In Cart
-                          </button>
+                          <div className="flex md:hidden gap-1.5">
+                            <button
+                              onClick={(e) => { e.stopPropagation(); onGoToCart?.(); }}
+                              className="flex-1 border-2 border-green-600 text-green-700 text-xs font-bold py-1.5 rounded-lg hover:bg-green-600 hover:text-white transition-colors"
+                            >
+                              Go to Cart
+                            </button>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); onBuyNow ? onBuyNow(product) : onGoToCart?.(); }}
+                              className="flex-1 rounded-lg bg-primary text-white text-xs font-bold py-1.5 hover:bg-primary/90 transition-colors"
+                            >
+                              Buy Now
+                            </button>
+                          </div>
                           {/* Desktop: Go to Cart + Buy Now */}
                           <div className="hidden md:flex gap-1">
                             <button
@@ -811,13 +818,20 @@ export default function MarketView({
                     }
                     return (
                       <div onClick={(e) => e.stopPropagation()} className="mt-2">
-                        {/* Mobile: single + Add button */}
-                        <button
-                          onClick={(e) => { e.stopPropagation(); onAddToCart ? onAddToCart(product) : onProductClick(product.id); }}
-                          className="md:hidden w-full bg-primary text-white text-xs font-bold py-1.5 rounded-lg hover:bg-primary/90 transition-colors flex items-center justify-center gap-1"
-                        >
-                          <span className="text-sm font-black leading-none">+</span> Add
-                        </button>
+                        <div className="flex md:hidden gap-1.5">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); onAddToCart ? onAddToCart(product) : onProductClick(product.id); }}
+                            className="flex-1 border-2 border-primary text-primary text-xs font-bold py-1.5 rounded-lg hover:bg-primary hover:text-white transition-colors"
+                          >
+                            {t('addToCart')}
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); onBuyNow ? onBuyNow(product) : onProductClick(product.id); }}
+                            className="flex-1 rounded-lg bg-primary text-white text-xs font-bold py-1.5 hover:bg-primary/90 transition-colors"
+                          >
+                            Buy Now
+                          </button>
+                        </div>
                         {/* Desktop: Add to Cart + Buy Now */}
                         <div className="hidden md:flex gap-1">
                           <HelperTooltip side="top" textKey="marketAddToCart">

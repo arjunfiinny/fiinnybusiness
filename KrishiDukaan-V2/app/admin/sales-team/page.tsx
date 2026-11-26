@@ -1,35 +1,15 @@
 "use client";
 
-/**
- * Sales Team — Phase 1 (read-only roster).
- *
- * Lists the field sales executives already in the system (users/{uid} with
- * role === "salesExecutive") and, for each, a lightweight activity summary
- * derived from the SAME collections the /sales portal already writes:
- *   - dealerVisits  (salesExecutiveId) → visits (count), distinct dealers
- *                                        visited in the last 30 days, last active
- *   - dealers       (createdBy)        → dealers ("retailers") they added (count)
- *
- * Totals are count queries and only the last 30 days of visits are read, so
- * the page doesn't grow with the visit history.
- *
- * Both collections already grant admin client reads in firestore.rules. The
- * roster deliberately does NOT read daySessions (dealerVisits already yields
- * last-active) — per-exec daily sessions live on the drill-in activity page at
- * /admin/sales-team/[execId], which reuses the /sales session/route services.
- *
- * Deliberately no new Firestore collections, schemas, or tracking — this only
- * reads what the sales app produces. "Status" is DERIVED from recent activity
- * (there is no status field on the exec's user doc).
- */
-
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Contact, Search, X, Eye } from "lucide-react";
+import { Contact, Search, X, Eye, Download } from "lucide-react";
 import { collection, getCountFromServer, getDocs, limit, orderBy, query, Timestamp, where } from "firebase/firestore";
 import { db } from "../../firebase";
 import { fetchUsersByRoles } from "../_lib/admin-queries";
 import { RefreshButton } from "../_components/refresh-button";
+import { exportRows, exportTime } from "./sales-reports";
+import { timestampMs } from "./sales-activity";
+import { fetchAllVisitsForExec } from "../../sales/dealers/dealer-visit-service";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type ExecStats = {
@@ -46,22 +26,11 @@ type SalesExec = {
   email: string;
   phone: string;
   createdAtMs: number;
+  accountStatus: string;
   stats: ExecStats;
 };
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
-/** Numeric ms from a Firestore Timestamp, Date, or date string. */
-function getTs(val: any): number {
-  if (!val) return 0;
-  if (typeof val.toDate === "function") return val.toDate().getTime();
-  if (val instanceof Date) return val.getTime();
-  if (typeof val === "string" || typeof val === "number") {
-    const t = new Date(val).getTime();
-    return isNaN(t) ? 0 : t;
-  }
-  return 0;
-}
-
 function fmtDate(ms: number): string {
   if (!ms) return "—";
   return new Date(ms).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
@@ -84,9 +53,13 @@ export default function AdminSalesTeamPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [dataAge, setDataAge] = useState<number | null>(null);
   const [search, setSearch] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState("");
 
   const load = async () => {
     setLoading(true);
+    setLoadError("");
     try {
       const since = Timestamp.fromMillis(Date.now() - RECENT_DAYS * 24 * 60 * 60 * 1000);
       const [users, recentSnap] = await Promise.all([
@@ -102,21 +75,21 @@ export default function AdminSalesTeamPage() {
         if (!uid) continue;
         const r = recent.get(uid) ?? { dealers: new Set<string>(), lastMs: 0 };
         if (v.dealerId) r.dealers.add(String(v.dealerId));
-        r.lastMs = Math.max(r.lastMs, getTs(v.visitedAt) || getTs(v.createdAt));
+        r.lastMs = Math.max(r.lastMs, timestampMs(v.visitedAt) || timestampMs(v.createdAt));
         recent.set(uid, r);
       }
 
       // All-time totals per exec are count queries; the last visit is read
       // only for execs with no visit in the recent window.
-      const roster: SalesExec[] = await Promise.all(users.map(async (u: any) => {
-        const uid = String(u.uid || u.id);
+      const uniqueUsers = new Map(users.map((user) => [String(user.uid || user.id), user]));
+      const roster: SalesExec[] = await Promise.all(Array.from(uniqueUsers.entries()).map(async ([uid, u]) => {
         const visits = query(collection(db, "dealerVisits"), where("salesExecutiveId", "==", uid));
         const r = recent.get(uid);
         const [visitCount, dealerCount, lastSnap] = await Promise.all([
-          getCountFromServer(visits).then((c) => c.data().count).catch(() => 0),
-          getCountFromServer(query(collection(db, "dealers"), where("createdBy", "==", uid)))
-            .then((c) => c.data().count).catch(() => 0),
-          r ? Promise.resolve(null) : getDocs(query(visits, orderBy("visitedAt", "desc"), limit(1))).catch(() => null),
+          getCountFromServer(visits).then((c) => c.data().count),
+          getCountFromServer(query(collection(db, "dealers"), where("createdBy", "==", uid), where("active", "==", true)))
+            .then((c) => c.data().count),
+          r ? Promise.resolve(null) : getDocs(query(visits, orderBy("visitedAt", "desc"), limit(1))),
         ]);
         const lastDoc = lastSnap?.docs[0]?.data();
         return {
@@ -124,12 +97,13 @@ export default function AdminSalesTeamPage() {
           name: String(u.name ?? "").trim(),
           email: String(u.email ?? "").trim(),
           phone: String(u.phone ?? "").trim(),
-          createdAtMs: getTs(u.createdAt),
+          createdAtMs: timestampMs(u.createdAt),
+          accountStatus: u.isActive === false || u.disabled === true || u.isBlocked === true ? "Inactive" : "Active",
           stats: {
             totalVisits: visitCount,
             dealersVisited: r?.dealers ?? new Set<string>(),
             dealersCreated: dealerCount,
-            lastActiveMs: r?.lastMs ?? (lastDoc ? getTs(lastDoc.visitedAt) || getTs(lastDoc.createdAt) : 0),
+            lastActiveMs: r?.lastMs ?? (lastDoc ? timestampMs(lastDoc.visitedAt) || timestampMs(lastDoc.createdAt) : 0),
           },
         };
       }));
@@ -141,6 +115,8 @@ export default function AdminSalesTeamPage() {
 
       setExecs(roster);
       setDataAge(Date.now());
+    } catch {
+      setLoadError("Could not load the sales team. Refresh to try again.");
     } finally {
       setLoading(false);
     }
@@ -159,6 +135,41 @@ export default function AdminSalesTeamPage() {
     if (!q) return execs;
     return execs.filter((e) => [e.name, e.email, e.phone].join(" ").toLowerCase().includes(q));
   }, [execs, search]);
+
+  async function exportTeam() {
+    setExportError("");
+    setExporting(true);
+    try {
+      const rows = [];
+      for (let index = 0; index < filtered.length; index += 8) {
+        const batch = await Promise.all(filtered.slice(index, index + 8).map(async (exec) => {
+          const [visits, dealerDocs] = await Promise.all([
+            fetchAllVisitsForExec(exec.uid),
+            getDocs(query(collection(db, "dealers"), where("createdBy", "==", exec.uid))),
+          ]);
+          const visited = new Set(visits.map((visit) => visit.dealerId).filter(Boolean));
+          const retailerDocs = dealerDocs.docs.filter((entry) => String(entry.data().type ?? "retailer").toLowerCase() === "retailer");
+          return [
+            exec.uid, exec.name, exec.email, exec.phone, exec.accountStatus, statusOf(exec.stats.lastActiveMs).label,
+            visited.size, retailerDocs.filter((entry) => visited.has(entry.id)).length,
+            dealerDocs.size, retailerDocs.length,
+            dealerDocs.docs.filter((entry) => entry.data().active === true).length, visits.length,
+            exportTime(exec.stats.lastActiveMs), exportTime(exec.createdAtMs),
+          ];
+        }));
+        rows.push(...batch);
+      }
+      exportRows("sales-team", [
+        "Executive ID", "Executive name", "Email", "Phone", "Account status (profile)", "Activity status",
+        "Unique dealers visited", "Unique retailers visited", "Dealers added (all time)", "Retailers added (all time)",
+        "Active dealers", "Total visits", "Last active (UTC)", "Account created (UTC)",
+      ], rows);
+    } catch {
+      setExportError("Could not export the sales team. Try again.");
+    } finally {
+      setExporting(false);
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -195,10 +206,21 @@ export default function AdminSalesTeamPage() {
         )}
       </div>
 
+      <div className="flex flex-wrap items-center gap-3">
+        <button type="button" disabled={loading || exporting || !!loadError || filtered.length === 0}
+          onClick={() => void exportTeam()}
+          className="inline-flex items-center gap-2 rounded-xl border border-outline-variant/40 px-3 py-2 text-sm font-semibold disabled:opacity-50">
+          <Download className="h-4 w-4" /> {exporting ? "Exporting…" : "Export Sales Team CSV"}
+        </button>
+        {exportError && <p role="alert" className="text-sm text-red-700">{exportError}</p>}
+      </div>
+
       {loading ? (
         <div className="flex h-60 items-center justify-center">
           <div className="w-8 h-8 border-4 border-primary border-t-transparent rounded-full animate-spin" />
         </div>
+      ) : loadError ? (
+        <p role="alert" className="text-sm text-red-700">{loadError}</p>
       ) : (
         <div className="rounded-2xl border border-outline-variant/30 bg-surface-container-lowest overflow-hidden">
           <div className="px-4 sm:px-5 py-3 border-b border-outline-variant/20 bg-surface-container-low">
@@ -215,8 +237,8 @@ export default function AdminSalesTeamPage() {
                   <th className="px-5 py-3 text-left text-[10px] font-black uppercase tracking-widest text-on-surface-variant">Executive</th>
                   <th className="px-5 py-3 text-left text-[10px] font-black uppercase tracking-widest text-on-surface-variant">Contact</th>
                   <th className="px-5 py-3 text-left text-[10px] font-black uppercase tracking-widest text-on-surface-variant">Status</th>
-                  <th className="px-5 py-3 text-left text-[10px] font-black uppercase tracking-widest text-on-surface-variant">Retailers Visited ({RECENT_DAYS}d)</th>
-                  <th className="px-5 py-3 text-left text-[10px] font-black uppercase tracking-widest text-on-surface-variant">Retailers Added</th>
+                  <th className="px-5 py-3 text-left text-[10px] font-black uppercase tracking-widest text-on-surface-variant">Dealers Visited ({RECENT_DAYS}d)</th>
+                  <th className="px-5 py-3 text-left text-[10px] font-black uppercase tracking-widest text-on-surface-variant">Active Dealers Added</th>
                   <th className="px-5 py-3 text-left text-[10px] font-black uppercase tracking-widest text-on-surface-variant">Visits</th>
                   <th className="px-5 py-3 text-right text-[10px] font-black uppercase tracking-widest text-on-surface-variant">Action</th>
                 </tr>
@@ -287,7 +309,7 @@ export default function AdminSalesTeamPage() {
                       {st.label}
                     </span>
                     <span className="text-[11px] text-on-surface-variant">{e.stats.dealersVisited.size} visited ({RECENT_DAYS}d)</span>
-                    <span className="text-[11px] text-on-surface-variant">{e.stats.dealersCreated} added</span>
+                    <span className="text-[11px] text-on-surface-variant">{e.stats.dealersCreated} active dealers</span>
                     <span className="text-[11px] text-on-surface-variant">{e.stats.totalVisits} visits</span>
                   </div>
                 </div>

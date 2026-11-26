@@ -137,6 +137,8 @@ class NotificationsScreen extends ConsumerWidget {
   const NotificationsScreen({super.key});
 
   static const _icons = {
+    'cart_reminder': Icons.shopping_cart_outlined,
+    'payment_refunded': Icons.account_balance_wallet_outlined,
     'order': Icons.receipt_long_outlined,
     'order_update': Icons.local_shipping_outlined,
     'assignment': Icons.assignment_turned_in_outlined,
@@ -155,6 +157,8 @@ class NotificationsScreen extends ConsumerWidget {
   };
 
   static const _colors = {
+    'cart_reminder': AppColors.primary,
+    'payment_refunded': AppColors.success,
     'order': AppColors.info,
     'order_update': AppColors.success,
     'assignment': AppColors.primary,

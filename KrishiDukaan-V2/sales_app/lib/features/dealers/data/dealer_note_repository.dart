@@ -13,13 +13,12 @@ class DealerNoteRepository {
       _db.collection(Collections.dealerNotes);
 
   /// A dealer's notes, oldest first — a running log of the conversation.
-  Future<List<DealerNote>> forDealer(String dealerId) async {
-    final snap = await _col
-        .where('dealerId', isEqualTo: dealerId)
-        .orderBy('createdAt')
-        .get();
-    return snap.docs.map(DealerNote.fromDoc).toList();
-  }
+  Stream<List<DealerNote>> forDealer(String uid, String dealerId) => _col
+      .where('dealerId', isEqualTo: dealerId)
+      .where('salesExecutiveId', isEqualTo: uid)
+      .orderBy('createdAt')
+      .snapshots()
+      .map((snap) => snap.docs.map(DealerNote.fromDoc).toList());
 
   Future<String> add(String uid, String dealerId, String note) async {
     final ref = await _col.add({

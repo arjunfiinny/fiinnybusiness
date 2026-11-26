@@ -11,6 +11,10 @@ import { DealerEditModal } from "./DealerEditModal";
 import { DealerDeleteDialog } from "./DealerDeleteDialog";
 import { DealerDetailDrawer } from "./DealerDetailDrawer";
 import { auth } from "../../../../firebase";
+import { salesDate } from "../../sales-activity";
+import { matchesSearch } from "../../dealer-search";
+
+export { matchesSearch } from "../../dealer-search";
 import { statusLabel, statusColor } from "../../_lib/dealer-status";
 
 const PAGE_SIZE = 25;
@@ -29,24 +33,6 @@ const INTEREST_LABEL: Record<string, string> = {
   considering: "Considering",
   veryInterested: "Very Interested",
 };
-
-function normalizePhone(p: string): string {
-  return p.replace(/[\s\+\-]/g, "").replace(/^91/, "");
-}
-
-/** Case-insensitive match across shop name, owner, phone, address, status. */
-export function matchesSearch(dealer: Dealer, raw: string): boolean {
-  if (!raw.trim()) return true;
-  const q = raw.toLowerCase();
-  if (dealer.shopName.toLowerCase().includes(q)) return true;
-  if (dealer.ownerName.toLowerCase().includes(q)) return true;
-  if (dealer.address.toLowerCase().includes(q)) return true;
-  if (dealer.status && dealer.status.toLowerCase().includes(q)) return true;
-  if (dealer.status && statusLabel(dealer.status).toLowerCase().includes(q)) return true;
-  const normQ = normalizePhone(q);
-  if (normQ && normalizePhone(dealer.phone).includes(normQ)) return true;
-  return false;
-}
 
 function formatDate(ts: unknown): string {
   if (!ts) return "—";
@@ -139,14 +125,8 @@ export function DealersTab({ dealers, execId, execName, onDealerUpdated }: Props
     let list = dealers;
     if (fromDate || toDate) {
       list = list.filter((d) => {
-        if (!d.createdAt) return true;
-        try {
-          const ts = (d.createdAt as any).toDate ? (d.createdAt as any).toDate() : new Date(d.createdAt as string);
-          const dateStr = ts.toISOString().slice(0, 10);
-          if (fromDate && dateStr < fromDate) return false;
-          if (toDate && dateStr > toDate) return false;
-        } catch { return true; }
-        return true;
+        const date = salesDate(d.createdAt);
+        return Boolean(date) && (!fromDate || date >= fromDate) && (!toDate || date <= toDate);
       });
     }
     if (debouncedSearch) list = list.filter((d) => matchesSearch(d, debouncedSearch));
@@ -187,22 +167,21 @@ export function DealersTab({ dealers, execId, execName, onDealerUpdated }: Props
       const params = new URLSearchParams();
       if (fromDate) params.set("from", fromDate);
       if (toDate) params.set("to", toDate);
+      if (debouncedSearch.trim()) params.set("q", debouncedSearch.trim());
       const resp = await fetch(
-        `/api/admin/sales-team/${execId}/dealers/csv?${params}`,
+        `/api/admin/sales-team/${encodeURIComponent(execId)}/dealers/csv?${params}`,
         { headers: { Authorization: `Bearer ${token}` } },
       );
       if (!resp.ok) throw new Error(await resp.text());
-      const blob = await resp.blob();
-      const url = URL.createObjectURL(blob);
+      const url = URL.createObjectURL(await resp.blob());
       const a = document.createElement("a");
       a.href = url;
-      const cd = resp.headers.get("content-disposition") ?? "";
-      const match = cd.match(/filename="([^"]+)"/);
+      const match = resp.headers.get("content-disposition")?.match(/filename="([^"]+)"/);
       a.download = match?.[1] ?? "dealers.csv";
       document.body.appendChild(a);
       a.click();
       a.remove();
-      URL.revokeObjectURL(url);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (e) {
       console.error("CSV download failed:", e);
       alert("Download failed. Please try again.");
@@ -277,7 +256,7 @@ export function DealersTab({ dealers, execId, execName, onDealerUpdated }: Props
         <button
           type="button"
           onClick={() => void downloadCsv()}
-          disabled={downloading}
+          disabled={downloading || filtered.length === 0}
           className="inline-flex items-center gap-1.5 rounded-xl border border-outline-variant/40 px-3 py-2 text-xs font-semibold text-on-surface-variant hover:bg-surface-container transition-colors disabled:opacity-60 ml-auto"
         >
           {downloading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
@@ -291,12 +270,12 @@ export function DealersTab({ dealers, execId, execName, onDealerUpdated }: Props
           <div className="px-5 py-10 text-center">
             <Store className="mx-auto mb-2 h-6 w-6 text-outline" />
             <p className="text-sm font-semibold text-on-surface">No dealers added yet</p>
-            <p className="mt-1 text-xs text-on-surface-variant">This executive hasn't added any dealers in the field app.</p>
+            <p className="mt-1 text-xs text-on-surface-variant">This executive hasn&apos;t added any dealers in the field app.</p>
           </div>
         ) : filtered.length === 0 ? (
           <div className="px-5 py-10 text-center">
             <Search className="mx-auto mb-2 h-6 w-6 text-outline" />
-            <p className="text-sm font-semibold text-on-surface">No results for "{debouncedSearch}"</p>
+            <p className="text-sm font-semibold text-on-surface">No dealers match the current filters</p>
             <p className="mt-1 text-xs text-on-surface-variant">Try a different search term or clear the filter.</p>
           </div>
         ) : (

@@ -10,6 +10,7 @@ import '../../../core/utils/ist_date.dart';
 import '../../../core/widgets/state_views.dart';
 import '../../day_session/providers/day_session_providers.dart';
 import '../data/dealer.dart';
+import '../data/dealer_repository.dart';
 import '../data/dealer_visit.dart';
 import '../data/dealer_visit_repository.dart';
 import '../providers/dealer_providers.dart';
@@ -24,6 +25,7 @@ class DealersScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final user = ref.watch(currentSalesUserProvider);
     final dealersAsync = ref.watch(dealersProvider);
+    ref.watch(customDealerStatusesProvider);
     final filtered = ref.watch(filteredDealersProvider);
     final lastVisits = ref.watch(lastVisitByDealerProvider).value ?? const {};
     final todayVisits = ref.watch(todayVisitsProvider).value ?? const [];
@@ -200,7 +202,12 @@ class DealersScreen extends ConsumerWidget {
     // Grabbed before the first await: the sheet and the write both suspend, and
     // the context may be gone by the time we want to confirm the result.
     final messenger = ScaffoldMessenger.of(context);
-    final draft = await DealerFormSheet.show(context);
+    final customStatuses =
+        ref.read(customDealerStatusesProvider).value ?? const <String>[];
+    final draft = await DealerFormSheet.show(
+      context,
+      customStatuses: customStatuses,
+    );
     if (draft == null) return;
     try {
       await ref
@@ -221,11 +228,22 @@ class DealersScreen extends ConsumerWidget {
     final uid = ref.read(currentUidProvider);
     if (uid == null) return;
     final messenger = ScaffoldMessenger.of(context);
-    final draft = await DealerFormSheet.show(context, initial: dealer);
+    final customStatuses =
+        ref.read(customDealerStatusesProvider).value ?? const <String>[];
+    final draft = await DealerFormSheet.show(
+      context,
+      initial: dealer,
+      customStatuses: customStatuses,
+    );
     if (draft == null) return;
     try {
       final repo = ref.read(dealerRepositoryProvider);
-      await repo.update(dealer.id, draft.input);
+      await repo.update(
+        uid,
+        dealer.id,
+        draft.input,
+        expectedUpdatedAt: dealer.updatedAt,
+      );
       if (draft.image != null) {
         await repo.attachImage(
           uid: uid,
@@ -235,6 +253,9 @@ class DealersScreen extends ConsumerWidget {
       }
       ref.invalidate(dealersProvider);
       _toast(messenger, 'Dealer updated');
+    } on DealerChangedException {
+      ref.invalidate(dealersProvider);
+      _toast(messenger, 'Dealer changed elsewhere. Reopen it and try again.');
     } catch (_) {
       _toast(messenger, 'Could not update the dealer. Please try again.');
     }
@@ -264,7 +285,13 @@ class DealersScreen extends ConsumerWidget {
     if (uid == null) return;
 
     final messenger = ScaffoldMessenger.of(context);
-    final draft = await VisitFormSheet.show(context, dealer);
+    final customStatuses =
+        ref.read(customDealerStatusesProvider).value ?? const <String>[];
+    final draft = await VisitFormSheet.show(
+      context,
+      dealer,
+      customStatuses: customStatuses,
+    );
     if (draft == null) return;
 
     // Tie the visit to the open session and give it the next position in the
@@ -290,8 +317,12 @@ class DealersScreen extends ConsumerWidget {
           geo: draft.geo,
           daySessionId: session?.isActive == true ? session!.id : null,
           visitSequence: todayCount + 1,
+          status: draft.status,
+          statusChanged: draft.statusChanged,
         ),
       );
+      ref.invalidate(dealersProvider);
+      ref.invalidate(dealerByIdProvider(dealer.id));
       ref.invalidate(todayVisitsProvider);
       ref.invalidate(lastVisitByDealerProvider);
       ref.invalidate(visitsForDateProvider(IstDate.today()));

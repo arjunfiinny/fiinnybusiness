@@ -1,34 +1,18 @@
 "use client";
 
-/**
- * Admin Sales Team → View Activity → Dealers Added → Dealer Details
- * (read-only, admin-only).
- *
- * Reuses the EXISTING dealer data (fetchDealerById, dealers-service.ts) and
- * notes data (fetchNotesForDealer, dealer-note-service.ts) — nothing new is
- * tracked or stored. No create/edit/delete/upload affordance anywhere on this
- * page, same constraint already applied to AdminDealerCard.
- */
-
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft, Eye, Phone, MapPin, Store, StickyNote } from "lucide-react";
-import { fetchDealerById, type Dealer } from "../../../../../sales/dealers/dealers-service";
-import { fetchNotesForDealer, type DealerNote } from "../../../../../sales/dealers/dealer-note-service";
+import { ArrowLeft, Phone, MapPin, Store, StickyNote } from "lucide-react";
+import { watchDealer, type Dealer } from "../../../../../sales/dealers/dealers-service";
+import { watchNotesForDealer, writeDealerNote, type DealerNote } from "../../../../../sales/dealers/dealer-note-service";
 import DealerImagePreviewModal from "../../../../../../components/sales/DealerImagePreviewModal";
 
-const TYPE_LABEL: Record<string, string> = {
-  retailer: "Retailer",
-  distributor: "Distributor",
-  manufacturer: "Manufacturer",
-};
-
-const INTEREST_LABEL: Record<string, string> = {
-  low: "Low Interest",
-  considering: "Considering",
-  veryInterested: "Very Interested",
-};
+import { useAdminAuth } from "../../../../_context/admin-auth-context";
+import AdminDealerForm from "../../../AdminDealerForm";
+import {
+  DEALER_TYPES, DEALER_INTERESTS, saveDealer, removeDealer, watchStatusHistory, type DealerStatusChange,
+} from "../../../dealer-management";
 
 type PageState = "loading" | "ready" | "not-found" | "error";
 type NotesState = "loading" | "ready" | "error";
@@ -36,7 +20,7 @@ type NotesState = "loading" | "ready" | "error";
 function fmtNoteTime(ts: unknown): string {
   if (!ts || typeof (ts as any).toDate !== "function") return "";
   const d = (ts as any).toDate();
-  return `${d.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })} · ${d.toLocaleTimeString(
+  return `${d.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric", timeZone: "Asia/Kolkata" })} · ${d.toLocaleTimeString(
     "en-IN",
     { hour: "2-digit", minute: "2-digit", hour12: true },
   )}`;
@@ -45,8 +29,18 @@ function fmtNoteTime(ts: unknown): string {
 export default function AdminDealerDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const identity = useAdminAuth();
+  const canManage = identity.role === "admin";
   const execId = String(params.execId ?? "");
   const dealerId = String(params.dealerId ?? "");
+
+  const backHref = `/admin/sales-team/${encodeURIComponent(execId)}#dealers-added`;
+  const [editing, setEditing] = useState<Dealer | null>(null);
+  const [actionError, setActionError] = useState("");
+  const [working, setWorking] = useState(false);
+  const [noteDraft, setNoteDraft] = useState<{ id?: string; text: string } | null>(null);
+  const [history, setHistory] = useState<DealerStatusChange[]>([]);
+  const [historyError, setHistoryError] = useState(false);
 
   const [dealer, setDealer] = useState<Dealer | null>(null);
   const [pageState, setPageState] = useState<PageState>("loading");
@@ -59,51 +53,41 @@ export default function AdminDealerDetailPage() {
   const [previewOpen, setPreviewOpen] = useState(false);
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setPageState("loading");
-      setLoadError("");
-      try {
-        const d = await fetchDealerById(dealerId);
-        if (cancelled) return;
-        if (!d) {
-          setPageState("not-found");
-          return;
-        }
-        setDealer(d);
-        setPageState("ready");
-      } catch (e) {
-        if (cancelled) return;
-        setLoadError(e instanceof Error ? e.message : "Failed to load dealer.");
-        setPageState("error");
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [dealerId]);
+    return watchDealer(dealerId, (record) => {
+      const visible = record?.active && record.createdBy === execId ? record : null;
+      setDealer(visible);
+      setPageState(visible ? "ready" : "not-found");
+    }, (error) => {
+      setLoadError(error.message);
+      setPageState("error");
+    });
+  }, [dealerId, execId]);
 
+  const visibleDealerId = dealer?.id;
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setNotesState("loading");
-      try {
-        const n = await fetchNotesForDealer(dealerId);
-        if (cancelled) return;
-        setNotes(n);
-        setNotesState("ready");
-      } catch {
-        if (cancelled) return;
-        setNotesState("error");
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [dealerId]);
+    if (!visibleDealerId) return;
+    const stopNotes = watchNotesForDealer(visibleDealerId, (records) => {
+      setNotes(records);
+      setNotesState("ready");
+    }, () => setNotesState("error"));
+    const stopStatus = watchStatusHistory(visibleDealerId, setHistory, () => setHistoryError(true));
+    return () => { stopNotes(); stopStatus(); };
+  }, [visibleDealerId]);
+
+  async function perform(action: () => Promise<void>) {
+    setActionError("");
+    setWorking(true);
+    try {
+      await action();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Could not save changes.");
+    } finally {
+      setWorking(false);
+    }
+  }
 
   const hasImage = Boolean(dealer?.imageUrl) && !imgFailed;
-  const hasGeo = Boolean(dealer?.geo);
+  const location = dealer?.geo;
 
   const handleMaps = () => {
     if (!dealer?.geo) return;
@@ -119,7 +103,7 @@ export default function AdminDealerDetailPage() {
       {/* Header */}
       <div className="flex items-start gap-3">
         <Link
-          href={`/admin/sales-team/${execId}`}
+          href={backHref}
           aria-label="Back to View Activity"
           className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-outline-variant/40 text-on-surface hover:bg-surface-container transition-colors"
         >
@@ -135,14 +119,26 @@ export default function AdminDealerDetailPage() {
         </div>
       </div>
 
-      {/* Read-only notice — same copy/style as the exec activity page */}
-      <div className="flex items-start gap-2 rounded-2xl border border-amber-200 bg-amber-50/60 px-4 py-3">
-        <Eye className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
-        <p className="text-xs text-amber-800">
-          <span className="font-bold">Read-only view.</span> You are viewing this dealer&apos;s
-          details as an admin. No changes are made to this record here.
-        </p>
-      </div>
+      {actionError && <p role="alert" className="text-sm text-red-700">{actionError}</p>}
+
+      {canManage && pageState === "ready" && dealer && (
+        editing ? (
+          <AdminDealerForm initial={editing} onClose={() => setEditing(null)} onSave={async (input) => {
+            await saveDealer(identity.uid, execId, input, editing);
+          }} />
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            <button type="button" disabled={working} onClick={() => setEditing(dealer)} className="rounded-xl border border-outline-variant/40 px-3 py-2 text-sm font-semibold">Edit Dealer</button>
+            <button type="button" disabled={working} className="rounded-xl border border-red-200 px-3 py-2 text-sm font-semibold text-red-700" onClick={() => {
+              if (!window.confirm(`Remove ${dealer.shopName} from active dealers? Previous visits and sessions will remain in the activity history.`)) return;
+              void perform(async () => {
+                await removeDealer(dealer, identity.uid);
+                router.push(backHref);
+              });
+            }}>Remove Dealer</button>
+          </div>
+        )
+      )}
 
       {pageState === "loading" && (
         <div className="flex h-60 items-center justify-center">
@@ -159,7 +155,7 @@ export default function AdminDealerDetailPage() {
           </p>
           <button
             type="button"
-            onClick={() => router.push(`/admin/sales-team/${execId}`)}
+            onClick={() => router.push(backHref)}
             className="mt-4 rounded-xl bg-primary px-4 py-2 text-xs font-bold text-white transition active:scale-95"
           >
             Back to View Activity
@@ -210,6 +206,31 @@ export default function AdminDealerDetailPage() {
               <p className="mb-3 text-xs font-black uppercase tracking-widest text-on-surface-variant">
                 Notes {notes.length > 0 && `(${notes.length})`}
               </p>
+              {canManage && !noteDraft && (
+                <button type="button" disabled={working} onClick={() => setNoteDraft({ text: "" })}
+                  className="mb-3 rounded-xl border border-outline-variant/40 px-3 py-2 text-sm font-semibold">Add Note</button>
+              )}
+              {canManage && noteDraft && (
+                <form className="mb-3 space-y-2" onSubmit={(event) => {
+                  event.preventDefault();
+                  if (working || !noteDraft.text.trim()) return;
+                  void perform(async () => {
+                    await writeDealerNote(execId, dealer.id, noteDraft.text, noteDraft.id);
+                    setNoteDraft(null);
+                  });
+                }}>
+                  <label className="block space-y-1 text-sm font-semibold">
+                    {noteDraft.id ? "Edit note" : "New note"}
+                    <textarea required disabled={working} rows={3} value={noteDraft.text}
+                      onChange={(event) => setNoteDraft({ ...noteDraft, text: event.target.value })}
+                      className="w-full rounded-xl border border-outline-variant/40 p-3 text-sm font-normal" />
+                  </label>
+                  <div className="flex gap-2">
+                    <button disabled={working} type="submit" className="rounded-xl bg-primary px-3 py-2 text-sm font-bold text-white">Save Note</button>
+                    <button disabled={working} type="button" onClick={() => setNoteDraft(null)} className="rounded-xl border border-outline-variant/40 px-3 py-2 text-sm">Cancel</button>
+                  </div>
+                </form>
+              )}
               {notesState === "loading" && (
                 <div className="flex h-24 items-center justify-center">
                   <div className="w-6 h-6 border-4 border-primary border-t-transparent rounded-full animate-spin" />
@@ -235,6 +256,17 @@ export default function AdminDealerDetailPage() {
                     >
                       <p className="text-sm text-on-surface whitespace-pre-wrap">{n.note}</p>
                       <p className="mt-2 text-[11px] text-outline">{fmtNoteTime(n.createdAt)}</p>
+                      {canManage && n.salesExecutiveId === execId && (
+                        <div className="mt-2 flex gap-3 text-xs font-semibold">
+                          <button disabled={working} type="button" className="text-primary" onClick={() => setNoteDraft({ id: n.id, text: n.note })}>Edit Note</button>
+                          <button disabled={working} type="button" className="text-red-700" onClick={() => {
+                            if (window.confirm("Delete this note?")) void perform(async () => {
+                              await writeDealerNote(execId, dealer.id, null, n.id);
+                              if (noteDraft?.id === n.id) setNoteDraft(null);
+                            });
+                          }}>Delete Note</button>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -249,7 +281,7 @@ export default function AdminDealerDetailPage() {
                 Dealer Type
               </p>
               <span className="inline-block rounded-full bg-primary/10 px-3 py-1 text-xs font-bold text-primary">
-                {TYPE_LABEL[dealer.type] ?? dealer.type}
+                {DEALER_TYPES[dealer.type] ?? dealer.type}
               </span>
             </section>
 
@@ -259,12 +291,30 @@ export default function AdminDealerDetailPage() {
               </p>
               {dealer.interest ? (
                 <span className="inline-block rounded-full bg-primary/10 px-3 py-1 text-xs font-bold text-primary">
-                  {INTEREST_LABEL[dealer.interest] ?? dealer.interest}
+                  {DEALER_INTERESTS[dealer.interest] ?? dealer.interest}
                 </span>
               ) : (
                 <span className="inline-block rounded-full bg-surface-container px-3 py-1 text-xs font-bold text-outline">
                   Not set
                 </span>
+              )}
+            </section>
+
+            <section>
+              <h2 className="mb-2 text-xs font-black uppercase tracking-widest text-on-surface-variant">Current Status</h2>
+              <p className="text-sm font-semibold">{dealer.status || "Not set"}</p>
+              {historyError && <p className="mt-2 text-sm text-red-700">Could not load status history.</p>}
+              {history.length > 0 && (
+                <ul aria-label="Status history" className="mt-3 space-y-2 text-sm">
+                  {history.map((event) => (
+                    <li key={event.id} className="rounded-xl bg-surface-container-low p-3">
+                      <p>{event.from ? `${event.from} → ` : ""}{event.to}</p>
+                      <p className="text-xs text-on-surface-variant">
+                        {event.source === "VISIT" ? "Visit" : event.source === "CREATED" ? "Dealer added" : "Dealer update"} · {fmtNoteTime(event.changedAt)}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
               )}
             </section>
 
@@ -274,10 +324,10 @@ export default function AdminDealerDetailPage() {
                 Location
               </p>
               <div className="rounded-2xl border border-outline-variant/30 bg-surface-container-lowest p-4">
-                {hasGeo ? (
+                {location ? (
                   <>
                     <p className="text-xs text-on-surface-variant mb-3">
-                      {dealer.geo!.latitude.toFixed(5)}, {dealer.geo!.longitude.toFixed(5)}
+                      {location.latitude.toFixed(5)}, {location.longitude.toFixed(5)}
                     </p>
                     <button
                       type="button"

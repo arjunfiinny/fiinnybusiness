@@ -32,6 +32,7 @@ import '../../auth/data/auth_repository.dart';
 import '../../../core/models/delivery_address.dart';
 import '../../../core/services/app_review_service.dart';
 import '../../../core/widgets/back_or_home_button.dart';
+import '../../../core/widgets/support_call_card.dart';
 import '../../../core/services/analytics_service.dart';
 
 class CheckoutScreen extends ConsumerStatefulWidget {
@@ -377,9 +378,11 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
       _razorpayOrderId = result['id'] as String?;
       final amount = (result['amount'] as num).toInt();
       _razorpayAmount = amount;
-      // Use the key the backend used to create the order — prevents key-mismatch
-      // errors when the server's RAZORPAY_KEY_ID differs from the app default.
-      final razorpayKey = result['key_id'] as String? ?? AppConfig.razorpayKeyId;
+      // The checkout key must belong to the same account as this server order.
+      final razorpayKey = result['key_id'] as String?;
+      if (razorpayKey == null || !razorpayKey.startsWith('rzp_')) {
+        throw Exception('Payment configuration is unavailable. Please try again later.');
+      }
 
       // GA4 add_payment_info: the payment step is opening (label only).
       AnalyticsService.instance.addPaymentInfo(items);
@@ -711,6 +714,8 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
               const SizedBox(height: 14),
 
               // ── Delivery address ────────────────────────────────────────
+              const SupportCallCard(),
+              const SizedBox(height: 14),
               _SectionCard(
                 icon: Icons.location_on_outlined,
                 title: 'Delivery Address',

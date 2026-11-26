@@ -1793,24 +1793,26 @@ service cloud.firestore {
       allow create: if isSalesExec()
                        && request.resource.data.salesExecutiveId == request.auth.uid
                        && request.resource.data.status == 'ACTIVE';
-      allow update: if isAuthed() && resource.data.salesExecutiveId == request.auth.uid;
+      allow update: if isAuthed()
+                       && resource.data.salesExecutiveId == request.auth.uid
+                       && request.resource.data.salesExecutiveId == resource.data.salesExecutiveId;
       allow delete: if isAdmin();
     }
 
     // ─── dealers ─────────────────────────────────────────────────────────────
-    // Shared dealer master, created by Sales Executives via /sales/dealers and
-    // read by the whole field team. Read/write is restricted to sales execs (or
-    // admins) — previously ANY authenticated user (incl. customers) could read
-    // the entire dealer master (shop name, owner, phone, address, geo). A sales
-    // exec may only create docs carrying their own UID as createdBy, and may
-    // only update their own records. Soft-delete (active=false) goes through
-    // update. Hard-delete is admin-only.
+    // Each sales executive can read and edit only dealers they created.
+    // Admins and sales-team admins retain their reporting access.
     match /dealers/{dealerId} {
-      allow read:   if isSalesExec() || isAdmin() || teamHas('salesTeam');
-      allow create: if isSalesExec()
-                       && request.resource.data.createdBy == request.auth.uid
-                       && request.resource.data.active    == true;
-      allow update: if (isSalesExec() && resource.data.createdBy == request.auth.uid)
+      allow read:   if isAdmin() || teamHas('salesTeam')
+                       || (isSalesExec() && resource.data.createdBy == request.auth.uid);
+      allow create: if request.resource.data.active == true
+                       && request.resource.data.createdBy is string
+                       && request.resource.data.createdBy.size() > 0
+                       && (isAdmin() || (isSalesExec()
+                           && request.resource.data.createdBy == request.auth.uid));
+      allow update: if (isSalesExec()
+                       && resource.data.createdBy == request.auth.uid
+                       && request.resource.data.createdBy == resource.data.createdBy)
                        || isAdmin();
       allow delete: if isAdmin();
     }
@@ -1825,32 +1827,67 @@ service cloud.firestore {
     // where ANY authenticated user (incl. customers) could read all visit data.
     // Hard-delete is admin-only.
     match /dealerVisits/{visitId} {
+      function isActiveOwnedDealer(dealerId) {
+        let dealer = get(/databases/$(database)/documents/dealers/$(dealerId)).data;
+        return dealer.createdBy == request.auth.uid && dealer.get('active', true) == true;
+      }
       allow read:   if isAdmin() || teamHas('salesTeam')
                        || (isAuthed() && resource.data.salesExecutiveId == request.auth.uid);
       allow create: if isSalesExec()
-                       && request.resource.data.salesExecutiveId == request.auth.uid;
+                       && request.resource.data.salesExecutiveId == request.auth.uid
+                       && isActiveOwnedDealer(request.resource.data.dealerId);
       allow update: if isAuthed()
-                       && resource.data.salesExecutiveId == request.auth.uid;
+                       && resource.data.salesExecutiveId == request.auth.uid
+                       && request.resource.data.salesExecutiveId == resource.data.salesExecutiveId;
       allow delete: if isAdmin();
     }
 
 // ─── dealerNotes ──────────────────────────────────────────────────────────
     // One free-text note a sales executive leaves against a dealer — a
     // conversation log, not a structured field. New in the sales app.
-    // Reads are OWNER-SCOPED, same rationale as dealerVisits above: every
-    // client query already filters where('dealerId','==',...) AND is only ever
-    // run by the signed-in rep looking at their own notes, so owner-scoping
-    // matches the only read path that exists.
+    // Reads are OWNER-SCOPED, same rationale as dealerVisits above: the
+    // sales-app query filters both dealerId and salesExecutiveId so rules can
+    // prove the whole result set belongs to the signed-in rep.
     // Unlike dealerVisits, delete is NOT admin-only: the rep who wrote a note
-    // is expected to be able to remove it themselves. Notes are immutable once
-    // created (no edit flow), so there is no update rule.
+    // is expected to be able to remove it themselves. Only admins may edit an
+    // existing note from the Sales Team portal.
     match /dealerNotes/{noteId} {
       allow read:   if isAdmin() || teamHas('salesTeam')
                        || (isAuthed() && resource.data.salesExecutiveId == request.auth.uid);
-      allow create: if isSalesExec()
-                       && request.resource.data.salesExecutiveId == request.auth.uid;
+      allow create: if isAdmin() || (isSalesExec()
+                       && request.resource.data.salesExecutiveId == request.auth.uid
+                       && get(/databases/$(database)/documents/dealers/$(request.resource.data.dealerId)).data.createdBy == request.auth.uid);
+      allow update: if isAdmin();
       allow delete: if isAdmin()
                        || (isAuthed() && resource.data.salesExecutiveId == request.auth.uid);
+    }
+
+    // Reusable custom status choices for one executive. Admins can read them
+    // when editing that executive's dealers in the Sales Team portal.
+    match /dealerStatusOptions/{execId} {
+      allow read: if isAdmin() || teamHas('salesTeam')
+                     || (isSalesExec() && execId == request.auth.uid);
+      allow create, update: if isAdmin()
+                     || (isSalesExec() && execId == request.auth.uid
+                         && request.resource.data.statuses is list);
+    }
+
+    // One immutable event per dealer status change. The dealer and event are
+    // written together in a batch or transaction by the mobile app.
+    match /dealerStatusHistory/{changeId} {
+      allow read: if isAdmin() || teamHas('salesTeam')
+                     || (isSalesExec()
+                         && resource.data.salesExecutiveId == request.auth.uid);
+      allow create: if isAdmin()
+                     || (isSalesExec()
+                         && request.resource.data.salesExecutiveId == request.auth.uid
+                         && request.resource.data.changedBy == request.auth.uid
+                         && request.resource.data.toStatus is string
+                         && request.resource.data.toStatus.size() > 0
+                         && request.resource.data.toStatus.size() <= 50
+                         && request.resource.data.source in ['CREATED', 'EDIT', 'VISIT']
+                         && getAfter(/databases/$(database)/documents/dealers/$(request.resource.data.dealerId)).data.createdBy == request.auth.uid
+                         && getAfter(/databases/$(database)/documents/dealers/$(request.resource.data.dealerId)).data.status == request.resource.data.toStatus);
     }
 
     // ─── salesAttendance ──────────────────────────────────────────────────────

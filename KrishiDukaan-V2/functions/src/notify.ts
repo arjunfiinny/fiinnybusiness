@@ -83,6 +83,49 @@ export async function notify(
     console.error(`[notify] doc write failed for ${phone}:`, err);
   }
 
+  await push(phone, type, title, body, data);
+}
+
+/** Create one in-app notification for an event and push it once. Repeated
+ * webhook deliveries or scheduled retries cannot create duplicate messages. */
+export async function notifyOnce(
+  id: string,
+  recipientPhone: string,
+  type: string,
+  title: string,
+  body: string,
+  data: Record<string, string> = {}
+): Promise<boolean> {
+  const phone = (recipientPhone ?? "").trim();
+  if (!phone || !id || id.includes("/")) return false;
+  try {
+    await db().collection("notifications").doc(id).create({
+      recipientPhone: phone,
+      recipientPhones: phoneVariants(phone),
+      type,
+      title,
+      body,
+      data,
+      read: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+  } catch (err) {
+    // Firestore ALREADY_EXISTS: another invocation sent this event already.
+    if ((err as { code?: number | string }).code === 6 ||
+        (err as { code?: number | string }).code === "already-exists") return false;
+    throw err;
+  }
+  await push(phone, type, title, body, data);
+  return true;
+}
+
+async function push(
+  phone: string,
+  type: string,
+  title: string,
+  body: string,
+  data: Record<string, string>
+): Promise<void> {
   try {
     let token: string | null = null;
     for (const variant of phoneVariants(phone)) {

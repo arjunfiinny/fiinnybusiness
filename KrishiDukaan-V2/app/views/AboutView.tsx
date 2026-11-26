@@ -8,6 +8,9 @@ import type { AboutPageContent } from '../firebase';
 import { AboutPartnersSection, AboutPresenceSection } from '../components/AboutNetworkSections';
 import { PLAY_STORE_URL, APP_STORE_URL, androidLive, iosLive } from '../lib/store-links';
 import { COMPANY } from '../lib/legal-constants';
+import { LogIn, HeadphonesIcon } from 'lucide-react';
+import { BookOpen, ArrowUpRight, Share2 } from 'lucide-react';
+import { CatalogShareButton } from '../catalog/_components/catalog-actions';
 import SupportInboxSection from './SupportInboxSection';
 
 interface Props {
@@ -221,6 +224,55 @@ export default function AboutView({ user, userName, userEmail, onNavigate, onReq
               <Link href="/app" className="mt-4 inline-block text-sm font-bold text-primary hover:underline">
                 {t('footerViewAppPage')} →
               </Link>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Shareable field catalog for sales conversations and printable handouts. */}
+      <section className="bg-[#f2f6ef] border-y border-[#d7e5d8] py-16">
+        <div className="mx-auto grid max-w-7xl items-center gap-10 px-4 md:grid-cols-[1.1fr_0.9fr] md:px-10">
+          <div>
+            <span className="inline-flex items-center gap-2 text-xs font-black uppercase tracking-[0.18em] text-primary">
+              <BookOpen className="h-4 w-4" /> {t('aboutCatalogLabel')}
+            </span>
+            <h2 className="mt-4 max-w-xl text-3xl font-black leading-tight tracking-tight text-on-surface md:text-4xl">
+              {t('aboutCatalogTitle')}
+            </h2>
+            <p className="mt-4 max-w-xl text-base leading-relaxed text-on-surface-variant">
+              {t('aboutCatalogDescription')}
+            </p>
+            <div className="mt-7 flex flex-wrap gap-3">
+              <Link href="/catalog" className="inline-flex items-center gap-2 rounded-xl bg-primary px-5 py-3 text-sm font-bold text-white transition-colors hover:bg-primary/90">
+                {t('aboutCatalogView')} <ArrowUpRight className="h-4 w-4" />
+              </Link>
+              <CatalogShareButton label={t('aboutCatalogShare')} copiedLabel={t('aboutCatalogCopied')} className="inline-flex items-center gap-2 rounded-xl border border-primary/25 bg-white px-5 py-3 text-sm font-bold text-primary transition-colors hover:bg-primary/5" />
+            </div>
+            <p className="mt-3 text-xs text-on-surface-variant">{t('aboutCatalogPrint')}</p>
+          </div>
+          <div className="rounded-[28px] border border-[#cbdccf] bg-white p-6 shadow-[0_18px_50px_rgba(15,57,27,0.10)] md:p-8">
+            <div className="mb-5 flex items-center justify-between border-b border-[#e2ebe2] pb-4">
+              <span className="text-xl font-black tracking-tight text-primary">Krishi<span className="text-amber-600">Dukan</span></span>
+              <span className="rounded-full bg-[#e8f2e8] px-3 py-1 text-[10px] font-black uppercase tracking-wider text-primary">{t('aboutCatalogGuide')}</span>
+            </div>
+            <div className="mb-5 overflow-hidden rounded-2xl border border-[#e2ebe2] bg-[#f3f6ed]">
+              <img src="/images/catalog/marketplace-preview.webp" alt="KrishiDukan marketplace app preview" className="h-40 w-full object-cover" />
+            </div>
+            <div className="space-y-4">
+              {[
+                ['01', t('aboutCatalogFarmers'), t('aboutCatalogFarmersDesc')],
+                ['02', t('aboutCatalogBusinesses'), t('aboutCatalogBusinessesDesc')],
+                ['03', t('aboutCatalogStart'), t('aboutCatalogStartDesc')],
+                ['04', t('aboutCatalogInfluencers'), t('aboutCatalogInfluencersDesc')],
+              ].map(([number, title, description]) => (
+                <div className="flex gap-4" key={number}>
+                  <span className="font-black text-amber-600">{number}</span>
+                  <div><h3 className="font-bold text-on-surface">{title}</h3><p className="text-sm text-on-surface-variant">{description}</p></div>
+                </div>
+              ))}
+            </div>
+            <div className="mt-6 flex items-center justify-between rounded-xl bg-primary px-4 py-3 text-xs font-bold text-white">
+              krishidukan.com/catalog <Share2 className="h-4 w-4" />
             </div>
           </div>
         </div>

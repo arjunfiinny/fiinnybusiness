@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/constants/app_colors.dart';
@@ -10,6 +11,7 @@ import '../../../core/utils/ist_date.dart';
 import '../../../core/widgets/state_views.dart';
 import '../data/dealer.dart';
 import '../data/dealer_note.dart';
+import '../data/dealer_status.dart';
 import '../providers/dealer_note_providers.dart';
 import '../providers/dealer_providers.dart';
 
@@ -37,7 +39,7 @@ class DealerDetailScreen extends ConsumerWidget {
           onRetry: () => ref.invalidate(dealerByIdProvider(dealerId)),
         ),
         data: (dealer) {
-          if (dealer == null) {
+          if (dealer == null || !dealer.active) {
             return EmptyView(
               icon: Icons.help_outline_rounded,
               title: 'Dealer not found',
@@ -171,6 +173,24 @@ class _DealerDetailBody extends ConsumerWidget {
         ),
 
         const SizedBox(height: 20),
+        const SectionLabel('Current status'),
+        AppCard(
+          child: StatusChip(
+            label: dealer.status ?? 'Not set',
+            color: dealer.status == null
+                ? AppColors.outline
+                : AppColors.harvest,
+            background: dealer.status == null
+                ? AppColors.surfaceContainer
+                : AppColors.harvestContainer,
+          ),
+        ),
+
+        const SizedBox(height: 20),
+        const SectionLabel('Status history'),
+        _StatusHistory(dealerId: dealer.id),
+
+        const SizedBox(height: 20),
         const SectionLabel('Dealer Interest'),
         AppCard(
           child: dealer.interest == null
@@ -188,6 +208,83 @@ class _DealerDetailBody extends ConsumerWidget {
 
         const SizedBox(height: 24),
         _NotesSection(dealerId: dealer.id),
+      ],
+    );
+  }
+}
+
+class _StatusHistory extends ConsumerWidget {
+  const _StatusHistory({required this.dealerId});
+
+  final String dealerId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final history = ref.watch(dealerStatusHistoryProvider(dealerId));
+    return history.when(
+      loading: () =>
+          const Padding(padding: EdgeInsets.all(20), child: LoadingView()),
+      error: (_, _) => AppCard(
+        child: TextButton(
+          onPressed: () =>
+              ref.invalidate(dealerStatusHistoryProvider(dealerId)),
+          child: const Text('Could not load status history. Tap to retry.'),
+        ),
+      ),
+      data: (changes) => AppCard(
+        child: changes.isEmpty
+            ? const Text('No status changes recorded yet.')
+            : Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (var i = 0; i < changes.length; i++) ...[
+                    if (i > 0) const Divider(height: 24),
+                    _StatusChangeRow(change: changes[i]),
+                  ],
+                ],
+              ),
+      ),
+    );
+  }
+}
+
+class _StatusChangeRow extends StatelessWidget {
+  const _StatusChangeRow({required this.change});
+
+  final DealerStatusChange change;
+
+  @override
+  Widget build(BuildContext context) {
+    final when = change.changedAt == null
+        ? 'Just now'
+        : DateFormat('d MMM yyyy, h:mm a').format(
+            change.changedAt!.toUtc().add(
+              const Duration(hours: 5, minutes: 30),
+            ),
+          );
+    final source = switch (change.source) {
+      'CREATED' => 'Dealer added',
+      'VISIT' => 'Visit',
+      'ADMIN_EDIT' => 'Admin update',
+      _ => 'Dealer edit',
+    };
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          change.fromStatus == null
+              ? change.toStatus
+              : '${change.fromStatus} → ${change.toStatus}',
+          style: const TextStyle(fontWeight: FontWeight.w700),
+        ),
+        const SizedBox(height: 3),
+        Text(
+          '$source · $when',
+          style: const TextStyle(
+            fontSize: 12,
+            color: AppColors.onSurfaceVariant,
+          ),
+        ),
       ],
     );
   }
@@ -383,8 +480,7 @@ class _NotesSectionState extends ConsumerState<_NotesSection> {
                     const SizedBox(width: 10),
                     Expanded(
                       child: FilledButton(
-                        onPressed:
-                            _saving || _controller.text.trim().isEmpty
+                        onPressed: _saving || _controller.text.trim().isEmpty
                             ? null
                             : _save,
                         child: _saving

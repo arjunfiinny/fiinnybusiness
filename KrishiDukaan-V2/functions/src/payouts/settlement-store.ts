@@ -193,9 +193,9 @@ export async function recordCancelled(orderId: string, reference: string): Promi
 }
 
 /**
- * The platform was to ship but no courier booked: the seller delivers, so the
- * delivery money and their courier share become theirs (an adjustment, paid
- * after delivery). Returns whether anything was added.
+ * The platform was to ship but no courier booked. New plans keep delivery
+ * money with KrishiDukan and return only the seller's unused courier offer;
+ * old plans retain their original payout promise.
  */
 export async function recordSelfDelivery(orderId: string, plan: SettlementPlan, sellerKey: string): Promise<boolean> {
   if (plan.deliveryTo !== "platform") return false;
@@ -209,7 +209,7 @@ export async function recordSelfDelivery(orderId: string, plan: SettlementPlan, 
         orderId, kind: "self_delivery", at, sellerKey: key10(sellerKey), reference: "",
         carrier: "", service: "", simulated: false,
         costPaise: 0, customerNetPaise: 0, sellerPaise: 0, campaignPaise: 0, platformPaise: 0,
-        // Delivery money the platform held, now owed to the seller who delivers.
+        // Only the adjustment owed under this plan (v2: unused courier offer).
         toSellerPaise: adj?.netPaise ?? 0,
         campaignApplied: plan.campaignApplied,
       });

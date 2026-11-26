@@ -664,6 +664,9 @@ class _MarketplaceScreenState extends ConsumerState<MarketplaceScreen> {
         return ProductCard(
           product: product,
           onTap: () => context.push('/product/${product.id}'),
+          onAddToCart: canQuickBuy(product)
+              ? () => quickAddToCart(context, ref, product)
+              : null,
           onBuyNow: canQuickBuy(product)
               ? () => quickBuyNow(context, ref, product)
               : null,

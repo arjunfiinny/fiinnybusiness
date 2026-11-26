@@ -4,9 +4,9 @@
  *
  *   npx tsx scripts/tests/settlement.test.ts
  *
- * Every number below is worked by hand from the owner's rules (16 Nov 2026):
- * commission 2% of goods, gateway 2% + 18% GST, delivery never in the seller's
- * transfer when the platform ships, Option B for campaigns.
+ * Every number below is worked by hand from the owner's rules: commission 2%
+ * of goods, gateway 2% + 18% GST, customer delivery always stays with the
+ * platform, Option B for campaigns.
  */
 import assert from "node:assert/strict";
 import {
@@ -99,24 +99,27 @@ for (const cost of [1, 37, 80, 99, 143, 250, 999]) {
   assert.deepEqual(capped, { sellerCourier: 0, campaign: 50, customerBase: 30, customerDelivery: 31 });
 }
 
-// ── Seller delivers (no courier serves): the slab is theirs ─────────────
+// ── Seller delivers (no courier serves): delivery still stays with platform ─
 {
   const p = planSettlement({ sellerKey: SELLER, goods: 1000, deliveryTo: "seller", customerDelivery: 50,
     sellerCourier: 99, campaign: 99, rates: R });      // offer/campaign ignored when the seller delivers
-  assert.equal(p.keptDeliveryPaise, 5000);
+  assert.equal(p.v, 2);
+  assert.equal(p.keptDeliveryPaise, 0);
   assert.equal(p.sellerCourierPaise, 0);
   assert.equal(p.campaignPaise, 0);
   assert.equal(p.commissionPaise, 2000);                   // still 2% of goods only
-  assert.equal(p.gatewayFeePaise, 2478);                   // on goods + their delivery
-  assert.equal(p.transferPaise, 100522);
-  assert.equal(selfDeliveryAdjustment(p, SELLER, AT), null);   // nothing to add, it's already theirs
+  assert.equal(p.gatewayFeePaise, 2360);                   // on goods only
+  assert.equal(p.transferPaise, 95640);                    // no delivery in Route
+  assert.equal(selfDeliveryAdjustment(p, SELLER, AT), null);
 }
 
-// ── No courier booked after all → seller delivers, gets the delivery money ─
+// ── No courier booked → delivery stays with platform, unused offer returns ─
 {
   const s1 = planSettlement({ sellerKey: SELLER, goods: 1000, deliveryTo: "platform", customerDelivery: 82,
     courierQuote: 80, rates: R });
-  assert.equal(selfDeliveryAdjustment(s1, SELLER, AT)?.netPaise, 8006);  // 82 less the fee on it
+  assert.equal(selfDeliveryAdjustment(s1, SELLER, AT), null);
+  // An already-paid v1 order retains its original delivery payout promise.
+  assert.equal(selfDeliveryAdjustment({ ...s1, v: 1 }, SELLER, AT)?.netPaise, 8006);
   const s2 = planSettlement({ sellerKey: SELLER, goods: 1000, deliveryTo: "platform", customerDelivery: 0,
     sellerCourier: 80, courierQuote: 80, sellerShare: 1, rates: R });
   assert.equal(selfDeliveryAdjustment(s2, SELLER, AT)?.netPaise, 8000);  // their ₹80 share back
@@ -177,11 +180,12 @@ for (const cost of [1, 37, 80, 99, 143, 250, 999]) {
   const p = planSettlement({ sellerKey: SELLER, goods: 1000, deliveryTo: "platform", customerDelivery: 82, rates: R });
   assert.deepEqual(readPlan(JSON.parse(JSON.stringify(p))), p);
   assert.equal(readPlan(null), null);
-  assert.equal(readPlan({ ...p, v: 2 }), null);
+  assert.equal(readPlan({ ...p, v: 3 }), null);
+  assert.equal(readPlan({ ...p, v: 1 })?.v, 1);            // historical orders remain readable
   assert.equal(readPlan({ ...p, goodsPaise: 10.5 }), null);
   assert.equal(readPlan({ ...p, deliveryTo: "customer" }), null);
   assert.deepEqual(readAdjustments([{ id: "x", kind: "self_delivery", netPaise: -5, sellerKey: SELLER }, null, "y"]), []);
-  const a = selfDeliveryAdjustment(p, SELLER, AT)!;
+  const a = selfDeliveryAdjustment({ ...p, v: 1 }, SELLER, AT)!;
   assert.equal(readAdjustments([a]).length, 1);
   // Adding the same adjustment twice (a trigger fired twice) changes nothing.
   const once = withAdjustment([], a);
@@ -260,21 +264,23 @@ console.log("settlement: all checks passed");
 // ── Balance payouts (payout run, after-KYC): plan + adjustments in one go ─
 {
   const { balancePayoutSplit, markAdjustmentsPaid } = require("../../functions/src/payouts/settlement") as typeof import("../../functions/src/payouts/settlement");
-  const p = planSettlement({ sellerKey: SELLER, goods: 1000, deliveryTo: "platform", customerDelivery: 82, courierQuote: 80, rates: R });
+  const p = planSettlement({ sellerKey: SELLER, goods: 1000, deliveryTo: "platform", customerDelivery: 82,
+    sellerCourier: 80, courierQuote: 80, sellerShare: 1, rates: R });
   const adj = [selfDeliveryAdjustment(p, SELLER, AT)!];
   const split = balancePayoutSplit(p, adj, { sellerKey: SELLER });
-  assert.equal(split.transferPaise, 95640 + 8006);
-  assert.equal(split.adjustmentsPaise, 8006);
+  assert.equal(split.transferPaise, 87640 + 8000);
+  assert.equal(split.adjustmentsPaise, 8000);
   const paid = markAdjustmentsPaid(adj, SELLER, "trf_9", AT, "payout_run");
   assert.equal(paid[0].paidTransferId, "trf_9");
-  assert.equal(balancePayoutSplit(p, paid, { sellerKey: SELLER }).transferPaise, 95640);  // never paid twice
+  assert.equal(balancePayoutSplit(p, paid, { sellerKey: SELLER }).transferPaise, 87640);  // never paid twice
   console.log("settlement balance payouts: all checks passed");
 }
 
 // ── Top-ups for Route sellers (functions/src/payouts/settlement-topups.ts) ─
 {
   const { decideTopUp } = require("../../functions/src/payouts/settlement-topups") as typeof import("../../functions/src/payouts/settlement-topups");
-  const p = planSettlement({ sellerKey: SELLER, goods: 1000, deliveryTo: "platform", customerDelivery: 82, courierQuote: 80, rates: R });
+  const p = planSettlement({ sellerKey: SELLER, goods: 1000, deliveryTo: "platform", customerDelivery: 82,
+    sellerCourier: 80, courierQuote: 80, sellerShare: 1, rates: R });
   const adj = selfDeliveryAdjustment(p, SELLER, AT)!;
   const day = 24 * 3600 * 1000;
   const deliveredAt = Date.parse("2026-11-01T10:00:00Z");
@@ -285,7 +291,7 @@ console.log("settlement: all checks passed");
     settlementAdjustments: [adj],
   };
   assert.deepEqual(decideTopUp(order, deliveredAt + 8 * day),
-    { action: "pay", amountPaise: 8006, accountId: "acc_ABCDEFGHIJKLMN", sellerKey: "8658031942" });
+    { action: "pay", amountPaise: 8000, accountId: "acc_ABCDEFGHIJKLMN", sellerKey: "8658031942" });
   assert.equal(decideTopUp(order, deliveredAt + 6 * day).action, "wait");                      // refund window
   assert.equal(decideTopUp({ ...order, status: "out_for_delivery" }, deliveredAt + 8 * day).action, "wait");
   assert.equal(decideTopUp({ ...order, settlement: { ...order.settlement, routed: false } }, deliveredAt + 8 * day).action, "skip");

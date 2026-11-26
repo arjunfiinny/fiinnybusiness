@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../../../core/constants/app_colors.dart';
+import '../../../core/constants/app_config.dart';
 import '../../../core/constants/app_text_styles.dart';
 import '../../../core/providers/locale_provider.dart';
 import '../../../core/widgets/app_top_bar.dart';
@@ -27,6 +30,50 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
   final _messageCtrl = TextEditingController();
   final _repo = SupportRepository();
   bool _submitting = false;
+
+  String get _catalogUrl => '${AppConfig.apiBaseUrl}/catalog';
+
+  Future<void> _callSupport() async {
+    final phone = Uri(scheme: 'tel', path: AppConfig.supportPhone);
+    try {
+      if (await launchUrl(phone, mode: LaunchMode.externalApplication)) return;
+    } catch (_) {}
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not open the phone app.')),
+      );
+    }
+  }
+
+  Future<void> _openCatalog() async {
+    try {
+      if (await launchUrl(Uri.parse(_catalogUrl), mode: LaunchMode.externalApplication)) return;
+    } catch (_) {}
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not open the catalog. Please try again.')),
+      );
+    }
+  }
+
+  Future<void> _shareCatalog() async {
+    final box = context.findRenderObject() as RenderBox?;
+    try {
+      await SharePlus.instance.share(ShareParams(
+        text: 'Explore KrishiDukan for farmers and agri businesses: $_catalogUrl',
+        subject: 'KrishiDukan catalog',
+        sharePositionOrigin: box != null && box.hasSize
+            ? box.localToGlobal(Offset.zero) & box.size
+            : null,
+      ));
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not share the catalog. Please try again.')),
+        );
+      }
+    }
+  }
 
   @override
   void dispose() {
@@ -80,10 +127,10 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
     final content = ref.watch(aboutContentProvider).value;
 
     final stats = [
-      ('2,800+', isHindi ? 'पंजीकृत उपयोगकर्ता' : 'Registered Users'),
-      ('275+', isHindi ? 'कृषि दुकानें' : 'Retail Stores'),
+      ('4,600+', isHindi ? 'पंजीकृत उपयोगकर्ता' : 'Registered Users'),
+      ('770+', isHindi ? 'कृषि दुकानें' : 'Retail Stores'),
       ('35+', isHindi ? 'निर्माता कंपनियाँ' : 'Manufacturers'),
-      ('145+', isHindi ? 'सूचीबद्ध उत्पाद' : 'Products Listed'),
+      ('200+', isHindi ? 'सूचीबद्ध उत्पाद' : 'Products Listed'),
     ];
 
     final values = [
@@ -195,6 +242,75 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
           ),
           const SizedBox(height: 24),
 
+          // ── Field catalog for sales conversations ──────────────────────
+          Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF1F6EF),
+              border: Border.all(color: const Color(0xFFD0E2D3)),
+              borderRadius: BorderRadius.circular(18),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Icon(Icons.menu_book_outlined, color: AppColors.primary, size: 30),
+                const SizedBox(height: 10),
+                Text(
+                  isHindi ? 'कृषीदुकान परिचय पुस्तिका' : 'The KrishiDukan catalog',
+                  style: AppTextStyles.heading2.copyWith(color: AppColors.primary),
+                ),
+                const SizedBox(height: 7),
+                Text(
+                  isHindi
+                      ? 'किसानों और कृषि दुकानदारों को हमारा प्लेटफ़ॉर्म कुछ ही मिनटों में समझाएँ।'
+                      : 'Show farmers and agri shops what the platform can do in just a few minutes.',
+                  style: AppTextStyles.bodySmall.copyWith(color: AppColors.onSurfaceVariant),
+                ),
+                const SizedBox(height: 15),
+                for (final item in [
+                  isHindi ? 'उत्पाद खोजें और पास के विक्रेताओं की तुलना करें' : 'Discover products and compare nearby sellers',
+                  isHindi ? 'डिलीवरी सहित कीमत देखें और दुकान चुनें' : 'See delivered prices and choose a store',
+                  isHindi ? 'शहर या पिन कोड से उत्पाद बेचने वाली नज़दीकी दुकान खोजें' : 'Find a nearby shop for a product by city or PIN code',
+                  isHindi ? 'अपनी कृषि दुकान को ऑनलाइन दिखाएँ' : 'Bring your agri shop online',
+                ])
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 9),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Icon(Icons.check_circle, color: AppColors.primary, size: 17),
+                        const SizedBox(width: 8),
+                        Expanded(child: Text(item, style: AppTextStyles.bodySmall)),
+                      ],
+                    ),
+                  ),
+                const SizedBox(height: 7),
+                Row(
+                  children: [
+                    Expanded(
+                      child: FilledButton.icon(
+                        onPressed: _openCatalog,
+                        icon: const Icon(Icons.open_in_new, size: 17),
+                        label: Text(isHindi ? 'पुस्तिका देखें' : 'View catalog'),
+                        style: FilledButton.styleFrom(backgroundColor: AppColors.primary),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: _shareCatalog,
+                        icon: const Icon(Icons.share_outlined, size: 17),
+                        label: Text(isHindi ? 'शेयर करें' : 'Share'),
+                        style: OutlinedButton.styleFrom(foregroundColor: AppColors.primary),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 24),
+
           // ── Brands connected with us (Admin > About page) ────────────────
           if (content != null && content.showPartners) ...[
             AboutPartnersOrbit(
@@ -276,6 +392,44 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
           // ── Contact form ─────────────────────────────────────────────────
           Text(isHindi ? 'हमसे संपर्क करें' : 'Get in Touch', style: AppTextStyles.heading3),
           const SizedBox(height: 12),
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: AppColors.primary,
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.call_outlined, color: Colors.white, size: 28),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(isHindi ? 'मदद के लिए सीधे कॉल करें' : 'Call us directly',
+                          style: AppTextStyles.bodyMedium.copyWith(color: Colors.white)),
+                      const SizedBox(height: 3),
+                      InkWell(
+                        onTap: _callSupport,
+                        child: Text('+91 86580 32751',
+                            style: AppTextStyles.bodySmall.copyWith(
+                              color: Colors.white,
+                              decoration: TextDecoration.underline,
+                              decorationColor: Colors.white,
+                            )),
+                      ),
+                    ],
+                  ),
+                ),
+                TextButton(
+                  onPressed: _callSupport,
+                  style: TextButton.styleFrom(foregroundColor: Colors.white),
+                  child: Text(isHindi ? 'कॉल करें' : 'Call now'),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
           Form(
             key: _formKey,
             child: Column(

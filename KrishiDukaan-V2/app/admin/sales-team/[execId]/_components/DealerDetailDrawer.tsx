@@ -268,7 +268,7 @@ export function DealerDetailDrawer({ dealer, execId, canEdit, canDelete, onEdit,
               <div className="flex flex-col items-center gap-1.5 rounded-2xl border border-outline-variant/20 bg-surface-container-lowest px-5 py-8 text-center">
                 <StickyNote className="h-5 w-5 text-outline" />
                 <p className="text-sm font-semibold text-on-surface">No notes yet</p>
-                <p className="text-xs text-on-surface-variant">The executive hasn't added notes for this dealer.</p>
+                <p className="text-xs text-on-surface-variant">The executive hasn&apos;t added notes for this dealer.</p>
               </div>
             )}
 

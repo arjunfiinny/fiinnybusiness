@@ -48,14 +48,14 @@ function allStatuses(dealers: Dealer[]): string[] {
 }
 
 export function StatusTab({ dealers, execName }: Props) {
-  const [activeFilter, setActiveFilter] = useState<string>("all");
+  const [activeFilter, setActiveFilter] = useState<string | null | undefined>(undefined);
 
   const statusesInUse = useMemo(() => allStatuses(dealers), [dealers]);
 
   const filtered = useMemo(
-    () => activeFilter === "all"
+    () => activeFilter === undefined
       ? dealers
-      : activeFilter === "none"
+      : activeFilter === null
         ? dealers.filter((d) => !d.status)
         : dealers.filter((d) => d.status === activeFilter),
     [dealers, activeFilter],
@@ -63,11 +63,11 @@ export function StatusTab({ dealers, execName }: Props) {
 
   // Count per status for filter chips
   const countByStatus = useMemo(() => {
-    const map = new Map<string, number>();
-    map.set("none", 0);
+    const map = new Map<string | null, number>();
+    map.set(null, 0);
     for (const d of dealers) {
       if (d.status) map.set(d.status, (map.get(d.status) ?? 0) + 1);
-      else map.set("none", (map.get("none") ?? 0) + 1);
+      else map.set(null, (map.get(null) ?? 0) + 1);
     }
     return map;
   }, [dealers]);
@@ -93,7 +93,7 @@ export function StatusTab({ dealers, execName }: Props) {
       addedOn:   formatDate(d.createdAt),
     }));
     const csv = buildCsv(headers, rows);
-    const suffix = activeFilter === "all" ? "all" : activeFilter === "none" ? "no_status" : activeFilter;
+    const suffix = activeFilter === undefined ? "all" : activeFilter === null ? "no_status" : safeFilename(activeFilter);
     downloadCsv(csv, `${safeFilename(execName)}_status_${suffix}_${todayISO()}.csv`);
   };
 
@@ -113,11 +113,11 @@ export function StatusTab({ dealers, execName }: Props) {
       <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
-          onClick={() => setActiveFilter("all")}
-          className={chipCls(activeFilter === "all")}
+          onClick={() => setActiveFilter(undefined)}
+          className={chipCls(activeFilter === undefined)}
         >
           All
-          <span className={`rounded-full px-1.5 text-[10px] font-bold ${activeFilter === "all" ? "bg-white/20 text-white" : "bg-surface-container text-on-surface-variant"}`}>
+          <span className={`rounded-full px-1.5 text-[10px] font-bold ${activeFilter === undefined ? "bg-white/20 text-white" : "bg-surface-container text-on-surface-variant"}`}>
             {dealers.length}
           </span>
         </button>
@@ -136,15 +136,15 @@ export function StatusTab({ dealers, execName }: Props) {
           </button>
         ))}
 
-        {(countByStatus.get("none") ?? 0) > 0 && (
+        {(countByStatus.get(null) ?? 0) > 0 && (
           <button
             type="button"
-            onClick={() => setActiveFilter("none")}
-            className={chipCls(activeFilter === "none")}
+            onClick={() => setActiveFilter(null)}
+            className={chipCls(activeFilter === null)}
           >
             No status
-            <span className={`rounded-full px-1.5 text-[10px] font-bold ${activeFilter === "none" ? "bg-white/20 text-white" : "bg-surface-container text-on-surface-variant"}`}>
-              {countByStatus.get("none") ?? 0}
+            <span className={`rounded-full px-1.5 text-[10px] font-bold ${activeFilter === null ? "bg-white/20 text-white" : "bg-surface-container text-on-surface-variant"}`}>
+              {countByStatus.get(null) ?? 0}
             </span>
           </button>
         )}
@@ -230,7 +230,7 @@ export function StatusTab({ dealers, execName }: Props) {
       {filtered.length > 0 && (
         <p className="text-xs text-on-surface-variant text-right">
           {filtered.length} dealer{filtered.length !== 1 ? "s" : ""}
-          {activeFilter !== "all" && ` · filtered by "${statusLabel(activeFilter === "none" ? undefined : activeFilter) || "No status"}"`}
+          {activeFilter !== undefined && ` · filtered by "${activeFilter === null ? "No status" : statusLabel(activeFilter)}"`}
         </p>
       )}
     </div>

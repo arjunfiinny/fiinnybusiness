@@ -1,28 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
-import { FieldValue } from "firebase-admin/firestore";
 import { getAdminDb } from "../../../../../../lib/firebase-admin";
 import { requireSection } from "../../../../../../lib/admin-auth";
 import { writeAuditLog, auditMeta } from "../../../../../../lib/audit-log-service";
 import { csvCell } from "../../../../../../admin/_lib/csv";
 
+import { normalizeDealerStatus } from "../../../../../../sales/dealers/dealer-status";
+import { salesDate, timestampMs } from "../../../../../../admin/sales-team/sales-activity";
+import { matchesSearch } from "../../../../../../admin/sales-team/dealer-search";
+
 type Params = { params: { execId: string } };
 
 const HEADERS = [
-  "Dealer/Shop Name", "Owner Name", "Phone", "Address",
-  "City/District/State", "Latitude", "Longitude",
+  "Dealer ID", "Dealer/Shop Name", "Owner Name", "Phone", "Address", "Latitude", "Longitude",
   "Dealer Type", "Current Status", "Dealer Interest", "Notes",
-  "Added By (Executive)", "Added On",
+  "Added By (Executive)", "Added On", "Updated On",
 ];
-
-const STATUS_LABELS: Record<string, string> = {
-  pitching: "Pitching", interested: "Interested", ongoing: "Ongoing",
-  pending: "Pending", completed: "Completed", closed: "Closed",
-  notInterested: "Not Interested",
-};
-function statusLabel(s: string | undefined): string {
-  if (!s) return "";
-  return STATUS_LABELS[s] ?? s.replace(/([A-Z])/g, " $1").replace(/^./, (c) => c.toUpperCase()).trim();
-}
 
 function formatTimestamp(ts: FirebaseFirestore.Timestamp | undefined | null): string {
   if (!ts?.toDate) return "";
@@ -41,6 +33,7 @@ export async function GET(req: NextRequest, { params }: Params) {
   const url = new URL(req.url);
   const from = url.searchParams.get("from");
   const to = url.searchParams.get("to");
+  const search = url.searchParams.get("q") ?? "";
 
   const db = getAdminDb();
 
@@ -57,44 +50,30 @@ export async function GET(req: NextRequest, { params }: Params) {
     .where("active", "==", true)
     .get();
 
-  // Apply date range filter in memory
-  const fromMs = from ? new Date(from).getTime() : null;
-  const toMs = to ? new Date(to + "T23:59:59.999Z").getTime() : null;
-  const docs = snap.docs.filter((d) => {
-    const ts = d.data().createdAt as FirebaseFirestore.Timestamp | undefined;
-    if (!ts?.toDate) return true;
-    const ms = ts.toDate().getTime();
-    if (fromMs !== null && ms < fromMs) return false;
-    if (toMs !== null && ms > toMs) return false;
-    return true;
-  }).sort((a, b) => {
-    const ta = (a.data().createdAt as FirebaseFirestore.Timestamp | undefined)?.toDate().getTime() ?? 0;
-    const tb = (b.data().createdAt as FirebaseFirestore.Timestamp | undefined)?.toDate().getTime() ?? 0;
-    return ta - tb;
-  });
+  const docs = snap.docs.filter((doc) => {
+    const data = doc.data();
+    const date = salesDate(data.createdAt);
+    if ((from || to) && (!date || (from && date < from) || (to && date > to))) return false;
+    return matchesSearch({
+      shopName: String(data.shopName ?? ""), ownerName: String(data.ownerName ?? ""),
+      phone: String(data.phone ?? ""), address: String(data.address ?? ""),
+      status: normalizeDealerStatus(data.status),
+    }, search);
+  }).sort((a, b) => timestampMs(a.data().createdAt) - timestampMs(b.data().createdAt));
 
-  // Fetch the latest note per dealer from dealerNotes
-  const dealerIds = docs.map((d) => d.id);
-  const notesByDealer = new Map<string, string>();
-  if (dealerIds.length > 0) {
-    // Firestore 'in' queries limited to 30 items
-    for (let i = 0; i < dealerIds.length; i += 30) {
-      const chunk = dealerIds.slice(i, i + 30);
-      const notesSnap = await db
-        .collection("dealerNotes")
-        .where("dealerId", "in", chunk)
-        .orderBy("createdAt", "desc")
-        .get()
-        .catch(() => null);
-      if (notesSnap) {
-        for (const nd of notesSnap.docs) {
-          const data = nd.data();
-          const did = String(data.dealerId ?? "");
-          if (did && !notesByDealer.has(did)) {
-            notesByDealer.set(did, String(data.note ?? ""));
-          }
-        }
-      }
+  const notesByDealer = new Map<string, string[]>();
+  const dealerIds = docs.map((doc) => doc.id);
+  for (let index = 0; index < dealerIds.length; index += 30) {
+    const chunk = dealerIds.slice(index, index + 30);
+    const notes = await db.collection("dealerNotes").where("dealerId", "in", chunk).get();
+    const ordered = notes.docs.sort((a, b) => timestampMs(a.data().createdAt) - timestampMs(b.data().createdAt));
+    for (const note of ordered) {
+      const data = note.data();
+      if (data.salesExecutiveId !== execId) continue;
+      const id = String(data.dealerId);
+      const entries = notesByDealer.get(id) ?? [];
+      entries.push(String(data.note ?? ""));
+      notesByDealer.set(id, entries);
     }
   }
 
@@ -112,19 +91,20 @@ export async function GET(req: NextRequest, { params }: Params) {
     };
 
     rows.push([
+      csvCell(d.id),
       csvCell(data.shopName),
       csvCell(data.ownerName),
       csvCell(data.phone),
       csvCell(data.address),
-      csvCell(""),                               // city/district/state not stored separately
       csvCell(geo?.latitude ?? ""),
       csvCell(geo?.longitude ?? ""),
       csvCell(String(data.type ?? "retailer")),
-      csvCell(statusLabel(data.status ? String(data.status) : undefined)),
+      csvCell(normalizeDealerStatus(data.status)),
       csvCell(interestMap[String(data.interest ?? "")] ?? String(data.interest ?? "")),
-      csvCell(notesByDealer.get(d.id) ?? ""),
+      csvCell(notesByDealer.get(d.id)?.join("\n\n")),
       csvCell(execName),
-      csvCell(formatTimestamp(ts as any)),
+      csvCell(formatTimestamp(ts)),
+      csvCell(formatTimestamp(data.updatedAt)),
     ].join(","));
   }
 

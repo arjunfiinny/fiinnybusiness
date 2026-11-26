@@ -6,6 +6,7 @@ import '../../../core/constants/app_colors.dart';
 import '../../../core/services/location_service.dart';
 import '../../expenses/data/bill_image.dart';
 import '../data/dealer.dart';
+import 'dealer_status_field.dart';
 
 /// What the rep entered, plus the photo they attached (if any).
 class DealerDraft {
@@ -19,16 +20,26 @@ class DealerDraft {
 /// Returns the [DealerDraft] to save, or null if dismissed — the caller owns
 /// the write so the list can refresh itself once.
 class DealerFormSheet extends StatefulWidget {
-  const DealerFormSheet({super.key, this.initial});
+  const DealerFormSheet({
+    super.key,
+    this.initial,
+    this.customStatuses = const [],
+  });
 
   final Dealer? initial;
+  final List<String> customStatuses;
 
-  static Future<DealerDraft?> show(BuildContext context, {Dealer? initial}) {
+  static Future<DealerDraft?> show(
+    BuildContext context, {
+    Dealer? initial,
+    List<String> customStatuses = const [],
+  }) {
     return showModalBottomSheet<DealerDraft>(
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
-      builder: (_) => DealerFormSheet(initial: initial),
+      builder: (_) =>
+          DealerFormSheet(initial: initial, customStatuses: customStatuses),
     );
   }
 
@@ -44,6 +55,8 @@ class _DealerFormSheetState extends State<DealerFormSheet> {
   late final TextEditingController _address;
   late DealerType _type;
   DealerInterest? _interest;
+  String? _status;
+  bool _statusChanged = false;
 
   LatLngPoint? _geo;
   bool _locating = false;
@@ -63,6 +76,7 @@ class _DealerFormSheetState extends State<DealerFormSheet> {
     _address = TextEditingController(text: d?.address ?? '');
     _type = d?.type ?? DealerType.retailer;
     _interest = d?.interest;
+    _status = d?.status;
     _geo = d?.geo;
   }
 
@@ -123,6 +137,8 @@ class _DealerFormSheetState extends State<DealerFormSheet> {
           type: _type,
           geo: _geo,
           interest: _interest,
+          status: _status,
+          statusChanged: _statusChanged,
         ),
         _image,
       ),
@@ -231,6 +247,16 @@ class _DealerFormSheetState extends State<DealerFormSheet> {
                     fontWeight: FontWeight.w600,
                   ),
                 ),
+              ),
+              const SizedBox(height: 18),
+
+              DealerStatusField(
+                initialStatus: widget.initial?.status,
+                customStatuses: widget.customStatuses,
+                onChanged: (value) => setState(() {
+                  _status = value;
+                  _statusChanged = true;
+                }),
               ),
               const SizedBox(height: 18),
 

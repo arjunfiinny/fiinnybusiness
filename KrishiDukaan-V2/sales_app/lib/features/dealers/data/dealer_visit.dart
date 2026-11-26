@@ -26,6 +26,7 @@ class DealerVisit {
   final String purpose;
   final String? purposeOther;
   final String? notes;
+  final String? dealerStatus;
   final LatLngPoint? geo;
   final DateTime? visitedAt;
 
@@ -39,6 +40,7 @@ class DealerVisit {
     required this.purpose,
     this.purposeOther,
     this.notes,
+    this.dealerStatus,
     this.geo,
     this.visitedAt,
   });
@@ -63,6 +65,7 @@ class DealerVisit {
       purpose: '${d['purpose'] ?? ''}',
       purposeOther: d['purposeOther'] as String?,
       notes: d['notes'] as String?,
+      dealerStatus: d['dealerStatus'] as String?,
       geo: raw is GeoPoint ? LatLngPoint(raw.latitude, raw.longitude) : null,
       visitedAt: (d['visitedAt'] as Timestamp?)?.toDate(),
     );

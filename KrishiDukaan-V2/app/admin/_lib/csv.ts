@@ -8,7 +8,8 @@
 
 /** Wrap a cell in double-quotes, doubling any embedded quotes (RFC 4180). */
 export function csvCell(value: string | number | null | undefined): string {
-  const s = value == null ? "" : String(value);
+  const raw = value == null ? "" : String(value);
+  const s = typeof value === "string" && /^(?:\s*[=+\-@]|[\t\r\n])/.test(raw) ? "'" + raw : raw;
   return `"${s.replace(/"/g, '""')}"`;
 }
 
@@ -37,7 +38,7 @@ export function downloadCsv(csv: string, filename: string): void {
   document.body.appendChild(a);
   a.click();
   a.remove();
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 /** Today's date as YYYY-MM-DD (local time). Used for download filenames. */

@@ -13,11 +13,8 @@ const TYPE_LABEL: Record<string, string> = {
 };
 
 /**
- * Read-only dealer card for the admin Sales Team → executive activity page.
- * Deliberately NOT the sales rep's DealerCard (components/sales/DealerCard.tsx)
- * — that one carries Call/Edit/Deactivate/Mark-as-Visited actions meant for the
- * rep who owns the record. This view is inspection-only: no action here writes
- * to Firestore or Storage.
+ * Dealer summary for the Sales Team activity page. The shop name opens its
+ * details, notes and admin actions.
  */
 export default function AdminDealerCard({
   dealer,
@@ -67,7 +64,7 @@ export default function AdminDealerCard({
           )}
 
           <Link
-            href={`/admin/sales-team/${execId}/dealers/${dealer.id}`}
+            href={`/admin/sales-team/${encodeURIComponent(execId)}/dealers/${encodeURIComponent(dealer.id)}`}
             className="min-w-0 flex-1"
           >
             <div className="flex items-start justify-between gap-2">

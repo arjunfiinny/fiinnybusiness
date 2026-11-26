@@ -16,7 +16,10 @@ final daySessionRepositoryProvider = Provider<DaySessionRepository>(
 /// The session the dashboard acts on — the open one if there is any, else today's.
 final currentSessionProvider = FutureProvider<DaySession?>((ref) async {
   final uid = ref.watch(currentUidProvider);
-  if (uid == null) return null;
+  if (uid == null) {
+    unawaited(RouteTracker.stop());
+    return null;
+  }
   final session = await ref
       .watch(daySessionRepositoryProvider)
       .currentSession(uid);

@@ -4,6 +4,7 @@ import {
   addDoc,
   getDoc,
   getDocs,
+  onSnapshot,
   updateDoc,
   query,
   where,
@@ -11,6 +12,7 @@ import {
   serverTimestamp,
 } from 'firebase/firestore';
 import { db } from '../../firebase';
+import { normalizeDealerStatus } from './dealer-status';
 
 /**
  * `type`, `imageUrl` and `imagePath` are written only by the Flutter Sales App
@@ -42,12 +44,7 @@ export type Dealer = {
    */
   interest?: string;
 
-  /**
-   * Current deal/relationship stage — written by the Flutter Sales App
-   * (DealerStatus enum stored as camelCase .name: 'pitching' | 'interested' |
-   * 'ongoing' | 'pending' | 'completed' | 'closed' | 'notInterested', or any
-   * custom string). Optional; a missing value means no status has been set yet.
-   */
+  /** Current stage shared with the Sales App. */
   status?: string;
 };
 
@@ -83,7 +80,7 @@ function mapDealerDoc(d: { id: string; data: () => Record<string, unknown> }): D
     imageUrl: data.imageUrl ? String(data.imageUrl) : undefined,
     imagePath: data.imagePath ? String(data.imagePath) : undefined,
     interest: data.interest ? String(data.interest) : undefined,
-    status:   data.status   ? String(data.status)   : undefined,
+    status: normalizeDealerStatus(data.status) || undefined,
   };
 }
 
@@ -125,7 +122,7 @@ export async function createDealer(uid: string, input: DealerInput): Promise<str
     createdBy: uid,
     ...(input.type     ? { type:     input.type     } : {}),
     ...(input.interest ? { interest: input.interest } : {}),
-    ...(input.status   ? { status:   input.status   } : {}),
+    ...(input.status   ? { status: normalizeDealerStatus(input.status) } : {}),
     createdAt: now,
     updatedAt: now,
   });
@@ -143,7 +140,7 @@ export async function updateDealer(dealerId: string, input: DealerInput): Promis
   };
   if (input.type     !== undefined) update.type     = input.type     || null;
   if (input.interest !== undefined) update.interest = input.interest || null;
-  if (input.status   !== undefined) update.status   = input.status   || null;
+  if (input.status   !== undefined) update.status   = normalizeDealerStatus(input.status) || null;
   await updateDoc(doc(db, 'dealers', dealerId), update);
 }
 
@@ -157,7 +154,28 @@ export async function deactivateDealer(dealerId: string): Promise<void> {
 /** Update only the status field — called from the Mark as Visited flow. */
 export async function updateDealerStatus(dealerId: string, status: string): Promise<void> {
   await updateDoc(doc(db, 'dealers', dealerId), {
-    status: status || null,
+    status: normalizeDealerStatus(status) || null,
     updatedAt: serverTimestamp(),
   });
+}
+
+
+export function watchDealersByExec(
+  uid: string,
+  onChange: (dealers: Dealer[]) => void,
+  onError: (error: Error) => void,
+): () => void {
+  return onSnapshot(query(
+    collection(db, 'dealers'), where('createdBy', '==', uid), where('active', '==', true),
+  ), (snap) => onChange(snap.docs.map(mapDealerDoc)), onError);
+}
+
+export function watchDealer(
+  dealerId: string,
+  onChange: (dealer: Dealer | null) => void,
+  onError: (error: Error) => void,
+): () => void {
+  return onSnapshot(doc(db, 'dealers', dealerId), (snap) => {
+    onChange(snap.exists() ? mapDealerDoc(snap) : null);
+  }, onError);
 }

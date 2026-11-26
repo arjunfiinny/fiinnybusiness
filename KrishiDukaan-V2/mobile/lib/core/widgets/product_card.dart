@@ -15,6 +15,7 @@ class ProductCard extends StatefulWidget {
   /// One-tap Buy Now shown on the photo. Null hides the button (the default,
   /// so surfaces that don't support ordering from a card are unchanged).
   final Future<void> Function()? onBuyNow;
+  final Future<void> Function()? onAddToCart;
 
   /// Button text: "Buy Now", or "Choose size" for a product with several
   /// sizes, where tapping opens the product page.
@@ -25,6 +26,7 @@ class ProductCard extends StatefulWidget {
     required this.product,
     required this.onTap,
     this.onBuyNow,
+    this.onAddToCart,
     this.buyNowLabel = 'Buy Now',
   });
 
@@ -37,15 +39,27 @@ class _ProductCardState extends State<ProductCard> {
   // "the app feels alive" win since ProductCard appears on every surface.
   bool _pressed = false;
   bool _buying = false;
+  bool _adding = false;
 
   Future<void> _buyNow() async {
     final run = widget.onBuyNow;
-    if (run == null || _buying) return;
+    if (run == null || _buying || _adding) return;
     setState(() => _buying = true);
     try {
       await run();
     } finally {
       if (mounted) setState(() => _buying = false);
+    }
+  }
+
+  Future<void> _addToCart() async {
+    final run = widget.onAddToCart;
+    if (run == null || _buying || _adding) return;
+    setState(() => _adding = true);
+    try {
+      await run();
+    } finally {
+      if (mounted) setState(() => _adding = false);
     }
   }
 
@@ -128,16 +142,71 @@ class _ProductCardState extends State<ProductCard> {
                                 : _placeholder(),
                           ),
                         ),
-                        if (widget.onBuyNow != null)
+                        if (widget.onBuyNow != null ||
+                            widget.onAddToCart != null)
                           Positioned(
                             left: compact ? 5 : 8,
                             right: compact ? 5 : 8,
                             bottom: compact ? 4 : 6,
-                            child: BuyNowPill(
-                              label: widget.buyNowLabel,
-                              compact: compact,
-                              busy: _buying,
-                              onTap: _buyNow,
+                            child: Row(
+                              children: [
+                                if (widget.onAddToCart != null)
+                                  Expanded(
+                                    child: Material(
+                                      color: AppColors.primary,
+                                      borderRadius: BorderRadius.circular(
+                                        compact ? 8 : 10,
+                                      ),
+                                      child: InkWell(
+                                        onTap: _adding || _buying
+                                            ? null
+                                            : _addToCart,
+                                        borderRadius: BorderRadius.circular(
+                                          compact ? 8 : 10,
+                                        ),
+                                        child: SizedBox(
+                                          height: compact ? 26 : 30,
+                                          child: Center(
+                                            child: _adding
+                                                ? const SizedBox(
+                                                    width: 14,
+                                                    height: 14,
+                                                    child:
+                                                        CircularProgressIndicator(
+                                                          strokeWidth: 2,
+                                                          color: Colors.white,
+                                                        ),
+                                                  )
+                                                : const FittedBox(
+                                                    fit: BoxFit.scaleDown,
+                                                    child: Text(
+                                                      '+ Cart',
+                                                      style: TextStyle(
+                                                        color: Colors.white,
+                                                        fontSize: 11,
+                                                        fontWeight:
+                                                            FontWeight.w800,
+                                                      ),
+                                                    ),
+                                                  ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                if (widget.onAddToCart != null &&
+                                    widget.onBuyNow != null)
+                                  const SizedBox(width: 4),
+                                if (widget.onBuyNow != null)
+                                  Expanded(
+                                    child: BuyNowPill(
+                                      label: widget.buyNowLabel,
+                                      compact: compact,
+                                      busy: _buying,
+                                      onTap: _buyNow,
+                                    ),
+                                  ),
+                              ],
                             ),
                           ),
                         if (hasOffer)
