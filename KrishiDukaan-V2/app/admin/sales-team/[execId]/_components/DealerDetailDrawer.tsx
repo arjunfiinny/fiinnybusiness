@@ -6,7 +6,7 @@ import {
   Pencil, Trash2, ImageOff, Calendar, User, Image as ImageIcon,
 } from "lucide-react";
 import type { Dealer } from "../../../../sales/dealers/dealers-service";
-import { fetchNotesForDealer, type DealerNote } from "../../../../sales/dealers/dealer-note-service";
+import { watchNotesForDealer, type DealerNote } from "../../../../sales/dealers/dealer-note-service";
 import DealerImagePreviewModal from "../../../../../components/sales/DealerImagePreviewModal";
 import { statusLabel, statusColor } from "../../_lib/dealer-status";
 
@@ -76,13 +76,13 @@ export function DealerDetailDrawer({ dealer, execId, canEdit, canDelete, onEdit,
   useEffect(() => {
     setNotesLoading(true);
     setNotesError("");
-    fetchNotesForDealer(dealer.id)
-      .then((data) => {
-        // fetchNotesForDealer returns oldest-first; reverse for newest-first display
-        setNotes([...data].reverse());
-      })
-      .catch(() => setNotesError("Could not load notes."))
-      .finally(() => setNotesLoading(false));
+    return watchNotesForDealer(dealer.id, (data) => {
+      setNotes([...data].reverse());
+      setNotesLoading(false);
+    }, () => {
+      setNotesError("Could not load notes.");
+      setNotesLoading(false);
+    });
   }, [dealer.id]);
 
   const hasImage = Boolean(dealer.imageUrl) && !imgFailed;
