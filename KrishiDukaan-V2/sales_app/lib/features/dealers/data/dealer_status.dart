@@ -17,6 +17,7 @@ class DealerStatus {
   static String? clean(String? raw) {
     final value = raw?.trim().replaceAll(RegExp(r'\s+'), ' ');
     if (value == null || value.isEmpty) return null;
+    if (value.toLowerCase() == 'notinterested') return 'Not Interested';
     for (final preset in presets) {
       if (preset.toLowerCase() == value.toLowerCase()) return preset;
     }

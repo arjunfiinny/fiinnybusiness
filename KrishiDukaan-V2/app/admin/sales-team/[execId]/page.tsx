@@ -1,36 +1,34 @@
 "use client";
 
-/**
- * Sales Team → single executive activity (read-only, admin-only).
- *
- * Reuses the EXISTING /sales daily-session, visit, route, distance and dealer
- * data and components — nothing new is tracked or stored:
- *   - fetchAllSessions / fetchVisitsForDate / fetchAllVisitsForExec (services)
- *   - fetchDealersByExec (dealers-service)
- *   - DaySessionCard / SessionSummary / RouteMap / VisitTimeline / AdminDealerCard (components)
- *
- * Admin-read is possible because dealerVisits & dealers already grant isAdmin()
- * reads, and daySessions now does too (see firestore.rules). This is a VIEW
- * only: no writes are performed, so an admin can inspect an exec's sessions,
- * routes, distances and dealers without any risk of performing sales actions
- * as them — the Dealers Added section below has no create/edit/delete/upload
- * affordance, unlike the rep-facing DealerCard it deliberately does not reuse.
- */
-
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import dynamic from "next/dynamic";
-import { ArrowLeft, Contact, Eye, MapPin, Store, CalendarDays, Route, Clock } from "lucide-react";
+import { ArrowLeft, Contact, MapPin, Store, CalendarDays, Route, Clock, Download, Plus } from "lucide-react";
 import { fetchAllSessions, type DaySession } from "../../../sales/day-session-service";
-import { fetchAllVisitsForExec, fetchVisitsForDate, type DealerVisit } from "../../../sales/dealers/dealer-visit-service";
-import { fetchDealersByExec, type Dealer } from "../../../sales/dealers/dealers-service";
+import { fetchAllVisitsForExec, type DealerVisit } from "../../../sales/dealers/dealer-visit-service";
+import { watchDealersByExec, type Dealer } from "../../../sales/dealers/dealers-service";
 import { doc, getDoc, getDocs, collection, query, where, limit } from "firebase/firestore";
 import { db } from "../../../firebase";
 import DaySessionCard from "../../../../components/sales/DaySessionCard";
 import SessionSummary from "../../../../components/sales/SessionSummary";
 import VisitTimeline from "../../../../components/sales/VisitTimeline";
 import AdminDealerCard from "../../../../components/sales/AdminDealerCard";
+
+import { useAdminAuth } from "../../_context/admin-auth-context";
+import { DEALER_STATUSES } from "../../../sales/dealers/dealer-status";
+import { fetchNotesByExec } from "../../../sales/dealers/dealer-note-service";
+import AdminDealerForm from "../AdminDealerForm";
+import { DEALER_TYPES, saveDealer } from "../dealer-management";
+import { exportDealers, exportSessions, exportVisits, groupSessionVisits, salesDate, timestampMs } from "../sales-reports";
+
+const sections = [
+  { id: "sessions", hash: "daily-sessions", label: "Daily Sessions" },
+  { id: "dealers", hash: "dealers-added", label: "Dealers Added" },
+  { id: "status", hash: "status", label: "Status" },
+] as const;
+const controlClass = "rounded-xl border border-outline-variant/40 bg-surface-container-lowest px-3 py-2 text-sm";
+const buttonClass = `inline-flex items-center gap-1.5 font-semibold disabled:opacity-50 ${controlClass}`;
 
 // RouteMap uses the Google Maps JS SDK — client-only, same as the /sales portal.
 const RouteMap = dynamic(() => import("../../../../components/sales/RouteMap"), {
@@ -44,28 +42,12 @@ const RouteMap = dynamic(() => import("../../../../components/sales/RouteMap"), 
 
 type PageState = "loading" | "ready" | "error";
 
-/** Groups all visits by their IST date string (YYYY-MM-DD) — same logic as /sales/day-sessions. */
 /** The exec's own user doc: users/{uid} (email accounts), else the doc whose uid matches. */
 async function fetchExecUser(execId: string): Promise<Record<string, any> | null> {
   const direct = await getDoc(doc(db, "users", execId));
   if (direct.exists()) return direct.data();
-  const byUid = await getDocs(query(collection(db, "users"), where("uid", "==", execId), limit(1)));
+  const byUid = await getDocs(query(collection(db, "users"), where("role", "==", "salesExecutive"), where("uid", "==", execId), limit(1)));
   return byUid.empty ? null : byUid.docs[0].data();
-}
-
-function buildVisitCountByDate(visits: DealerVisit[]): Map<string, number> {
-  const map = new Map<string, number>();
-  for (const v of visits) {
-    if (!v.visitedAt || typeof (v.visitedAt as any).toDate !== "function") continue;
-    const ist = new Date((v.visitedAt as any).toDate().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
-    const key = [
-      ist.getFullYear(),
-      String(ist.getMonth() + 1).padStart(2, "0"),
-      String(ist.getDate()).padStart(2, "0"),
-    ].join("-");
-    map.set(key, (map.get(key) ?? 0) + 1);
-  }
-  return map;
 }
 
 type MonthRow = {
@@ -91,45 +73,67 @@ function fmtDuration(mins: number): string {
 export default function AdminSalesExecActivityPage() {
   const params = useParams();
   const execId = String(params.execId ?? "");
+  const identity = useAdminAuth();
+  const [canAdd, setCanAdd] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [dealerLoadError, setDealerLoadError] = useState("");
+  const [dealersReady, setDealersReady] = useState(false);
+  const [dealerSearch, setDealerSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState("");
 
   const [execName, setExecName] = useState("");
   const [execEmail, setExecEmail] = useState("");
   const [sessions, setSessions] = useState<DaySession[]>([]);
-  const [visitCountByDate, setVisitCountByDate] = useState<Map<string, number>>(new Map());
+  const [visits, setVisits] = useState<DealerVisit[]>([]);
   const [dealers, setDealers] = useState<Dealer[]>([]);
   const [pageState, setPageState] = useState<PageState>("loading");
   const [loadError, setLoadError] = useState("");
 
-  // Session detail drill-in — a session id + its visits, loaded on demand.
   const [selected, setSelected] = useState<DaySession | null>(null);
-  const [selectedVisits, setSelectedVisits] = useState<DealerVisit[]>([]);
-  const [detailLoading, setDetailLoading] = useState(false);
+  const [activeSection, setActiveSection] = useState<(typeof sections)[number]["id"]>("sessions");
 
-  // Which of the two already-loaded sections is visible below Monthly
-  // Performance. Both `sessions` and `dealers` are fetched together above, so
-  // this is purely a display toggle — no extra Firestore reads.
-  const [activeSection, setActiveSection] = useState<"sessions" | "dealers">(
-    "sessions",
-  );
+  useEffect(() => {
+    const syncHash = () => {
+      setSelected(null);
+      setActiveSection(sections.find((section) => `#${section.hash}` === window.location.hash)?.id ?? "sessions");
+    };
+    syncHash();
+    window.addEventListener("hashchange", syncHash);
+    return () => window.removeEventListener("hashchange", syncHash);
+  }, [execId]);
+
+  useEffect(() => {
+    setDealersReady(false);
+    setDealerLoadError("");
+    setDealers([]);
+    return watchDealersByExec(execId, (records) => {
+      setDealers(records);
+      setDealersReady(true);
+    }, (error) => setDealerLoadError(error.message));
+  }, [execId]);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       setPageState("loading");
       setLoadError("");
+      setCanAdd(false);
       try {
-        const [exec, allSessions, allVisits, execDealers] = await Promise.all([
+        const [exec, allSessions, allVisits] = await Promise.all([
           fetchExecUser(execId).catch(() => null),
           fetchAllSessions(execId),
           fetchAllVisitsForExec(execId),
-          fetchDealersByExec(execId),
         ]);
         if (cancelled) return;
         setExecName(String(exec?.name ?? "").trim());
         setExecEmail(String(exec?.email ?? "").trim());
         setSessions(allSessions);
-        setVisitCountByDate(buildVisitCountByDate(allVisits));
-        setDealers(execDealers);
+        setVisits(allVisits);
+        setCanAdd(exec?.role === "salesExecutive");
         setPageState("ready");
       } catch (e) {
         if (cancelled) return;
@@ -140,19 +144,37 @@ export default function AdminSalesExecActivityPage() {
     return () => { cancelled = true; };
   }, [execId]);
 
-  const openSession = async (session: DaySession) => {
-    setSelected(session);
-    setDetailLoading(true);
-    setSelectedVisits([]);
+  const visitsBySession = useMemo(() => groupSessionVisits(sessions, visits), [sessions, visits]);
+  const selectedVisits = selected ? visitsBySession.get(selected.id) ?? [] : [];
+  const filteredSessions = sessions.filter((session) => (!from || session.date >= from) && (!to || session.date <= to));
+  const filteredVisits = visits.filter((visit) => {
+    const date = salesDate(timestampMs(visit.visitedAt) || visit.createdAt);
+    return (!from || date >= from) && (!to || date <= to);
+  });
+  const search = dealerSearch.trim().toLowerCase();
+  const searchedDealers = dealers.filter((dealer) =>
+    [dealer.shopName, dealer.ownerName, dealer.phone, dealer.address].some((value) => value.toLowerCase().includes(search))
+  );
+  const statusOptions = Array.from(new Set([
+    ...DEALER_STATUSES,
+    ...dealers.flatMap((dealer) => dealer.status ? [dealer.status] : []),
+    ...(statusFilter && statusFilter !== "status:" ? [statusFilter.slice("status:".length)] : []),
+  ]));
+  const statusDealers = statusFilter
+    ? searchedDealers.filter((dealer) => `status:${dealer.status ?? ""}` === statusFilter)
+    : searchedDealers;
+
+  async function exportDealersWithNotes() {
+    setExportError("");
+    setExporting(true);
     try {
-      const v = await fetchVisitsForDate(execId, session.date);
-      setSelectedVisits(v);
+      exportDealers(searchedDealers, "dealers-added", await fetchNotesByExec(execId));
     } catch {
-      // Non-fatal — timeline/map just render without visit points.
+      setExportError("Could not export dealers. Try again.");
     } finally {
-      setDetailLoading(false);
+      setExporting(false);
     }
-  };
+  }
 
   // Monthly performance rolled up from the sessions themselves — no new data.
   const monthly = useMemo<MonthRow[]>(() => {
@@ -173,10 +195,10 @@ export default function AdminSalesExecActivityPage() {
       row.sessions += 1;
       row.distanceKm += typeof s.totalDistanceKm === "number" ? s.totalDistanceKm : 0;
       row.workingMinutes += typeof s.totalWorkingMinutes === "number" ? s.totalWorkingMinutes : 0;
-      row.visits += visitCountByDate.get(s.date) ?? 0;
+      row.visits += visitsBySession.get(s.id)?.length ?? 0;
     }
     return Array.from(rows.values()).sort((a, b) => b.key.localeCompare(a.key));
-  }, [sessions, visitCountByDate]);
+  }, [sessions, visitsBySession]);
 
   const title = execName || execEmail || "Sales Executive";
 
@@ -202,15 +224,6 @@ export default function AdminSalesExecActivityPage() {
         </div>
       </div>
 
-      {/* Read-only notice */}
-      <div className="flex items-start gap-2 rounded-2xl border border-amber-200 bg-amber-50/60 px-4 py-3">
-        <Eye className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
-        <p className="text-xs text-amber-800">
-          <span className="font-bold">Read-only view.</span> You are viewing this Sales Executive&apos;s field
-          activity as an admin. No changes are made to their account and no sales actions can be performed here.
-        </p>
-      </div>
-
       {pageState === "loading" && (
         <div className="flex h-60 items-center justify-center">
           <div className="w-8 h-8 border-4 border-primary border-t-transparent rounded-full animate-spin" />
@@ -230,7 +243,7 @@ export default function AdminSalesExecActivityPage() {
             <div className="space-y-4">
               <button
                 type="button"
-                onClick={() => { setSelected(null); setSelectedVisits([]); }}
+                onClick={() => setSelected(null)}
                 className="inline-flex items-center gap-1.5 rounded-xl border border-outline-variant/40 px-3 py-1.5 text-xs font-semibold text-on-surface hover:bg-surface-container transition-colors"
               >
                 <ArrowLeft className="h-3.5 w-3.5" /> Back to sessions
@@ -240,13 +253,7 @@ export default function AdminSalesExecActivityPage() {
 
               <div>
                 <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-outline">Route Map</p>
-                {detailLoading ? (
-                  <div className="flex h-80 items-center justify-center rounded-2xl bg-surface-container ring-1 ring-outline/10">
-                    <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
-                  </div>
-                ) : (
-                  <RouteMap session={selected} visits={selectedVisits} />
-                )}
+                <RouteMap session={selected} visits={selectedVisits} />
               </div>
 
               <div>
@@ -258,7 +265,7 @@ export default function AdminSalesExecActivityPage() {
                     </span>
                   )}
                 </div>
-                {!detailLoading && <VisitTimeline session={selected} visits={selectedVisits} />}
+                <VisitTimeline session={selected} visits={selectedVisits} />
               </div>
             </div>
           ) : (
@@ -285,43 +292,42 @@ export default function AdminSalesExecActivityPage() {
                 </section>
               )}
 
-              {/* ── Section tabs ─────────────────────────────────────────── */}
-              <div className="flex space-x-2 border-b border-outline-variant/20 mb-4">
-                <button
-                  type="button"
-                  onClick={() => setActiveSection("sessions")}
-                  className={`pb-2 px-1 font-semibold text-sm ${activeSection === "sessions" ? "border-b-2 border-primary text-primary" : "text-on-surface-variant hover:text-on-surface"}`}
-                >
-                  Daily Sessions {sessions.length > 0 && `(${sessions.length})`}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveSection("dealers")}
-                  className={`pb-2 px-1 font-semibold text-sm ${activeSection === "dealers" ? "border-b-2 border-primary text-primary" : "text-on-surface-variant hover:text-on-surface"}`}
-                >
-                  Dealers Added {dealers.length > 0 && `(${dealers.length})`}
-                </button>
-              </div>
+              <nav aria-label="Executive activity" className="flex flex-wrap gap-4 border-b border-outline-variant/30">
+                {sections.map((section) => (
+                  <a key={section.id} href={`#${section.hash}`} onClick={() => setActiveSection(section.id)}
+                    aria-current={activeSection === section.id ? "page" : undefined}
+                    className={`px-1 pb-2 text-sm font-semibold ${activeSection === section.id ? "border-b-2 border-primary text-primary" : "text-on-surface-variant"}`}>
+                    {section.label}
+                  </a>
+                ))}
+              </nav>
 
               {/* ── Sessions list ───────────────────────────────────────── */}
               {activeSection === "sessions" && (
-                <section>
-                  {sessions.length === 0 ? (
+                <section className="space-y-4">
+                  <div className="flex flex-wrap items-end gap-2">
+                    <label className="grid gap-1 text-xs font-semibold">From (IST)<input type="date" className={controlClass} value={from} max={to || undefined} onChange={(event) => setFrom(event.target.value)} /></label>
+                    <label className="grid gap-1 text-xs font-semibold">To (IST)<input type="date" className={controlClass} value={to} min={from || undefined} onChange={(event) => setTo(event.target.value)} /></label>
+                    <button type="button" className={buttonClass} disabled={!filteredSessions.length} onClick={() => exportSessions(execId, filteredSessions, visitsBySession)}>
+                      <Download className="h-4 w-4" /> Export Sessions CSV
+                    </button>
+                    <button type="button" className={buttonClass} disabled={!filteredVisits.length} onClick={() => exportVisits(execId, filteredVisits, visitsBySession)}>
+                      <Download className="h-4 w-4" /> Export Visits CSV
+                    </button>
+                  </div>
+                  {filteredSessions.length === 0 ? (
                     <div className="rounded-2xl border border-outline-variant/30 bg-surface-container-lowest px-5 py-10 text-center">
                       <MapPin className="mx-auto mb-2 h-6 w-6 text-outline" />
-                      <p className="text-sm font-semibold text-on-surface">No daily sessions yet</p>
-                      <p className="mt-1 text-xs text-on-surface-variant">
-                        This executive hasn&apos;t started any day sessions in the field app.
-                      </p>
+                      <p className="text-sm font-semibold text-on-surface">{sessions.length ? "No daily sessions in this date range" : "No daily sessions yet"}</p>
                     </div>
                   ) : (
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                      {sessions.map((session) => (
+                      {filteredSessions.map((session) => (
                         <DaySessionCard
                           key={session.id}
                           session={session}
-                          visitCount={visitCountByDate.get(session.date) ?? 0}
-                          onClick={() => void openSession(session)}
+                          visitCount={visitsBySession.get(session.id)?.length ?? 0}
+                          onClick={() => setSelected(session)}
                         />
                       ))}
                     </div>
@@ -329,23 +335,84 @@ export default function AdminSalesExecActivityPage() {
                 </section>
               )}
 
-              {/* ── Dealers added ───────────────────────────────────────── */}
-              {activeSection === "dealers" && (
-                <section>
-                  {dealers.length === 0 ? (
-                    <div className="rounded-2xl border border-outline-variant/30 bg-surface-container-lowest px-5 py-10 text-center">
-                      <Store className="mx-auto mb-2 h-6 w-6 text-outline" />
-                      <p className="text-sm font-semibold text-on-surface">No dealers added yet</p>
-                      <p className="mt-1 text-xs text-on-surface-variant">
-                        This executive hasn&apos;t added any dealers in the field app.
-                      </p>
-                    </div>
+              {activeSection !== "sessions" && (
+                <section className="space-y-4">
+                  {dealerLoadError ? (
+                    <p role="alert" className="text-sm text-red-700">{dealerLoadError}</p>
+                  ) : !dealersReady ? (
+                    <p role="status" className="text-sm text-on-surface-variant">Loading dealers…</p>
                   ) : (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                      {dealers.map((dealer) => (
-                        <AdminDealerCard key={dealer.id} dealer={dealer} execId={execId} />
-                      ))}
-                    </div>
+                    <>
+                      <div className="flex flex-wrap items-end gap-2">
+                        <label className="grid gap-1 text-xs font-semibold">Search dealers
+                          <input className={controlClass} type="search" value={dealerSearch} onChange={(event) => setDealerSearch(event.target.value)}
+                            placeholder="Name, owner, phone or address" />
+                        </label>
+                        {activeSection === "status" ? (
+                          <>
+                            <label className="grid gap-1 text-xs font-semibold">Current status
+                              <select className={controlClass} value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+                                <option value="">All statuses</option>
+                                <option value="status:">Not set</option>
+                                {statusOptions.map((value) => <option key={value} value={`status:${value}`}>{value}</option>)}
+                              </select>
+                            </label>
+                            <button type="button" className={buttonClass} disabled={!statusDealers.length} onClick={() => exportDealers(statusDealers, "dealer-statuses")}>
+                              <Download className="h-4 w-4" /> Export Status CSV
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <button type="button" className={buttonClass} disabled={!searchedDealers.length || exporting} onClick={() => void exportDealersWithNotes()}>
+                              <Download className="h-4 w-4" /> {exporting ? "Exporting…" : "Export Dealers CSV"}
+                            </button>
+                            {canAdd && identity.role === "admin" && !adding && (
+                              <button type="button" className="inline-flex items-center gap-1.5 rounded-xl bg-primary px-3 py-2 text-sm font-bold text-white" onClick={() => setAdding(true)}>
+                                <Plus className="h-4 w-4" /> Add Dealer
+                              </button>
+                            )}
+                          </>
+                        )}
+                      </div>
+                      {exportError && activeSection === "dealers" && <p role="alert" className="text-sm text-red-700">{exportError}</p>}
+                      {activeSection === "dealers" && adding && canAdd && identity.role === "admin" && (
+                        <AdminDealerForm onClose={() => setAdding(false)} onSave={async (input) => {
+                          await saveDealer(identity.uid, execId, input);
+                        }} />
+                      )}
+                      {activeSection === "dealers" && searchedDealers.length > 0 && (
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                          {searchedDealers.map((dealer) => <AdminDealerCard key={dealer.id} dealer={dealer} execId={execId} />)}
+                        </div>
+                      )}
+                      {activeSection === "status" && statusDealers.length > 0 && (
+                        <div className="overflow-x-auto rounded-2xl border border-outline-variant/30 bg-surface-container-lowest">
+                          <table className="w-full text-left text-sm">
+                            <thead className="bg-surface-container-low">
+                              <tr>{["Dealer", "Owner", "Phone", "Type", "Current status"].map((heading) =>
+                                <th key={heading} scope="col" className="whitespace-nowrap px-4 py-3">{heading}</th>)}</tr>
+                            </thead>
+                            <tbody>
+                              {statusDealers.map((dealer) => (
+                                <tr key={dealer.id} className="border-t border-outline-variant/20">
+                                  <td className="px-4 py-3">
+                                    <Link className="font-semibold text-primary hover:underline" href={`/admin/sales-team/${encodeURIComponent(execId)}/dealers/${encodeURIComponent(dealer.id)}`}>{dealer.shopName}</Link>
+                                    <p className="text-xs text-on-surface-variant">{dealer.address}</p>
+                                  </td>
+                                  <td className="px-4 py-3">{dealer.ownerName || "—"}</td>
+                                  <td className="whitespace-nowrap px-4 py-3">{dealer.phone || "—"}</td>
+                                  <td className="px-4 py-3">{DEALER_TYPES[dealer.type] ?? dealer.type}</td>
+                                  <td className="px-4 py-3"><span className="rounded-full bg-primary/10 px-2 py-1 text-xs font-semibold text-primary">{dealer.status || "Not set"}</span></td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                      {(activeSection === "status" ? statusDealers : searchedDealers).length === 0 && (
+                        <p className="rounded-2xl border border-outline-variant/30 px-5 py-8 text-center text-sm">No dealers found.</p>
+                      )}
+                    </>
                   )}
                 </section>
               )}

@@ -2,8 +2,8 @@ import {
   collection,
   doc,
   addDoc,
-  getDoc,
   getDocs,
+  onSnapshot,
   updateDoc,
   query,
   where,
@@ -11,13 +11,10 @@ import {
   serverTimestamp,
 } from 'firebase/firestore';
 import { db } from '../../firebase';
+import { normalizeDealerStatus } from './dealer-status';
 
 /**
- * `type`, `imageUrl` and `imagePath` are written only by the Flutter Sales App
- * (lib/features/dealers/data/dealer.dart / dealer_repository.dart) — this web
- * service predates them, so they are optional here and simply absent on docs
- * the web portal itself created. Mirrors the Flutter side's own fallback:
- * a missing `type` reads as 'retailer', and image fields stay undefined.
+ * Shared dealer record. Older records may omit type, interest or status.
  */
 export type Dealer = {
   id: string;
@@ -41,6 +38,7 @@ export type Dealer = {
    * value means "not assessed", not a default to assume.
    */
   interest?: string;
+  status?: string;
 };
 
 export type DealerInput = {
@@ -69,6 +67,7 @@ function mapDealerDoc(d: { id: string; data: () => Record<string, unknown> }): D
     imageUrl: data.imageUrl ? String(data.imageUrl) : undefined,
     imagePath: data.imagePath ? String(data.imagePath) : undefined,
     interest: data.interest ? String(data.interest) : undefined,
+    status: normalizeDealerStatus(data.status) || undefined,
   };
 }
 
@@ -82,20 +81,30 @@ export async function fetchDealers(): Promise<Dealer[]> {
 }
 
 /** Active dealers created by one sales executive — used by the admin Sales Team detail page. */
-export async function fetchDealersByExec(uid: string): Promise<Dealer[]> {
+export function watchDealersByExec(
+  uid: string,
+  onChange: (dealers: Dealer[]) => void,
+  onError: (error: Error) => void,
+): () => void {
   const q = query(
     collection(db, 'dealers'),
     where('createdBy', '==', uid),
     where('active', '==', true),
   );
-  const snap = await getDocs(q);
-  return snap.docs.map((d) => mapDealerDoc(d as any));
+  return onSnapshot(q, (snap) => {
+    onChange(snap.docs.map(mapDealerDoc).sort((a, b) => a.shopName.localeCompare(b.shopName)));
+  }, onError);
 }
 
 /** A single dealer by id, or null if it doesn't exist — used by the admin Dealer Detail page. */
-export async function fetchDealerById(dealerId: string): Promise<Dealer | null> {
-  const snap = await getDoc(doc(db, 'dealers', dealerId));
-  return snap.exists() ? mapDealerDoc(snap as any) : null;
+export function watchDealer(
+  dealerId: string,
+  onChange: (dealer: Dealer | null) => void,
+  onError: (error: Error) => void,
+): () => void {
+  return onSnapshot(doc(db, 'dealers', dealerId), (snap) => {
+    onChange(snap.exists() ? mapDealerDoc(snap) : null);
+  }, onError);
 }
 
 export async function createDealer(uid: string, input: DealerInput): Promise<string> {

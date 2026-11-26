@@ -65,8 +65,8 @@ export default function VisitTimeline({ session, visits }: VisitTimelineProps) {
             </div>
             <div className={`flex-1 rounded-2xl bg-white p-3 ring-1 ring-outline/10 ${showConnector ? 'mb-2' : 'mb-0'}`}>
               <p className="text-sm font-bold text-on-surface leading-tight">{visit.dealerName}</p>
-              {purpose && (
-                <p className="text-xs text-on-surface-variant mt-0.5">{purpose}</p>
+              {(purpose || visit.dealerStatus) && (
+                <p className="text-xs text-on-surface-variant mt-0.5">{[purpose, visit.dealerStatus].filter(Boolean).join(" · ")}</p>
               )}
               <div className="mt-1.5 flex items-center gap-1 text-xs text-outline">
                 <Clock className="h-3 w-3" />

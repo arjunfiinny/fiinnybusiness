@@ -4,6 +4,7 @@ import { initializeApp } from 'firebase/app';
 import {
   connectFirestoreEmulator,
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocs,
@@ -36,6 +37,7 @@ await Promise.all([
   adb.collection('users').doc('repA').set({ role: 'salesExecutive' }),
   adb.collection('users').doc('repB').set({ role: 'salesExecutive' }),
   adb.collection('users').doc('admin').set({ role: 'admin' }),
+  adb.collection('users').doc('team').set({ role: 'team', adminSections: ['salesTeam'] }),
 ]);
 await Promise.all([
   adb.collection('dealers').doc('dealerA').set({
@@ -60,6 +62,7 @@ await Promise.all([
 const repA = client('repA');
 const repB = client('repB');
 const boss = client('admin');
+const team = client('team');
 let failures = 0;
 async function check(name, allowed, action) {
   let worked = true;
@@ -165,6 +168,68 @@ await check('admin can update status with a history event', true, async () => {
   });
   await batch.commit();
 });
+
+await check('salesTeam readers cannot create an executive dealer', false, () =>
+  setDoc(doc(team, 'dealers', 'managed'), { createdBy: 'repA', active: true }));
+await check('admin creates a dealer, note and status for its executive', true, async () => {
+  const batch = writeBatch(boss);
+  batch.set(doc(boss, 'dealers', 'managed'), {
+    createdBy: 'repA', active: true, shopName: 'New Lead', status: 'Awaiting documents',
+  });
+  batch.set(doc(boss, 'dealerNotes', 'managedNote'), {
+    dealerId: 'managed', salesExecutiveId: 'repA', note: 'Initial note', createdAt: serverTimestamp(),
+  });
+  batch.set(doc(boss, 'dealerStatusHistory', 'managedStatus'), {
+    dealerId: 'managed', salesExecutiveId: 'repA', changedBy: 'admin',
+    toStatus: 'Awaiting documents', source: 'CREATED', changedAt: serverTimestamp(),
+  });
+  await batch.commit();
+  const [dealer, note] = await Promise.all([
+    getDoc(doc(repA, 'dealers', 'managed')),
+    getDoc(doc(repA, 'dealerNotes', 'managedNote')),
+  ]);
+  if (dealer.data()?.status !== 'Awaiting documents' || note.data()?.note !== 'Initial note') {
+    throw new Error('Executive cannot see the admin-created records');
+  }
+});
+await check('salesTeam readers can query dealer status history', true, () => getDocs(query(
+  collection(team, 'dealerStatusHistory'), where('dealerId', '==', 'managed'), orderBy('changedAt', 'desc'),
+)));
+await check('admin can delete a shared dealer note', true, () => deleteDoc(doc(boss, 'dealerNotes', 'managedNote')));
+await check('executive can change dealer status during a visit and admin sees the result', true, async () => {
+  const batch = writeBatch(repA);
+  batch.set(doc(repA, 'dealerVisits', 'managedVisit'), {
+    dealerId: 'managed', salesExecutiveId: 'repA', daySessionId: 'dayA',
+    dealerStatus: 'Interested', visitedAt: serverTimestamp(),
+  });
+  batch.update(doc(repA, 'dealers', 'managed'), { status: 'Interested' });
+  batch.set(doc(repA, 'dealerStatusHistory', 'managedVisitStatus'), {
+    dealerId: 'managed', salesExecutiveId: 'repA', changedBy: 'repA',
+    fromStatus: 'Awaiting documents', toStatus: 'Interested', source: 'VISIT',
+    visitId: 'managedVisit', changedAt: serverTimestamp(),
+  });
+  await batch.commit();
+  const [dealer, event] = await Promise.all([
+    getDoc(doc(boss, 'dealers', 'managed')),
+    getDoc(doc(boss, 'dealerStatusHistory', 'managedVisitStatus')),
+  ]);
+  if (dealer.data()?.status !== 'Interested' || event.data()?.visitId !== 'managedVisit') {
+    throw new Error('Admin did not see the visit status and linked event');
+  }
+});
+await check('admin removal hides the dealer and preserves its visit and session', true, async () => {
+  await updateDoc(doc(boss, 'dealers', 'managed'), { active: false });
+  const [active, visit, session] = await Promise.all([
+    getDocs(query(collection(repA, 'dealers'), where('createdBy', '==', 'repA'), where('active', '==', true))),
+    getDoc(doc(repA, 'dealerVisits', 'managedVisit')),
+    getDoc(doc(repA, 'daySessions', 'dayA')),
+  ]);
+  if (active.docs.some((record) => record.id === 'managed') || !visit.exists() || !session.exists()) {
+    throw new Error('Active list or past activity did not match the removal');
+  }
+});
+await check('owner cannot log another visit to the removed dealer', false, () =>
+  setDoc(doc(repA, 'dealerVisits', 'removedVisit'), { dealerId: 'managed', salesExecutiveId: 'repA' }));
 
 console.log(failures ? `${failures} sales rules checks failed` : 'Sales rules checks passed');
 process.exit(failures ? 1 : 0);

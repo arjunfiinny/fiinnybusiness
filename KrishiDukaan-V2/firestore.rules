@@ -1801,9 +1801,11 @@ service cloud.firestore {
     match /dealers/{dealerId} {
       allow read:   if isAdmin() || teamHas('salesTeam')
                        || (isSalesExec() && resource.data.createdBy == request.auth.uid);
-      allow create: if isSalesExec()
-                       && request.resource.data.createdBy == request.auth.uid
-                       && request.resource.data.active    == true;
+      allow create: if request.resource.data.active == true
+                       && request.resource.data.createdBy is string
+                       && request.resource.data.createdBy.size() > 0
+                       && (isAdmin() || (isSalesExec()
+                           && request.resource.data.createdBy == request.auth.uid));
       allow update: if (isSalesExec()
                        && resource.data.createdBy == request.auth.uid
                        && request.resource.data.createdBy == resource.data.createdBy)
@@ -1821,11 +1823,15 @@ service cloud.firestore {
     // where ANY authenticated user (incl. customers) could read all visit data.
     // Hard-delete is admin-only.
     match /dealerVisits/{visitId} {
+      function isActiveOwnedDealer(dealerId) {
+        let dealer = get(/databases/$(database)/documents/dealers/$(dealerId)).data;
+        return dealer.createdBy == request.auth.uid && dealer.get('active', true) == true;
+      }
       allow read:   if isAdmin() || teamHas('salesTeam')
                        || (isAuthed() && resource.data.salesExecutiveId == request.auth.uid);
       allow create: if isSalesExec()
                        && request.resource.data.salesExecutiveId == request.auth.uid
-                       && get(/databases/$(database)/documents/dealers/$(request.resource.data.dealerId)).data.createdBy == request.auth.uid;
+                       && isActiveOwnedDealer(request.resource.data.dealerId);
       allow update: if isAuthed()
                        && resource.data.salesExecutiveId == request.auth.uid
                        && request.resource.data.salesExecutiveId == resource.data.salesExecutiveId;

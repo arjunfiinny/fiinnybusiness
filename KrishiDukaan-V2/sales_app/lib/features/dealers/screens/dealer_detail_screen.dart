@@ -39,7 +39,7 @@ class DealerDetailScreen extends ConsumerWidget {
           onRetry: () => ref.invalidate(dealerByIdProvider(dealerId)),
         ),
         data: (dealer) {
-          if (dealer == null) {
+          if (dealer == null || !dealer.active) {
             return EmptyView(
               icon: Icons.help_outline_rounded,
               title: 'Dealer not found',

@@ -117,7 +117,7 @@ class Dealer {
       phone: '${d['phone'] ?? ''}',
       address: '${d['address'] ?? ''}',
       type: DealerType.from(d['type']),
-      geo: raw is GeoPoint ? LatLngPoint(raw.latitude, raw.longitude) : null,
+      geo: parseLocation(raw),
       active: d['active'] != false,
       createdBy: '${d['createdBy'] ?? ''}',
       createdAt: (d['createdAt'] as Timestamp?)?.toDate(),
@@ -127,6 +127,18 @@ class Dealer {
       imagePath: d['imagePath'] as String?,
       interest: DealerInterest.from(d['interest']),
     );
+  }
+
+  static LatLngPoint? parseLocation(Object? raw) {
+    if (raw is GeoPoint) return LatLngPoint(raw.latitude, raw.longitude);
+    if (raw is Map) {
+      final lat = raw['latitude'];
+      final lng = raw['longitude'];
+      if (lat is num && lng is num && lat.abs() <= 90 && lng.abs() <= 180) {
+        return LatLngPoint(lat.toDouble(), lng.toDouble());
+      }
+    }
+    return null;
   }
 
   /// Matches a free-text search across the fields a rep would actually type.
