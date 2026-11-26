@@ -14,6 +14,7 @@ import {
   Share2,
   Smartphone,
   Store,
+  Truck,
   Users,
   Wheat,
 } from "lucide-react";
@@ -303,6 +304,10 @@ function buildIncluded(fees: PublicFeeRates): { title: string; body: string }[] 
     body: `KrishiDukan charges ${pct(fees.platformFeePercent)} of the transaction value on successful online sales — not the 5%–25% that percentage-based marketplaces take. Offline and cash-on-delivery sales carry no platform fee.`,
   },
   {
+    title: "Courier delivery built in",
+    body: "Accept an online order and KrishiDukan books a Delhivery or Shiprocket courier to collect it from your shop. The farmer gets a live tracking link on WhatsApp. You do not book or pay the courier.",
+  },
+  {
     title: "You set your own prices",
     body: "You control MRP, selling price, discounts and delivery charges on every listing. KrishiDukan never sets or changes your price.",
   },
@@ -343,8 +348,8 @@ const STEPS: { title: string; body: string }[] = [
     body: "Add each product with pack sizes, prices and photos. You pay only for the number of products you choose to list.",
   },
   {
-    title: "Receive orders and fulfil them",
-    body: "Farmers nearby discover your listings, order or send a direct enquiry. You accept the order, pack it, dispatch it and deliver it — KrishiDukan does not provide delivery or logistics.",
+    title: "Accept, pack, we ship",
+    body: "Farmers discover your listings and order online or send an enquiry. You accept and pack the order; KrishiDukan books the courier, who picks it up from your shop and delivers it with live tracking.",
   },
 ];
 
@@ -394,8 +399,12 @@ function buildFaqs(plans: Plan[], fees: PublicFeeRates): { q: string; a: string 
       `time to time depending on the payment method, the provider and its pricing.`,
   },
   {
+    q: "Does KrishiDukan deliver my online orders?",
+    a: "Yes. Since 26 November 2026, online orders ship through KrishiDukan's courier integration with Delhivery and Shiprocket. When you accept an order, the courier is booked automatically: you print the label, pack the order and mark it ready, and the courier collects it from your shop. The farmer gets a live tracking link on WhatsApp, and the courier's delivery scan confirms the order, which releases your payment. The farmer pays the courier rate shown at checkout (the cheaper of the two couriers for that address), and KrishiDukan pays the courier. If neither courier serves the farmer's pincode, the order is marked for you to deliver yourself, as before.",
+  },
+  {
     q: "Who handles packing, shipping and delivery?",
-    a: "You do. KrishiDukan does not currently provide logistics or delivery services. As the seller you are responsible for inventory, product availability, pricing, packing, dispatch, shipping, delivery and overall order fulfilment, as well as product authenticity, licences, labels and regulatory compliance. KrishiDukan provides the technology platform, the discovery surface and the payment flow.",
+    a: "You pack the order and hand it to the courier at your shop; KrishiDukan books the courier and tracks the parcel to the farmer. You remain responsible for inventory, product availability, pricing, packing, product authenticity, licences, labels and regulatory compliance, and for delivering any order that no courier can reach. KrishiDukan provides the technology platform, the discovery surface, the payment flow and the courier booking.",
   },
   {
     q: "Who can sell on KrishiDukan?",
@@ -491,6 +500,17 @@ export default async function SellPage() {
       />
 
       <SiteHeader />
+
+      {/* Delivery announcement, 26 Nov 2026: online orders moved from
+          seller-arranged delivery to automatic courier booking. */}
+      <div className="bg-lime-100 text-primary">
+        <p className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-2 gap-y-1 px-4 py-2.5 text-xs sm:text-sm font-semibold">
+          <Truck className="h-4 w-4 flex-shrink-0" aria-hidden />
+          <span className="rounded-full bg-primary px-2 py-0.5 text-[11px] font-black uppercase tracking-wide text-white">New</span>
+          KrishiDukan now delivers your online orders: courier pickup from your shop, live tracking for the farmer.
+          <a href="#courier-delivery" className="font-black underline underline-offset-2">How it works</a>
+        </p>
+      </div>
 
       {season ? (
         <div className="bg-primary text-white">
@@ -958,8 +978,49 @@ export default async function SellPage() {
           </div>
         </section>
 
-        {/* How to start — the "Online in 3 easy steps" poster, keeping the
-            fourth step because it carries the "we don't deliver" disclosure. */}
+        {/* Courier delivery, announced 26 Nov 2026. Until then sellers arranged
+            their own delivery; now an accepted online order books a courier
+            automatically (functions/src/shipping). Plain text on purpose: it
+            is what search and answer engines quote about delivery. */}
+        <section className="mt-24 scroll-mt-24" id="courier-delivery">
+          <div className="rounded-3xl bg-primary px-6 py-10 text-white sm:px-10">
+            <p className="inline-flex items-center gap-2 rounded-full bg-white/15 px-3 py-1 text-xs font-black uppercase tracking-wide">
+              <Truck className="h-3.5 w-3.5" aria-hidden />
+              New from 26 November 2026
+            </p>
+            <h2 className="mt-4 text-3xl font-black leading-tight tracking-tight sm:text-4xl">
+              We deliver your online orders now.
+            </h2>
+            <p className="mt-3 max-w-2xl text-base leading-relaxed text-white/85">
+              Delivery used to be yours to arrange. Now every online order ships
+              through KrishiDukan&apos;s courier integration with Delhivery and
+              Shiprocket, booked automatically the moment you accept it.
+            </p>
+            <ol className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              {[
+                { t: "You accept the order", b: "KrishiDukan picks the cheaper courier for the farmer's address and books it at once." },
+                { t: "You pack it", b: "Print the label, pack the order and tap Ready for pickup in your dashboard or the app." },
+                { t: "The courier collects", b: "The courier picks the parcel up from your shop. No trip to a courier office." },
+                { t: "The farmer tracks it", b: "The farmer gets a tracking link on WhatsApp. The delivery scan confirms the order and releases your payment." },
+              ].map((step, i) => (
+                <li key={step.t} className="rounded-2xl bg-white/10 p-5">
+                  <span className="text-xs font-black text-yellow-300">Step {i + 1}</span>
+                  <h3 className="mt-1 text-base font-black">{step.t}</h3>
+                  <p className="mt-1.5 text-sm leading-relaxed text-white/85">{step.b}</p>
+                </li>
+              ))}
+            </ol>
+            <p className="mt-6 max-w-3xl text-sm leading-relaxed text-white/80">
+              The farmer pays the courier rate shown at checkout and KrishiDukan
+              pays the courier, so you never book or pay a courier yourself. If
+              no courier serves the farmer&apos;s pincode, the order is marked for
+              you to deliver, as before.
+            </p>
+          </div>
+        </section>
+
+        {/* How to start — the "Online in 3 easy steps" poster. The fourth step
+            says who ships: the courier, booked by KrishiDukan. */}
         <section className="mt-24">
           <h2 className="text-center text-3xl font-black tracking-tight text-primary sm:text-4xl">
             Online in {STEPS.length} easy steps.
@@ -1226,13 +1287,12 @@ export default async function SellPage() {
             What you are responsible for
           </h2>
           <p className="mt-3 text-sm text-on-surface-variant text-center max-w-2xl mx-auto leading-relaxed">
-            KrishiDukan provides the technology, the discovery surface and the
-            payment flow.{" "}
+            KrishiDukan provides the technology, the discovery surface, the
+            payment flow and{" "}
             <strong className="text-on-surface">
-              KrishiDukan does not currently provide logistics or delivery
-              services.
-            </strong>{" "}
-            As the seller, you handle:
+              courier booking for online orders
+            </strong>
+            . As the seller, you handle:
           </p>
           <div className="mt-8 grid gap-4 sm:grid-cols-2">
             {[
@@ -1245,12 +1305,12 @@ export default async function SellPage() {
                 body: "Setting and maintaining your MRP, selling price, discounts and any delivery charge you apply.",
               },
               {
-                title: "Packing and dispatch",
-                body: "Packing each order appropriately and dispatching it within the time your listing states.",
+                title: "Packing and handover",
+                body: "Packing each order appropriately, printing the courier label and marking it ready for pickup within the time your listing states.",
               },
               {
-                title: "Shipping and delivery",
-                body: "Arranging courier or transport, bearing its cost, and getting the order to the buyer.",
+                title: "Delivery no courier reaches",
+                body: "Delivering an order yourself when neither courier serves the buyer's pincode; the order tells you when this applies.",
               },
               {
                 title: "Product information",

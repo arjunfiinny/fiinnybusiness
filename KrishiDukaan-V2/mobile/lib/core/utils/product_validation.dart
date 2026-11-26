@@ -7,9 +7,11 @@
 library;
 
 /// Description must be either left empty, or between these lengths.
-/// Mirrors web: `description.trim().length < 20 || > 300` is rejected.
+/// Mirrors web (DESCRIPTION_MAX in the product forms): `description.trim().length < 20 || > 3000`
+/// is rejected. It was 300 (~45 words), too short for a product page that
+/// search engines rank.
 const int kDescriptionMinLength = 20;
-const int kDescriptionMaxLength = 300;
+const int kDescriptionMaxLength = 3000;
 
 /// The message shown on both platforms when a description is out of range.
 const String kDescriptionRangeMessage =
