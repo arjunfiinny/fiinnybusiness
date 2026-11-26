@@ -398,6 +398,8 @@ export interface IndexedCard {
   /** Phones of the shops that sell it (card availability). */
   storePhones: string[];
   sellerCount: number;
+  /** Sellers whose offer can be ordered online with delivery (availability isOnline). */
+  onlineSellerCount: number;
 }
 
 export interface ProductIndex {
@@ -430,6 +432,9 @@ export function buildProductIndex(cards: { data: Record<string, unknown> }[]): P
       listableIds: listable.map((l) => l.id),
       storePhones,
       sellerCount: Number(data.sellerCount) || storePhones.length,
+      onlineSellerCount: new Set(
+        availability.filter((a) => a.isOnline === true).map((a) => str(a.storePhone || a.storeId)).filter(Boolean),
+      ).size,
     };
     out.push(entry);
     for (const l of listable) {
@@ -520,6 +525,41 @@ export async function getSellerPhonesForProduct(productId: string): Promise<stri
   } catch {
     return [];
   }
+}
+
+export type OnlineProductRow = {
+  id: string;
+  name: string;
+  category: string;
+  slug: string;
+  image: string;
+  onlineSellers: number;
+  /** Words the seller's own listing puts on the page (description + spec fields). */
+  listingWords: number;
+};
+
+/**
+ * Products that can be ordered online with delivery, one per card (its
+ * primary page), busiest first: the list the admin page-content editor works
+ * from. Throws when the index cannot be read, so the admin sees an error
+ * instead of an empty list.
+ */
+export async function listOnlineDeliveryProducts(): Promise<OnlineProductRow[]> {
+  const index = await getProductIndex();
+  const words = (v: unknown) => String(v ?? "").split(/\s+/).filter((w) => /[A-Za-z0-9ऀ-ॿ]/.test(w)).length;
+  return index.cards
+    .filter((c) => c.onlineSellerCount > 0)
+    .map((c) => ({
+      id: c.product.id,
+      name: c.product.name,
+      category: c.product.category,
+      slug: buildProductSlug(c.product.name, c.product.id),
+      image: c.product.image,
+      onlineSellers: c.onlineSellerCount,
+      listingWords:
+        words(c.product.description) +
+        Object.values(c.product.categoryInfo).reduce<number>((s, v) => s + words(Array.isArray(v) ? v.join(" ") : v), 0),
+    }));
 }
 
 /** The busiest products across the market, one per card, for site-wide link lists. [] on failure. */

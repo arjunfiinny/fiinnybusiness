@@ -222,8 +222,8 @@ export function matchDeletedProduct(
   if (best.exact && !second.exact) return target(best.c);
   // Two cards whose names read the same ("Excel Mera 71 Herbicide" and the
   // Hindi-titled "एक्सेल मेरा ७१ - Excel Mera 71") are one product listed
-  // twice; either page is right. scripts/seo-duplicate-candidates.ts lists
-  // such pairs so an admin can link them.
+  // twice; either page is right until an admin links them in
+  // /admin/product-identity.
   if (sameWords(best.tokens, second.tokens)) return target(best.c);
   if (best.score >= second.score * MIN_MARGIN) return target(best.c);
   return null;

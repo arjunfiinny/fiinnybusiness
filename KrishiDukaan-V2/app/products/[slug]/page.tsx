@@ -13,6 +13,7 @@ import {
   type SeoProduct,
 } from "../../lib/seo/products-server";
 import { getStoresForPhones } from "../../lib/seo/stores-server";
+import { getPageContent } from "../../lib/seo/page-content-server";
 import { productPageTitle, productShareTitle } from "../../lib/seo/product-title";
 import {
   CATEGORY_FIELDS,
@@ -168,7 +169,7 @@ export default async function ProductPage({ params }: PageProps) {
     Boolean,
   );
   const categoryMeta = categoryMetaForStoredName(product.category);
-  const [reels, related, sellerPhones, canonical] = await Promise.all([
+  const [reels, related, sellerPhones, canonical, extra] = await Promise.all([
     getReelsForProduct(product.id),
     getRelatedProducts(
       product,
@@ -176,6 +177,8 @@ export default async function ProductPage({ params }: PageProps) {
     ),
     getSellerPhonesForProduct(product.id),
     getCanonicalProduct(product),
+    // Team-added description, FAQs and photos (admin → Product page content).
+    getPageContent(product.id),
   ]);
   const stores = await getStoresForPhones(sellerPhones);
   const canonicalUrl = `${SITE_URL}/products/${buildProductSlug(canonical.name, canonical.id)}`;
@@ -205,6 +208,21 @@ export default async function ProductPage({ params }: PageProps) {
       reviewCount: String(product.totalReviews),
     };
   }
+
+  // ── JSON-LD: FAQPage, only from the team-added FAQs ──
+  const faqLd =
+    extra && extra.faqs.length > 0
+      ? {
+          "@context": "https://schema.org",
+          "@type": "FAQPage",
+          mainEntity: extra.faqs.map((f) => ({
+            "@type": "Question",
+            name: f.q,
+            acceptedAnswer: { "@type": "Answer", text: f.a },
+          })),
+        }
+      : null;
+  if (extra?.images.length) productLd.image = [...images, ...extra.images];
 
   // ── JSON-LD: BreadcrumbList ──
   const breadcrumbLd = {
@@ -240,6 +258,12 @@ export default async function ProductPage({ params }: PageProps) {
         type="application/ld+json"
         dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbLd) }}
       />
+      {faqLd ? (
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{ __html: JSON.stringify(faqLd) }}
+        />
+      ) : null}
 
       <div className="max-w-4xl mx-auto px-4 py-8">
         {/* Breadcrumb */}
@@ -307,15 +331,44 @@ export default async function ProductPage({ params }: PageProps) {
           </div>
         </div>
 
-        {/* Description */}
-        {product.description ? (
+        {/* Description: the seller's own, then the team-added text (removable
+            in admin → Product page content without touching the listing). */}
+        {product.description || extra?.description ? (
           <section className="mt-10">
             <h2 className="text-xl font-black text-on-surface mb-3">
               About {product.name}
             </h2>
-            <p className="text-on-surface leading-relaxed whitespace-pre-line">
-              {product.description}
-            </p>
+            {product.description ? (
+              <p className="text-on-surface leading-relaxed whitespace-pre-line">
+                {product.description}
+              </p>
+            ) : null}
+            {extra?.description
+              ? extra.description.split(/\n\s*\n/).map((para, i) => (
+                  <p key={i} className="mt-4 text-on-surface leading-relaxed whitespace-pre-line">
+                    {para}
+                  </p>
+                ))
+              : null}
+          </section>
+        ) : null}
+
+        {extra && extra.images.length > 0 ? (
+          <section className="mt-10">
+            <h2 className="text-xl font-black text-on-surface mb-3">{product.name} photos</h2>
+            <ul className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              {extra.images.map((src, i) => (
+                <li key={src}>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={src}
+                    alt={`${product.name} photo ${i + 2}`}
+                    loading="lazy"
+                    className="aspect-square w-full rounded-xl border border-surface-container object-cover bg-white"
+                  />
+                </li>
+              ))}
+            </ul>
           </section>
         ) : null}
 
@@ -426,6 +479,22 @@ export default async function ProductPage({ params }: PageProps) {
                     <p className="text-white/90 text-xs truncate drop-shadow-md">by {reel.shopName}</p>
                   </Link>
                 </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        {extra && extra.faqs.length > 0 ? (
+          <section className="mt-10">
+            <h2 className="text-xl font-black text-on-surface mb-3">
+              {product.name}: questions farmers ask
+            </h2>
+            <div className="divide-y divide-surface-container rounded-2xl border border-surface-container bg-white">
+              {extra.faqs.map((f) => (
+                <details key={f.q} className="group px-4 py-3">
+                  <summary className="cursor-pointer list-none font-bold text-on-surface">{f.q}</summary>
+                  <p className="mt-2 text-sm leading-relaxed text-on-surface-variant whitespace-pre-line">{f.a}</p>
+                </details>
               ))}
             </div>
           </section>
