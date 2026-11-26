@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import {
   DEFAULT_CONFIG as C, canCancelAt, courierBlocker, delhiveryStage, nextPickupDate, orderStatusFor, packKg,
   parcelKg, parseConfig, parseCustomerAddress, rankQuotes, readSellerPlace, shiprocketStage, shouldApply,
-  withinReassignCap, shouldSimulate, orderDropPlace, sellerCourierShare, type Quote,
+  withinReassignCap, shouldSimulate, orderDropPlace, sellerCourierShare, webhookCarrier, type Quote,
 } from "../../functions/src/shipping/pure";
 
 // A config that isn't there, or is mistyped, must never mean live or on.
@@ -131,5 +131,19 @@ assert.equal(sellerCourierShare({ deliveryCharge: 135, deliveryBreakdown: { sell
 assert.equal(sellerCourierShare({ deliveryCharge: 135, deliveryBreakdown: { sellerPaysCourier: 134 } }, 200), 65);   // courier cheaper: seller pays only the gap
 assert.equal(sellerCourierShare({ deliveryCharge: 135, deliveryBreakdown: { sellerPaysCourier: 134 } }, 120), 0);    // customer's part already covers it
 assert.equal(sellerCourierShare({ deliveryCharge: 135, deliveryBreakdown: { sellerPaysCourier: 134 } }, 400), 134);  // dearer: platform pays the excess
+
+// Courier webhooks: Delhivery by query token, Shiprocket by header (its form bans "kr"/"sr" in URLs)
+const TOK = "t0k3n";
+assert.equal(webhookCarrier(TOK, { carrier: "delhivery", token: TOK }, {}), "delhivery");
+assert.equal(webhookCarrier(TOK, { carrier: "shiprocket", token: TOK }, {}), "shiprocket");
+assert.equal(webhookCarrier(TOK, {}, { "x-api-key": TOK }), "shiprocket");
+assert.equal(webhookCarrier(TOK, {}, { authorization: TOK }), "shiprocket");
+assert.equal(webhookCarrier(TOK, {}, { authorization: `Bearer ${TOK}` }), "shiprocket");
+assert.equal(webhookCarrier(TOK, { carrier: "delhivery" }, { "x-api-key": TOK }), "delhivery");
+assert.equal(webhookCarrier(TOK, { token: TOK }, {}), null);                     // query token, no carrier: unknown
+assert.equal(webhookCarrier(TOK, { carrier: "delhivery", token: "x" }, {}), null);
+assert.equal(webhookCarrier(TOK, {}, { "x-api-key": "wrong" }), null);
+assert.equal(webhookCarrier(TOK, {}, {}), null);
+assert.equal(webhookCarrier("", { carrier: "delhivery", token: "" }, { "x-api-key": "" }), null); // no token configured: closed
 
 console.log("shipping: all passed");

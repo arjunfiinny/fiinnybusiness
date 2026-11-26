@@ -10,7 +10,7 @@ import {
   RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET, applyEvent, bookForOrder, cancelForOrder, loadConfig,
   orderIdForAwb, priceReassignmentOffers, releaseStuckBooking, requestPickupFor,
 } from "./engine";
-import { delhiveryStage, shiprocketStage, type Stage } from "./pure";
+import { delhiveryStage, shiprocketStage, webhookCarrier, type Stage } from "./pure";
 
 /**
  * Courier automation hangs off the order document, like route-release.ts: an
@@ -100,20 +100,23 @@ export const shipmentSweep = onSchedule(
 );
 
 /**
- * Status updates pushed by the couriers. Register
- *   …/courierWebhook?carrier=delhivery&token=<_serverConfig/shipping.webhookToken>
- * with each. An update we cannot place answers 200 so the courier stops
- * retrying it; the sweep is the safety net.
+ * Status updates pushed by the couriers, authorised by
+ * _serverConfig/shipping.webhookToken (see webhookCarrier in pure.ts):
+ *   Delhivery:  …/courierWebhook?carrier=delhivery&token=<webhookToken>
+ *   Shiprocket: the function's run.app URL, no query, token in the x-api-key
+ *               header (its form rejects "kr"/"sr" anywhere in the URL).
+ * An update we cannot place answers 200 so the courier stops retrying it; the
+ * sweep is the safety net.
  */
 export const courierWebhook = onRequest(
   { region: REGION, invoker: "public" },
   async (req, res) => {
     const cfg = await loadConfig();
-    if (!cfg.webhookToken || req.query.token !== cfg.webhookToken) {
+    const carrier = webhookCarrier(cfg.webhookToken, req.query as Record<string, unknown>, req.headers);
+    if (!carrier) {
       res.status(401).send("no");
       return;
     }
-    const carrier = String(req.query.carrier ?? "");
     const b = (req.body ?? {}) as Record<string, any>;
     let awb = "";
     let stage: Stage | null = null;

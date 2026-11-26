@@ -351,6 +351,36 @@ export function shiprocketStage(status: unknown): Stage | null {
   return null;
 }
 
+/**
+ * Who sent a courier webhook, or null when it is not authorised.
+ *
+ * Delhivery: …/courierWebhook?carrier=delhivery&token=<webhookToken>.
+ * Shiprocket refuses webhook URLs containing "shiprocket", "kartrocket", "sr"
+ * or "kr" (so neither the cloudfunctions.net host, which has "krishidukan" in
+ * it, nor `carrier=shiprocket`), and sends its token in a header it calls
+ * x-api-key or Authorization. So a request authorised by that header with no
+ * carrier in the query is Shiprocket; it is registered on the function's
+ * run.app URL, with no query at all.
+ */
+export function webhookCarrier(
+  webhookToken: string,
+  query: Record<string, unknown>,
+  headers: Record<string, unknown>,
+): CarrierId | null {
+  if (!webhookToken) return null;
+  const header = (name: string) => {
+    const v = headers[name];
+    return String(Array.isArray(v) ? v[0] : v ?? "").trim();
+  };
+  const fromQuery = String(query.token ?? "") === webhookToken;
+  const fromHeader = header("x-api-key") === webhookToken
+    || header("authorization").replace(/^Bearer\s+/i, "") === webhookToken;
+  if (!fromQuery && !fromHeader) return null;
+  const named = String(query.carrier ?? "");
+  if (named === "delhivery" || named === "shiprocket") return named;
+  return fromHeader ? "shiprocket" : null;
+}
+
 export function trackingUrlFor(carrier: CarrierId, awb: string): string {
   const id = encodeURIComponent(awb);
   return carrier === "delhivery"
