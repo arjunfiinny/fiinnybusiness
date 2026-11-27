@@ -10,6 +10,7 @@ import {
   validatePageContent,
 } from "../../../lib/seo/page-content";
 import { buildProductSlug, listOnlineDeliveryProducts } from "../../../lib/seo/products-server";
+import { getAiContent } from "../../../lib/seo/page-content-server";
 
 /**
  * Team-added product page content (app/lib/seo/page-content.ts).
@@ -58,6 +59,7 @@ export async function GET(request: Request) {
           return {
             ...p,
             hasContent: !!c,
+            hasAiContent: !!getAiContent(p.id),
             addedWords: c ? pageContentWords(c) : 0,
             faqCount: c?.faqs.length ?? 0,
             photoCount: c?.images.length ?? 0,
@@ -77,6 +79,8 @@ export async function GET(request: Request) {
   return NextResponse.json({
     productId,
     content: snap.exists ? readPageContent(snap.data()) : null,
+    // KrishiDukan-written text the page shows while the team has saved nothing.
+    aiDraft: getAiContent(productId),
     updatedAt: snap.exists ? millis(snap.get("updatedAt")) : null,
     updatedBy: snap.exists ? String(snap.get("updatedBy") ?? "") || null : null,
   });

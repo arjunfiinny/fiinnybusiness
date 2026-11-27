@@ -25,6 +25,8 @@ type Row = {
   onlineSellers: number;
   listingWords: number;
   hasContent: boolean;
+  /** KrishiDukan-written text exists for it (shown while the switch is on). */
+  hasAiContent: boolean;
   addedWords: number;
   faqCount: number;
   photoCount: number;
@@ -106,6 +108,8 @@ export default function AdminPageContentPage() {
         </button>
       </div>
 
+      <AiSwitch />
+
       <div className="mt-5 grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)]">
         {/* Product list */}
         <section className="rounded-2xl border border-surface-container bg-white min-w-0">
@@ -152,10 +156,14 @@ export default function AdminPageContentPage() {
                     </span>
                     <span
                       className={`flex-shrink-0 rounded-full px-2 py-0.5 text-[11px] font-black ${
-                        r.hasContent ? "bg-green-100 text-green-800" : "bg-amber-100 text-amber-800"
+                        r.hasContent
+                          ? "bg-green-100 text-green-800"
+                          : r.hasAiContent
+                            ? "bg-sky-100 text-sky-800"
+                            : "bg-amber-100 text-amber-800"
                       }`}
                     >
-                      {r.hasContent ? "Added" : "To do"}
+                      {r.hasContent ? "Team text" : r.hasAiContent ? "KrishiDukan text" : "To do"}
                     </span>
                   </button>
                 </li>
@@ -193,6 +201,7 @@ export default function AdminPageContentPage() {
 function Editor({ row, onSaved }: { row: Row; onSaved: (patch: Partial<Row>) => void }) {
   const [content, setContent] = useState<PageContent>(EMPTY);
   const [hadContent, setHadContent] = useState(false);
+  const [fromAi, setFromAi] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
@@ -204,12 +213,15 @@ function Editor({ row, onSaved }: { row: Row; onSaved: (patch: Partial<Row>) => 
     let live = true;
     (async () => {
       try {
-        const body = await api<{ content: PageContent | null }>(
+        const body = await api<{ content: PageContent | null; aiDraft: PageContent | null }>(
           `/api/admin/product-page-content?productId=${encodeURIComponent(row.id)}`,
         );
         if (!live) return;
-        setContent(body.content ?? EMPTY);
+        // No team text yet: start from the KrishiDukan-written text, so editing
+        // it and saving makes it the team's own version for this product.
+        setContent(body.content ?? body.aiDraft ?? EMPTY);
         setHadContent(!!body.content);
+        setFromAi(!body.content && !!body.aiDraft);
       } catch (e) {
         if (live) setMessage({ ok: false, text: e instanceof Error ? e.message : "Could not load this product's content." });
       } finally {
@@ -234,6 +246,7 @@ function Editor({ row, onSaved }: { row: Row; onSaved: (patch: Partial<Row>) => 
       });
       setContent(body.content);
       setHadContent(true);
+      setFromAi(false);
       onSaved({ hasContent: true, addedWords: body.addedWords, faqCount: body.content.faqs.length, photoCount: body.content.images.length });
       setMessage({ ok: true, text: "Saved. The product page shows it within a few minutes." });
     } catch (e) {
@@ -251,8 +264,14 @@ function Editor({ row, onSaved }: { row: Row; onSaved: (patch: Partial<Row>) => 
       setContent(EMPTY);
       setHadContent(false);
       setConfirmRemove(false);
+      setFromAi(false);
       onSaved({ hasContent: false, addedWords: 0, faqCount: 0, photoCount: 0 });
-      setMessage({ ok: true, text: "Removed. The page shows only the seller's listing again." });
+      setMessage({
+        ok: true,
+        text: row.hasAiContent
+          ? "Removed your team's text. The KrishiDukan-written text shows again while the switch is on."
+          : "Removed. The page shows only the seller's listing again.",
+      });
     } catch (e) {
       setMessage({ ok: false, text: e instanceof Error ? e.message : "Could not remove." });
     } finally {
@@ -299,6 +318,13 @@ function Editor({ row, onSaved }: { row: Row; onSaved: (patch: Partial<Row>) => 
           View page <ExternalLink className="h-3.5 w-3.5" aria-hidden />
         </a>
       </div>
+
+      {fromAi ? (
+        <p className="rounded-xl bg-sky-50 p-3 text-xs text-sky-900">
+          This is the KrishiDukan-written text. It is live on the page while the switch at the top is on. Edit it and
+          press Save to make it your team&apos;s own version for this product; the switch then no longer affects it.
+        </p>
+      ) : null}
 
       <div className="rounded-xl bg-surface-container-low p-3">
         <div className="flex items-center justify-between text-xs font-bold text-on-surface">
@@ -455,6 +481,77 @@ function Editor({ row, onSaved }: { row: Row; onSaved: (patch: Partial<Row>) => 
           )
         ) : null}
       </div>
+    </div>
+  );
+}
+
+type SwitchState = { aiContent: boolean; products: number; updatedBy: string | null; updatedAt: number | null };
+
+/**
+ * The one switch for KrishiDukan-written content (api/admin/page-content-settings).
+ * Off takes it off every product page at once; team-saved text is unaffected.
+ */
+function AiSwitch() {
+  const [state, setState] = useState<SwitchState | null>(null);
+  const [confirm, setConfirm] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api<SwitchState>("/api/admin/page-content-settings")
+      .then(setState)
+      .catch((e) => setError(e instanceof Error ? e.message : "Could not load the switch."));
+  }, []);
+
+  const flip = async (on: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      setState(await api<SwitchState>("/api/admin/page-content-settings", { method: "POST", body: JSON.stringify({ aiContent: on }) }));
+      setConfirm(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not change the switch.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!state) {
+    return error ? <p className="mt-5 text-sm text-red-600">{error}</p> : null;
+  }
+  return (
+    <div className={`mt-5 rounded-2xl border p-4 flex flex-wrap items-center gap-3 ${state.aiContent ? "border-sky-200 bg-sky-50" : "border-surface-container bg-white"}`}>
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-black text-on-surface">
+          KrishiDukan-written content: {state.aiContent ? "showing" : "off"}
+        </p>
+        <p className="text-xs text-on-surface-variant">
+          {state.aiContent
+            ? `Descriptions and FAQs written by KrishiDukan are on ${state.products} product pages. Your team's saved text always replaces them.`
+            : `Off on all pages. ${state.products} products have KrishiDukan-written text ready if you turn it back on.`}
+          {" "}Pages update within an hour (search engines see the change on their next visit).
+        </p>
+      </div>
+      {state.aiContent ? (
+        confirm ? (
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-on-surface">Remove it from all {state.products} pages?</span>
+            <button type="button" disabled={busy} onClick={() => void flip(false)} className="rounded-xl bg-red-600 px-4 py-2 text-sm font-black text-white disabled:opacity-50">
+              {busy ? "Removing…" : "Yes, remove"}
+            </button>
+            <button type="button" onClick={() => setConfirm(false)} className="px-2 py-2 text-sm font-bold text-on-surface-variant">Keep</button>
+          </div>
+        ) : (
+          <button type="button" onClick={() => setConfirm(true)} className="inline-flex items-center gap-1.5 rounded-xl border border-red-200 bg-white px-4 py-2 text-sm font-bold text-red-600 hover:bg-red-50">
+            <Trash2 className="h-4 w-4" aria-hidden /> Remove from all pages
+          </button>
+        )
+      ) : (
+        <button type="button" disabled={busy} onClick={() => void flip(true)} className="rounded-xl bg-primary px-4 py-2 text-sm font-black text-white disabled:opacity-50">
+          {busy ? "Turning on…" : "Show it again"}
+        </button>
+      )}
+      {error ? <p className="w-full text-sm text-red-600">{error}</p> : null}
     </div>
   );
 }
