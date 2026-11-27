@@ -12,6 +12,8 @@ import {
   queryWords,
   searchTerms,
 } from "../../../lib/marketplace-cards";
+import { getMarketRanking } from "../../../lib/marketplace-rank-server";
+import type { RankRow } from "../../../lib/marketplace-rank";
 
 // Admin SDK + Firestore cursor paging need the Node runtime, and every response
 // depends on the requested cursor, so this route is always dynamic.
@@ -25,6 +27,11 @@ export const dynamic = "force-dynamic";
  * marketplaceCards: one pre-merged card per product name, maintained by Cloud
  * Functions. A browse page reads pageSize cards; a search page reads the
  * matching marketplaceSearch token docs plus those cards.
+ *
+ * Browse order is the Market's default ("Recommended") order: online first,
+ * then most bought, then A→Z (lib/marketplace-rank.ts). Search keeps the best
+ * name match first and breaks ties with that order. If the ranking cannot be
+ * read, browse falls back to plain A→Z.
  *
  * Response: { products: MarketplaceProduct[], nextCursor: string | null, hasMore: boolean }
  */
@@ -83,9 +90,10 @@ const CACHE_HEADERS = {
 /**
  * k/id: continue in name order after that doc. o: offset into a search's
  * best-match-first window. t: the tokens the search settled on, so later
- * pages don't redo the forgiving retries.
+ * pages don't redo the forgiving retries. r: offset into the ranked browse
+ * order.
  */
-type Cursor = { k?: string; id?: string; o?: number; t?: string[] };
+type Cursor = { k?: string; id?: string; o?: number; t?: string[]; r?: number };
 type ScanPos = { k: string; id: string };
 
 function encodeCursor(c: Cursor): string {
@@ -99,10 +107,11 @@ function decodeCursor(raw: string | null): Cursor | null {
     const c: Cursor = {};
     if (typeof parsed?.k === "string" && typeof parsed?.id === "string") { c.k = parsed.k; c.id = parsed.id; }
     if (Number.isInteger(parsed?.o) && parsed.o >= 0) c.o = parsed.o;
+    if (Number.isInteger(parsed?.r) && parsed.r >= 0) c.r = parsed.r;
     if (Array.isArray(parsed?.t) && parsed.t.every((x: unknown) => typeof x === "string")) {
       c.t = (parsed.t as string[]).slice(0, FALLBACK_MAX_WORDS);
     }
-    if (c.k !== undefined || c.o !== undefined || c.t !== undefined) return c;
+    if (c.k !== undefined || c.o !== undefined || c.t !== undefined || c.r !== undefined) return c;
   } catch {
     /* fall through: an unreadable cursor restarts from the first page */
   }
@@ -237,6 +246,7 @@ async function rankedSearchPage(
   tokens: string[],
   cursor: Cursor | null,
   pageSize: number,
+  rankPos: Map<string, number> | null = null,
 ): Promise<{ ids: string[]; next: Cursor | null; best?: number }> {
   const scanPos = scanPosOf(cursor);
   if (scanPos && cursor?.o === undefined) {
@@ -250,13 +260,42 @@ async function rankedSearchPage(
       i,
       score: matchScore(String(d.get("nameKey") ?? ""), (d.get("aliasKeys") ?? []) as string[], search, tokens),
     }))
-    .sort((a, b) => b.score - a.score || a.i - b.i);
+    // Equal name matches: online first, then most bought, then A→Z (rankPos).
+    .sort((a, b) => b.score - a.score || posIn(rankPos, a.id) - posIn(rankPos, b.id) || a.i - b.i);
   const offset = cursor?.o ?? 0;
   const ids = ranked.slice(offset, offset + pageSize).map((r) => r.id);
   let next: Cursor | null = null;
   if (offset + pageSize < ranked.length) next = { o: offset + pageSize, t: tokens };
   else if (window.next) next = { ...window.next, t: tokens };
   return { ids, next, best: ranked[0]?.score ?? 0 };
+}
+
+/** A card's place in the default order; unknown cards (e.g. built since the last read) go last. */
+function posIn(rankPos: Map<string, number> | null, id: string): number {
+  return rankPos?.get(id) ?? Number.MAX_SAFE_INTEGER;
+}
+
+/** The default order, or null when it cannot be read (callers then use A→Z). */
+async function rankingOrNull(): Promise<RankRow[] | null> {
+  try {
+    return await getMarketRanking();
+  } catch (err) {
+    console.warn("[api/marketplace/products] ranking unavailable, using name order:", err);
+    return null;
+  }
+}
+
+/** One browse page in the default order: offset paging over the ranked, category-filtered list. */
+function rankedBrowsePage(
+  ranking: RankRow[],
+  category: string,
+  cursor: Cursor | null,
+  pageSize: number,
+): { ids: string[]; next: Cursor | null } {
+  const rows = category ? ranking.filter((r) => normalizeCategory(r.categoryKey) === category) : ranking;
+  const offset = cursor?.r ?? 0;
+  const ids = rows.slice(offset, offset + pageSize).map((r) => r.docId);
+  return { ids, next: offset + pageSize < rows.length ? { r: offset + pageSize } : null };
 }
 
 export async function GET(request: Request) {
@@ -295,19 +334,25 @@ export async function GET(request: Request) {
     let page: { ids: string[]; next: Cursor | null; best?: number; docs?: FirebaseFirestore.QueryDocumentSnapshot[] };
     const terms = searchTerms(search);
     if (!search) {
-      page = await readPage(byName(inCategory(cards)), scanPosOf(cursor), pageSize);
+      // A k/id cursor is a page from before the ranked order: finish that list in name order.
+      const ranking = scanPosOf(cursor) ? null : await rankingOrNull();
+      page = ranking
+        ? rankedBrowsePage(ranking, category, cursor, pageSize)
+        : await readPage(byName(inCategory(cards)), scanPosOf(cursor), pageSize);
     } else if (terms.length > 0) {
       const tokenQuery = (primary: string) => byName(
         inCategory(db.collection(SEARCH_COLLECTION).where("searchKeywords", "array-contains", primary)),
       );
       // Later pages carry the tokens the first page settled on.
       const tokens = cursor?.t?.length ? orderTokens(cursor.t) : terms;
-      page = await rankedSearchPage(tokenQuery, search, tokens, cursor, pageSize);
+      const ranking = await rankingOrNull();
+      const rankPos = ranking ? new Map(ranking.map((r, i) => [r.docId, i])) : null;
+      page = await rankedSearchPage(tokenQuery, search, tokens, cursor, pageSize, rankPos);
       let pageTokens = tokens;
       if (!cursor && page.ids.length === 0) {
         const forgiving = await forgivingTokens(tokenQuery, queryWords(search));
         if (forgiving) {
-          page = await rankedSearchPage(tokenQuery, search, forgiving, null, pageSize);
+          page = await rankedSearchPage(tokenQuery, search, forgiving, null, pageSize, rankPos);
           pageTokens = forgiving;
         }
       }
@@ -318,7 +363,7 @@ export async function GET(request: Request) {
         // shop/description matches follow instead of disappearing.
         const sound = await forgivingTokens(tokenQuery, queryWords(search), true);
         if (sound) {
-          const alt = await rankedSearchPage(tokenQuery, search, sound, null, pageSize);
+          const alt = await rankedSearchPage(tokenQuery, search, sound, null, pageSize, rankPos);
           if ((alt.best ?? 0) > 0) {
             const weak = page.ids.filter((id) => !alt.ids.includes(id));
             const ids = [...alt.ids, ...weak].slice(0, pageSize);
