@@ -107,6 +107,39 @@ export function readPageContent(data: Record<string, unknown> | undefined | null
   return { description, faqs, images };
 }
 
+/**
+ * settings/pageContent, which controls the KrishiDukan-written text (ai-content/products.json):
+ *  - aiContent: false turns it off on every product page (admin, one click);
+ *  - aiHidden: product ids the team hid it on, one product at a time.
+ * A missing document means on everywhere, hidden nowhere.
+ */
+export interface AiContentSettings {
+  on: boolean;
+  hidden: string[];
+}
+
+export function readAiSettings(data: Record<string, unknown> | undefined | null): AiContentSettings {
+  if (!data) return { on: true, hidden: [] };
+  const hidden = Array.isArray(data.aiHidden) ? data.aiHidden.filter((x): x is string => typeof x === "string" && !!x) : [];
+  return { on: data.aiContent !== false, hidden };
+}
+
+/**
+ * What a product page shows on top of the seller's listing: the team's saved
+ * text first; otherwise the KrishiDukan-written text, unless it is switched
+ * off everywhere or hidden on this product; otherwise nothing.
+ */
+export function pickPageContent(
+  productId: string,
+  team: PageContent | null,
+  ai: PageContent | null,
+  settings: AiContentSettings,
+): PageContent | null {
+  if (team) return team;
+  if (!ai || !settings.on || settings.hidden.includes(productId)) return null;
+  return ai;
+}
+
 /** Word count of everything the layer adds to the page, for the editor's progress hint. */
 export function pageContentWords(c: PageContent): number {
   const text = [c.description, ...c.faqs.flatMap((f) => [f.q, f.a])].join(" ");

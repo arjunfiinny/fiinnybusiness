@@ -4,6 +4,7 @@ import { FieldValue } from "firebase-admin/firestore";
 import { getAdminDb } from "../../../lib/firebase-admin";
 import { requireAdmin, requireSection } from "../../../lib/admin-auth";
 import { PAGE_CONTENT_SETTINGS, aiContentIds } from "../../../lib/seo/page-content-server";
+import { readAiSettings } from "../../../lib/seo/page-content";
 
 /**
  * The one switch for KrishiDukan-written product content
@@ -18,9 +19,13 @@ const REF = () => getAdminDb().collection(PAGE_CONTENT_SETTINGS.collection).doc(
 async function view() {
   const snap = await REF().get();
   const at = snap.get("updatedAt");
+  const settings = readAiSettings(snap.exists ? snap.data() : null);
+  const ids = new Set(aiContentIds());
   return {
-    aiContent: snap.exists ? snap.get("aiContent") !== false : true,
-    products: aiContentIds().length,
+    aiContent: settings.on,
+    products: ids.size,
+    /** Products the team hid it on one at a time (still hidden after the switch goes back on). */
+    hidden: settings.hidden.filter((id) => ids.has(id)).length,
     updatedBy: snap.exists ? String(snap.get("updatedBy") ?? "") || null : null,
     updatedAt: at && typeof at.toMillis === "function" ? at.toMillis() : null,
   };

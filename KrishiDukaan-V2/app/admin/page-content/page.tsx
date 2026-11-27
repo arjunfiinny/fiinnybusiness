@@ -27,6 +27,8 @@ type Row = {
   hasContent: boolean;
   /** KrishiDukan-written text exists for it (shown while the switch is on). */
   hasAiContent: boolean;
+  /** The team hid the KrishiDukan-written text on this one product. */
+  aiHidden: boolean;
   addedWords: number;
   faqCount: number;
   photoCount: number;
@@ -158,12 +160,14 @@ export default function AdminPageContentPage() {
                       className={`flex-shrink-0 rounded-full px-2 py-0.5 text-[11px] font-black ${
                         r.hasContent
                           ? "bg-green-100 text-green-800"
-                          : r.hasAiContent
-                            ? "bg-sky-100 text-sky-800"
-                            : "bg-amber-100 text-amber-800"
+                          : r.hasAiContent && r.aiHidden
+                            ? "bg-surface-container text-on-surface-variant"
+                            : r.hasAiContent
+                              ? "bg-sky-100 text-sky-800"
+                              : "bg-amber-100 text-amber-800"
                       }`}
                     >
-                      {r.hasContent ? "Team text" : r.hasAiContent ? "KrishiDukan text" : "To do"}
+                      {r.hasContent ? "Team text" : r.hasAiContent ? (r.aiHidden ? "Hidden" : "KrishiDukan text") : "To do"}
                     </span>
                   </button>
                 </li>
@@ -202,6 +206,7 @@ function Editor({ row, onSaved }: { row: Row; onSaved: (patch: Partial<Row>) => 
   const [content, setContent] = useState<PageContent>(EMPTY);
   const [hadContent, setHadContent] = useState(false);
   const [fromAi, setFromAi] = useState(false);
+  const [aiHidden, setAiHidden] = useState(row.aiHidden);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
@@ -213,7 +218,7 @@ function Editor({ row, onSaved }: { row: Row; onSaved: (patch: Partial<Row>) => 
     let live = true;
     (async () => {
       try {
-        const body = await api<{ content: PageContent | null; aiDraft: PageContent | null }>(
+        const body = await api<{ content: PageContent | null; aiDraft: PageContent | null; aiHidden?: boolean }>(
           `/api/admin/product-page-content?productId=${encodeURIComponent(row.id)}`,
         );
         if (!live) return;
@@ -222,6 +227,7 @@ function Editor({ row, onSaved }: { row: Row; onSaved: (patch: Partial<Row>) => 
         setContent(body.content ?? body.aiDraft ?? EMPTY);
         setHadContent(!!body.content);
         setFromAi(!body.content && !!body.aiDraft);
+        setAiHidden(!!body.aiHidden);
       } catch (e) {
         if (live) setMessage({ ok: false, text: e instanceof Error ? e.message : "Could not load this product's content." });
       } finally {
@@ -268,12 +274,51 @@ function Editor({ row, onSaved }: { row: Row; onSaved: (patch: Partial<Row>) => 
       onSaved({ hasContent: false, addedWords: 0, faqCount: 0, photoCount: 0 });
       setMessage({
         ok: true,
-        text: row.hasAiContent
-          ? "Removed your team's text. The KrishiDukan-written text shows again while the switch is on."
-          : "Removed. The page shows only the seller's listing again.",
+        text:
+          row.hasAiContent && !aiHidden
+            ? "Removed your team's text. The KrishiDukan-written text shows again while the switch is on. To take that off too, use \"Hide on this product\"."
+            : "Removed. The page shows only the seller's listing again.",
       });
+      if (row.hasAiContent) {
+        // Show the KrishiDukan-written text in the editor again, like a product with no team text.
+        try {
+          const body = await api<{ aiDraft: PageContent | null }>(
+            `/api/admin/product-page-content?productId=${encodeURIComponent(row.id)}`,
+          );
+          if (body.aiDraft) {
+            setContent(body.aiDraft);
+            setFromAi(true);
+          }
+        } catch {
+          /* the editor just stays empty */
+        }
+      }
     } catch (e) {
       setMessage({ ok: false, text: e instanceof Error ? e.message : "Could not remove." });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Hide or show the KrishiDukan-written text on this product only. */
+  const setHidden = async (hide: boolean) => {
+    setBusy(true);
+    setMessage(null);
+    try {
+      await api("/api/admin/product-page-content", {
+        method: "PATCH",
+        body: JSON.stringify({ productId: row.id, hideAi: hide }),
+      });
+      setAiHidden(hide);
+      onSaved({ aiHidden: hide });
+      setMessage({
+        ok: true,
+        text: hide
+          ? "Hidden on this product. The page shows only the seller's listing within a few minutes."
+          : "Showing again on this product within a few minutes (while the switch at the top is on).",
+      });
+    } catch (e) {
+      setMessage({ ok: false, text: e instanceof Error ? e.message : "Could not change it." });
     } finally {
       setBusy(false);
     }
@@ -320,10 +365,35 @@ function Editor({ row, onSaved }: { row: Row; onSaved: (patch: Partial<Row>) => 
       </div>
 
       {fromAi ? (
-        <p className="rounded-xl bg-sky-50 p-3 text-xs text-sky-900">
-          This is the KrishiDukan-written text. It is live on the page while the switch at the top is on. Edit it and
-          press Save to make it your team&apos;s own version for this product; the switch then no longer affects it.
-        </p>
+        <div
+          className={`rounded-xl p-3 text-xs flex flex-wrap items-center gap-3 ${
+            aiHidden ? "bg-surface-container-low text-on-surface" : "bg-sky-50 text-sky-900"
+          }`}
+        >
+          <p className="min-w-0 flex-1">
+            {aiHidden ? (
+              <>
+                <b>Hidden on this product.</b> The page shows only the seller&apos;s listing. The text below is the
+                KrishiDukan-written draft: press Show it again, or edit it and Save to make it your team&apos;s own text.
+              </>
+            ) : (
+              <>
+                This is the KrishiDukan-written text. It is live on the page while the switch at the top is on. Edit it
+                and press Save to make it your team&apos;s own version for this product, or hide it on this product.
+              </>
+            )}
+          </p>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void setHidden(!aiHidden)}
+            className={`flex-shrink-0 rounded-xl px-3 py-1.5 text-xs font-black disabled:opacity-50 ${
+              aiHidden ? "bg-primary text-white" : "border border-red-200 bg-white text-red-600 hover:bg-red-50"
+            }`}
+          >
+            {aiHidden ? "Show it again" : "Hide on this product"}
+          </button>
+        </div>
       ) : null}
 
       <div className="rounded-xl bg-surface-container-low p-3">
@@ -485,7 +555,7 @@ function Editor({ row, onSaved }: { row: Row; onSaved: (patch: Partial<Row>) => 
   );
 }
 
-type SwitchState = { aiContent: boolean; products: number; updatedBy: string | null; updatedAt: number | null };
+type SwitchState = { aiContent: boolean; products: number; hidden: number; updatedBy: string | null; updatedAt: number | null };
 
 /**
  * The one switch for KrishiDukan-written content (api/admin/page-content-settings).
@@ -527,7 +597,9 @@ function AiSwitch() {
         </p>
         <p className="text-xs text-on-surface-variant">
           {state.aiContent
-            ? `Descriptions and FAQs written by KrishiDukan are on ${state.products} product pages. Your team's saved text always replaces them.`
+            ? `Descriptions and FAQs written by KrishiDukan are on ${state.products - state.hidden} product pages${
+                state.hidden ? ` (hidden by the team on ${state.hidden})` : ""
+              }. Your team's saved text always replaces them.`
             : `Off on all pages. ${state.products} products have KrishiDukan-written text ready if you turn it back on.`}
           {" "}Pages update within an hour (search engines see the change on their next visit).
         </p>

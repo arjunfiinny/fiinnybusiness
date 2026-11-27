@@ -8,6 +8,8 @@ import {
   LIMITS,
   isAllowedImageUrl,
   pageContentWords,
+  pickPageContent,
+  readAiSettings,
   readPageContent,
   validatePageContent,
 } from "../../app/lib/seo/page-content";
@@ -67,6 +69,31 @@ assert.equal(readPageContent({ description: "", faqs: [], images: [] }), null);
   assert.equal(c!.description, "42");
   assert.deepEqual(c!.faqs, [{ q: "Q", a: "A" }]);
   assert.deepEqual(c!.images, [OUR_IMAGE]);
+}
+
+// 7. Which text a product page shows: team text, else KrishiDukan-written text
+//    unless switched off everywhere or hidden on this product.
+{
+  const team = { description: "Team words", faqs: [], images: [] };
+  const ai = { description: "KrishiDukan words", faqs: [{ q: "Q", a: "A" }], images: [] };
+  const on = readAiSettings(null);
+  assert.deepEqual(on, { on: true, hidden: [] }, "no settings doc = on everywhere");
+
+  assert.equal(pickPageContent("p1", team, ai, on), team, "team text always wins");
+  assert.equal(pickPageContent("p1", null, ai, on), ai, "written text shows by default");
+  assert.equal(pickPageContent("p1", null, null, on), null, "nothing to show");
+
+  const off = readAiSettings({ aiContent: false });
+  assert.equal(pickPageContent("p1", null, ai, off), null, "global switch off");
+  assert.equal(pickPageContent("p1", team, ai, off), team, "switch never hides team text");
+
+  const hidden = readAiSettings({ aiContent: true, aiHidden: ["p1", 7, ""] });
+  assert.deepEqual(hidden.hidden, ["p1"], "junk ids ignored");
+  assert.equal(pickPageContent("p1", null, ai, hidden), null, "hidden on this product");
+  assert.equal(pickPageContent("p2", null, ai, hidden), ai, "other products unaffected");
+  assert.equal(pickPageContent("p1", team, ai, hidden), team, "hiding never hides team text");
+
+  assert.equal(readAiSettings({ aiContent: "yes" }).on, true, "only an explicit false turns it off");
 }
 
 console.log("page-content: all assertions passed");
