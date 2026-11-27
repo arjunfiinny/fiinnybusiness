@@ -47,4 +47,16 @@ assert.equal(rerouteTarget(facts(DHANESHWARI, { availability: without((e) => ({ 
 assert.equal(rerouteTarget(facts(DHANESHWARI, { availability: availability.filter((e) => e.storePhone !== NANDGAON) })), null);
 assert.equal(rerouteTarget(facts(DHANESHWARI, { accountOnline: (p) => p !== NANDGAON && onlineAccounts.has(p) })), null);
 
+// A store listed twice: the checkout's own lookup matches on sellerPhone AND
+// sellerId and takes the FIRST matching entry. The reroute must read that same
+// entry, so it never moves an order the server would have accepted as sent.
+const STORE_UID = "Ab12Cd34Ef56Gh78Ij90Kl12Mn34";
+const dup = [
+  { storeId: STORE_UID, isOnline: true, stockLevel: "In Stock" },          // matched by sellerId → online
+  { storeId: SAI, storePhone: SAI, isOnline: false, stockLevel: "In Stock" }, // matched by phone → offline
+  { storeId: NANDGAON, storePhone: NANDGAON, isOnline: true, stockLevel: "In Stock" },
+];
+assert.equal(rerouteTarget(facts(SAI, { availability: dup, sentSellerIds: [SAI, STORE_UID] })), null); // server finds the online entry
+assert.equal(rerouteTarget(facts(SAI, { availability: dup, sentSellerIds: [SAI, SAI] })), NANDGAON);   // only the offline entry is theirs
+
 console.log("offline-reroute: all passed");

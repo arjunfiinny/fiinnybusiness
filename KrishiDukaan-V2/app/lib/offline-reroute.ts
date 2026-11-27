@@ -26,6 +26,13 @@ export type RerouteFacts = {
   productId: string;
   /** sellerPhone the client sent, else its sellerId ('' when none). */
   sentSeller: string;
+  /**
+   * Every seller identifier the client sent (sellerPhone AND sellerId). The
+   * sent store's availability entry is found with all of them, exactly as
+   * create-cart-order's own lookup does, so both pick the same entry when a
+   * store is listed twice. Defaults to [sentSeller].
+   */
+  sentSellerIds?: Array<string | null | undefined>;
   /** The canonical product's availability[] entries. */
   availability: Array<Record<string, unknown>>;
   /** Account-level online delivery, as create-cart-order reads it. */
@@ -43,7 +50,7 @@ export function rerouteTarget(f: RerouteFacts): string | null {
 
   // Can the sent store deliver? Same two tests as create-cart-order's
   // eligibility check: account online AND its listing not isOnline:false.
-  const sentEntry = f.availability.find(makeSellerMatcher([sent]));
+  const sentEntry = f.availability.find(makeSellerMatcher([sent, ...(f.sentSellerIds ?? [])]));
   const sentListingOnline = sentEntry ? sentEntry.isOnline !== false : true;
   if (SELLER_PHONE_RE.test(sent) && f.accountOnline(sent) && sentListingOnline) return null;
 

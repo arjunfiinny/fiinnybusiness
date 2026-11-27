@@ -217,6 +217,7 @@ export async function POST(request: Request) {
         const to = rerouteTarget({
           productId: String(item.productId),
           sentSeller: sent,
+          sentSellerIds: [item.sellerPhone, item.sellerId],
           availability,
           accountOnline: (p) => online.get(p) === true,
         });
