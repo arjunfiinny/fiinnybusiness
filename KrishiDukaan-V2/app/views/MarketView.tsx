@@ -546,8 +546,8 @@ export default function MarketView({
         list.sort((a, b) => a.name.localeCompare(b.name));
         break;
       default:
-        // Append-only browse: preserve the server's pagination order (name-group
-        // order from /api/marketplace/products) so accumulated pages never
+        // "Recommended": keep the server's order (online first, then most
+        // bought, then A→Z; lib/marketplace-rank.ts) so accumulated pages never
         // reorder when a new page arrives. Explicit sorts above are opt-in.
         break;
     }

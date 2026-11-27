@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../../core/constants/app_config.dart';
 import '../../../core/models/catalog_model.dart';
 import '../../../core/services/perf_trace.dart';
+import 'market_rank.dart';
 import 'marketplace_search.dart';
 
 const _col = 'products';
@@ -63,8 +64,10 @@ class CatalogRepository {
         .toList();
   }
 
-  /// Every marketplace card, newest first (the order the in-app merge used
-  /// to produce). Concurrent callers share one read.
+  /// Every marketplace card in the Market's default order (online first, then
+  /// most bought, then A→Z; the same order as the website, see
+  /// market_rank.dart). Newest first when that order can't be fetched.
+  /// Concurrent callers share one read.
   ///
   /// Once loaded, answers immediately: when the list is older than
   /// [_cardsTtl] it is refreshed in the background instead of making the
@@ -93,12 +96,18 @@ class CatalogRepository {
 
   Future<List<CatalogModel>> _loadCards() async {
     try {
-      final cards = await traced('load_marketplace_cards', _readAllCards);
+      // The ranking is a small CDN-cached request, fetched alongside the cards.
+      final rankLoad = fetchMarketRank();
+      var cards = await traced('load_marketplace_cards', _readAllCards);
       cards.sort((a, b) {
           if (a.createdAt == null) return b.createdAt == null ? 0 : 1;
           if (b.createdAt == null) return -1;
           return b.createdAt!.compareTo(a.createdAt!);
         });
+      final rank = await rankLoad;
+      if (rank != null && rank.isNotEmpty) {
+        cards = applyMarketRank(cards, rank, (c) => c.id);
+      }
       _cards = cards;
       _cardsAt = DateTime.now();
       _failedAt = null;
