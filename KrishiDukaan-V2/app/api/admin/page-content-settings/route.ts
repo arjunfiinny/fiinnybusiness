@@ -15,10 +15,13 @@ import { readAiSettings } from "../../../lib/seo/page-content";
  */
 
 const REF = () => getAdminDb().collection(PAGE_CONTENT_SETTINGS.collection).doc(PAGE_CONTENT_SETTINGS.doc);
+// settings/ is public-read, so who changed it (a phone number) lives in this
+// server-only doc instead.
+const AUDIT = () => getAdminDb().collection("_serverConfig").doc("pageContentAudit");
 
 async function view() {
-  const snap = await REF().get();
-  const at = snap.get("updatedAt");
+  const [snap, audit] = await Promise.all([REF().get(), AUDIT().get()]);
+  const at = audit.get("switchUpdatedAt");
   const settings = readAiSettings(snap.exists ? snap.data() : null);
   const ids = new Set(aiContentIds());
   return {
@@ -26,7 +29,7 @@ async function view() {
     products: ids.size,
     /** Products the team hid it on one at a time (still hidden after the switch goes back on). */
     hidden: settings.hidden.filter((id) => ids.has(id)).length,
-    updatedBy: snap.exists ? String(snap.get("updatedBy") ?? "") || null : null,
+    updatedBy: audit.exists ? String(audit.get("switchUpdatedBy") ?? "") || null : null,
     updatedAt: at && typeof at.toMillis === "function" ? at.toMillis() : null,
   };
 }
@@ -44,8 +47,9 @@ export async function POST(request: Request) {
   if (typeof body?.aiContent !== "boolean") {
     return NextResponse.json({ error: "Send aiContent as true or false." }, { status: 400 });
   }
-  await REF().set(
-    { aiContent: body.aiContent, updatedBy: caller.phone ?? caller.uid, updatedAt: FieldValue.serverTimestamp() },
+  await REF().set({ aiContent: body.aiContent }, { merge: true });
+  await AUDIT().set(
+    { switchUpdatedBy: caller.phone ?? caller.uid, switchUpdatedAt: FieldValue.serverTimestamp(), switchValue: body.aiContent },
     { merge: true },
   );
   // Every product page re-renders on its next visit instead of at its hourly refresh.

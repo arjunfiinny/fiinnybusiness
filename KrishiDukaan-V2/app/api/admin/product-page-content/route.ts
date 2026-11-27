@@ -145,12 +145,14 @@ export async function PATCH(request: Request) {
   if (!getAiContent(productId)) {
     return NextResponse.json({ error: "This product has no KrishiDukan-written text." }, { status: 400 });
   }
+  // settings/ is public-read: only the id list goes there; who did it goes to
+  // the server-only audit doc.
   await settingsRef().set(
-    {
-      aiHidden: body.hideAi ? FieldValue.arrayUnion(productId) : FieldValue.arrayRemove(productId),
-      aiHiddenUpdatedBy: caller.phone ?? caller.uid,
-      aiHiddenUpdatedAt: FieldValue.serverTimestamp(),
-    },
+    { aiHidden: body.hideAi ? FieldValue.arrayUnion(productId) : FieldValue.arrayRemove(productId) },
+    { merge: true },
+  );
+  await getAdminDb().collection("_serverConfig").doc("pageContentAudit").set(
+    { hideUpdatedBy: caller.phone ?? caller.uid, hideUpdatedAt: FieldValue.serverTimestamp(), hideLast: { productId, hidden: body.hideAi } },
     { merge: true },
   );
   await refreshPage(productId);

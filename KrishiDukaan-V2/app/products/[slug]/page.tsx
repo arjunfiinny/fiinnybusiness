@@ -68,6 +68,15 @@ function specRows(p: SeoProduct): { label: string; value: string }[] {
   return rows;
 }
 
+/**
+ * JSON for a <script type="application/ld+json">. JSON.stringify leaves "<" as
+ * is, so seller or team text containing "</script>" would close the tag and
+ * run as HTML; < is the same character to a JSON parser.
+ */
+function jsonLd(value: unknown): string {
+  return JSON.stringify(value).replace(/</g, "\\u003c");
+}
+
 function priceValue(p: SeoProduct): number {
   return p.lowestFinalPrice ?? p.lowestPrice ?? p.price;
 }
@@ -252,16 +261,16 @@ export default async function ProductPage({ params }: PageProps) {
     <main className="min-h-screen bg-surface">
       <script
         type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(productLd) }}
+        dangerouslySetInnerHTML={{ __html: jsonLd(productLd) }}
       />
       <script
         type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbLd) }}
+        dangerouslySetInnerHTML={{ __html: jsonLd(breadcrumbLd) }}
       />
       {faqLd ? (
         <script
           type="application/ld+json"
-          dangerouslySetInnerHTML={{ __html: JSON.stringify(faqLd) }}
+          dangerouslySetInnerHTML={{ __html: jsonLd(faqLd) }}
         />
       ) : null}
 
