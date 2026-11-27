@@ -18,6 +18,11 @@ import {
   getStoreGeography,
   storeUrlPath,
 } from "./lib/seo/stores-server";
+import {
+  localizedProductPath,
+  productLanguageAlternates,
+  translatedLanguagesFor,
+} from "./lib/seo/i18n/product-translations";
 import { HELP_SECTIONS } from "./views/helpContent";
 import { TERMS_VERSION } from "./lib/legal-constants";
 
@@ -135,12 +140,38 @@ function categoryEntries(): MetadataRoute.Sitemap {
 // ─── Product entries (dynamic, safe-fallback) ───────────────────────────────
 async function productEntries(): Promise<MetadataRoute.Sitemap> {
   const products = await getAllListableProductsForSitemap();
-  return products.map((p) => ({
-    url: `${SITE_URL}/products/${buildProductSlug(p.name, p.id)}`,
-    lastModified: toDate(p.updatedAt),
-    changeFrequency: "weekly" as const,
-    priority: 0.8,
-  }));
+  return products.flatMap((p) => {
+    const slug = buildProductSlug(p.name, p.id);
+    const lastModified = toDate(p.updatedAt);
+    // The English page plus one entry per Indian-language version, each
+    // carrying the same hreflang set (xhtml:link), which is how Google learns
+    // they are translations of one another. Products with no translation get
+    // no alternates block at all.
+    const languages = productLanguageAlternates(p.id, slug);
+    const alternates = Object.keys(languages).length
+      ? { alternates: { languages: absolute(languages) } }
+      : {};
+    return [
+      {
+        url: `${SITE_URL}/products/${slug}`,
+        lastModified,
+        changeFrequency: "weekly" as const,
+        priority: 0.8,
+        ...alternates,
+      },
+      ...translatedLanguagesFor(p.id).map((lang) => ({
+        url: `${SITE_URL}${localizedProductPath(lang.code, slug)}`,
+        lastModified,
+        changeFrequency: "weekly" as const,
+        priority: 0.7,
+        ...alternates,
+      })),
+    ];
+  });
+}
+
+function absolute(paths: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(paths).map(([k, v]) => [k, `${SITE_URL}${v}`]));
 }
 
 // ─── Brand entries (dynamic, safe-fallback) ─────────────────────────────────

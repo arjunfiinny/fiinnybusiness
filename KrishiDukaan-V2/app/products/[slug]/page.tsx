@@ -27,6 +27,11 @@ import {
 import { buildReelSlug } from "../../lib/seo/reels-server";
 import { displayPrice } from "../../lib/price-display";
 import { PriceTag } from "../../../components/shared/price-tag";
+import {
+  productLanguageAlternates,
+  translatedLanguagesFor,
+} from "../../lib/seo/i18n/product-translations";
+import { ProductLanguageLinks } from "../../components/shared/product-language-links";
 
 // Incremental Static Regeneration — cached at the edge, refreshed hourly.
 export const revalidate = 3600;
@@ -137,10 +142,20 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
     Boolean,
   );
 
+  // hreflang to the Indian-language versions, only on the primary page: a
+  // duplicate that canonicalises elsewhere must not claim alternates too.
+  const languages =
+    canonical.id === product.id
+      ? productLanguageAlternates(product.id, buildProductSlug(product.name, product.id))
+      : {};
+
   return {
     title,
     description: description.slice(0, 320),
-    alternates: { canonical: canonicalPath },
+    alternates: {
+      canonical: canonicalPath,
+      ...(Object.keys(languages).length ? { languages } : {}),
+    },
     openGraph: {
       type: "website",
       title: shareTitle,
@@ -550,6 +565,15 @@ export default async function ProductPage({ params }: PageProps) {
               ))}
             </ul>
           </section>
+        ) : null}
+
+        {canonical.id === product.id ? (
+          <ProductLanguageLinks
+            heading="Read about this product in your language"
+            slug={canonicalSlug}
+            languages={translatedLanguagesFor(product.id)}
+            current="en"
+          />
         ) : null}
 
         {categorySlug ? (
