@@ -25,7 +25,7 @@ UserModel _user({
     );
 
 void main() {
-  group('description limit (must match web: empty, or 20-300)', () {
+  group('description limit (must match web: empty, or 20-3000)', () {
     test('empty is allowed — description is optional', () {
       expect(validateDescription(''), isNull);
       expect(validateDescription('   '), isNull);
@@ -36,19 +36,20 @@ void main() {
       expect(validateDescription('Too short'), kDescriptionRangeMessage);
     });
 
-    test('exactly 20 and exactly 300 are accepted (boundaries)', () {
+    test('exactly 20 and exactly 3000 are accepted (boundaries)', () {
       expect(validateDescription('a' * 20), isNull);
-      expect(validateDescription('a' * 300), isNull);
+      expect(validateDescription('a' * 300), isNull); // the old limit
+      expect(validateDescription('a' * 3000), isNull);
     });
 
-    test('301+ is rejected — the Varad Agro case', () {
-      expect(isDescriptionInvalid('a' * 301), isTrue);
-      expect(validateDescription('a' * 500), kDescriptionRangeMessage);
+    test('3001+ is rejected', () {
+      expect(isDescriptionInvalid('a' * 3001), isTrue);
+      expect(validateDescription('a' * 5000), kDescriptionRangeMessage);
     });
 
     test('whitespace is trimmed before measuring', () {
-      // 300 real chars plus padding still passes.
-      expect(validateDescription('   ${'a' * 300}   '), isNull);
+      // 3000 real chars plus padding still passes.
+      expect(validateDescription('   ${'a' * 3000}   '), isNull);
       // Padding alone cannot push a short description over the minimum.
       expect(validateDescription('${' ' * 50}short${' ' * 50}'), isNotNull);
     });

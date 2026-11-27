@@ -22,6 +22,8 @@ import {
   where,
 } from "firebase/firestore/lite";
 import { getClientDb } from "../firebase-client-server";
+import { staleWhileErrorCache } from "./stale-cache";
+import { matchDeletedProduct, nameTokens, type MatchCandidate } from "./product-match";
 
 // Per-seller copies — never indexed; only the canonical product gets a page.
 const COPY_SOURCES = new Set([
@@ -77,6 +79,8 @@ export interface SeoProduct {
   sellMode?: "online_delivery" | "offline_store_only";
   variants: { unit: string; price: number; stock?: number }[];
   categoryInfo: Record<string, string | string[]>;
+  /** Seller-defined spec rows ("Formulation: WG"). The app shows them; the page now does too. */
+  customFields: { title: string; value: string }[];
   benefits: string[];
   inStock: boolean;
 }
@@ -147,6 +151,11 @@ function mapProduct(id: string, data: Record<string, unknown>): SeoProduct {
       !Array.isArray(data.categoryInfo)
         ? (data.categoryInfo as Record<string, string | string[]>)
         : {},
+    customFields: Array.isArray(data.customFields)
+      ? (data.customFields as Record<string, unknown>[])
+          .map((f) => ({ title: str(f?.title).trim(), value: str(f?.value).trim() }))
+          .filter((f) => f.title && f.value)
+      : [],
     benefits: Array.isArray(data.benefits) ? (data.benefits as string[]) : [],
     inStock,
   };
@@ -306,9 +315,15 @@ export async function getReelsForProduct(productId: string): Promise<ProductReel
   }
 }
 
-export async function getProductsByCategory(
+/**
+ * The old per-category query: products docs whose category matches, filtered
+ * by isListable. Kept only as the fallback for getProductsByCategory. It reads
+ * at most 300 docs, most of them seller copies, which is why /category pages
+ * used to show a handful of products (Fertilizers: 4 links).
+ */
+async function getProductsByCategoryQuery(
   categoryName: string,
-  max = 60,
+  max: number,
 ): Promise<SeoProduct[]> {
   try {
     const db = getClientDb();
@@ -331,11 +346,241 @@ export async function getProductsByCategory(
 }
 
 /**
- * Active canonical products for the sitemap. Returns [] on failure.
+ * Every product with a page in these categories, one per marketplace card
+ * (the card's primary page; see primaryListable). `categoryNames` are stored
+ * category names, compared case-insensitively. Busiest products first.
+ */
+export async function getProductsByCategory(
+  categoryNames: string | string[],
+  max = 200,
+): Promise<SeoProduct[]> {
+  const raw = Array.isArray(categoryNames) ? categoryNames : [categoryNames];
+  const names = raw.map((n) => n.trim().toLowerCase());
+  try {
+    const index = await getProductIndex();
+    return index.cards
+      .filter((c) => names.includes(c.product.category.trim().toLowerCase()))
+      .slice(0, max)
+      .map((c) => c.product);
+  } catch (err) {
+    console.warn("[seo/products-server] product index unavailable, using the category query:", err);
+    const lists = await Promise.all(raw.map((n) => getProductsByCategoryQuery(n, max)));
+    return lists.flat().slice(0, max);
+  }
+}
+
+// ─── Product index (from marketplaceCards) ──────────────────────────────────
+//
+// A marketplace card is one real product: every doc of a name group, or of an
+// admin-linked canonicalId group. card.listable lists the member docs that
+// pass isListable(), and each of those has its own /products page. When a
+// card has several (pack-size imports like "karanarjun-kazoo-250-ml" next to
+// the main "Kazoo" doc, or two same-name uploads), they are the SAME product,
+// and Search Console reported them as "Duplicate without user-selected
+// canonical". The index picks one primary page per card. The others keep a
+// 200 but carry a canonical tag that points at the primary, and only the
+// primary goes in the sitemap and in link lists.
+
+type ListableRow = { id: string; name: string; updatedAtMs?: number };
+
+/** The card's primary page: its merged canonical product when that has a page, else its first listable doc. */
+export function primaryListable(card: Record<string, unknown>): ListableRow | null {
+  const listable = (Array.isArray(card.listable) ? card.listable : []) as ListableRow[];
+  if (listable.length === 0) return null;
+  return listable.find((l) => l.id === card.id) ?? listable[0]!;
+}
+
+export interface IndexedCard {
+  /** The primary page's product, priced from the card (cross-seller lowest price). */
+  product: SeoProduct;
+  groupKey: string;
+  listableIds: string[];
+  /** Phones of the shops that sell it (card availability). */
+  storePhones: string[];
+  sellerCount: number;
+  /** Sellers whose offer can be ordered online with delivery (availability isOnline). */
+  onlineSellerCount: number;
+}
+
+export interface ProductIndex {
+  cards: IndexedCard[];
+  /** Any listable doc id → its card. */
+  byId: Map<string, IndexedCard>;
+  candidates: MatchCandidate[];
+}
+
+/** Pure: the index from raw marketplaceCards docs. Exported for scripts/tests. */
+export function buildProductIndex(cards: { data: Record<string, unknown> }[]): ProductIndex {
+  const out: IndexedCard[] = [];
+  const byId = new Map<string, IndexedCard>();
+  const candidates: MatchCandidate[] = [];
+  for (const { data } of cards) {
+    const primary = primaryListable(data);
+    if (!primary) continue;
+    const listable = (data.listable as ListableRow[]).filter((l) => l && l.id);
+    const availability = Array.isArray(data.availability)
+      ? (data.availability as Record<string, unknown>[])
+      : [];
+    const storePhones = Array.from(
+      new Set(availability.map((a) => str(a.storePhone || a.storeId)).filter(Boolean)),
+    );
+    const groupKey = str(data.groupKey || data.nameKey);
+    const entry: IndexedCard = {
+      // The card is the merged product; the primary doc's own name keeps its slug.
+      product: mapProduct(primary.id, { ...data, name: primary.name }),
+      groupKey,
+      listableIds: listable.map((l) => l.id),
+      storePhones,
+      sellerCount: Number(data.sellerCount) || storePhones.length,
+      onlineSellerCount: new Set(
+        availability.filter((a) => a.isOnline === true).map((a) => str(a.storePhone || a.storeId)).filter(Boolean),
+      ).size,
+    };
+    out.push(entry);
+    for (const l of listable) {
+      byId.set(l.id, entry);
+      candidates.push({ id: l.id, name: l.name, groupKey, primaryId: primary.id });
+    }
+  }
+  out.sort((a, b) => b.sellerCount - a.sellerCount || a.product.name.localeCompare(b.product.name));
+  return { cards: out, byId, candidates };
+}
+
+// One read of every card (~220 docs, ~7 MB) per 30 minutes per server
+// instance, not per request. Same caching rules as the store list.
+const getProductIndex: () => Promise<ProductIndex> = staleWhileErrorCache(
+  async () => {
+    const snap = await getDocs(collection(getClientDb(), "marketplaceCards"));
+    return buildProductIndex(snap.docs.map((d) => ({ data: d.data() as Record<string, unknown> })));
+  },
+  30 * 60 * 1000,
+  { onStaleServe: (err) => console.warn("[seo/products-server] serving the last product index:", err) },
+);
+
+export type ProductLink = { id: string; name: string };
+
+/**
+ * For a product URL whose doc is gone (or no longer has a page): the live
+ * product it should 308 to, or null to keep the 404. See product-match.ts.
+ */
+export async function findReplacementProduct(slug: string, missingId: string): Promise<ProductLink | null> {
+  try {
+    const index = await getProductIndex();
+    const id = matchDeletedProduct(slug, missingId, index.candidates);
+    if (!id) return null;
+    const card = index.byId.get(id);
+    return card ? { id: card.product.id, name: card.product.name } : null;
+  } catch (err) {
+    console.warn("[seo/products-server] findReplacementProduct failed:", err);
+    return null;
+  }
+}
+
+/** The page a product's canonical tag should point at: its card's primary page (itself when it is the primary). */
+export async function getCanonicalProduct(product: Pick<SeoProduct, "id" | "name">): Promise<ProductLink> {
+  try {
+    const card = (await getProductIndex()).byId.get(product.id);
+    if (card) return { id: card.product.id, name: card.product.name };
+  } catch (err) {
+    console.warn("[seo/products-server] getCanonicalProduct failed:", err);
+  }
+  return { id: product.id, name: product.name };
+}
+
+/**
+ * Other products for a product page: same categories first, ranked by shared
+ * name words (same brand or active ingredient), then by seller count. Never
+ * the product's own card. [] on failure.
+ */
+export async function getRelatedProducts(
+  product: Pick<SeoProduct, "id" | "name">,
+  categoryNames: string[],
+  max = 12,
+): Promise<SeoProduct[]> {
+  try {
+    const index = await getProductIndex();
+    const own = index.byId.get(product.id);
+    const cats = categoryNames.map((c) => c.trim().toLowerCase());
+    const words = new Set(nameTokens(product.name));
+    return index.cards
+      .filter((c) => c !== own && c.product.id !== product.id && cats.includes(c.product.category.trim().toLowerCase()))
+      .map((c, order) => ({
+        c,
+        order,
+        shared: nameTokens(c.product.name).filter((t) => words.has(t)).length,
+      }))
+      .sort((a, b) => b.shared - a.shared || a.order - b.order)
+      .slice(0, max)
+      .map((x) => x.c.product);
+  } catch (err) {
+    console.warn("[seo/products-server] getRelatedProducts failed:", err);
+    return [];
+  }
+}
+
+/** Phones of the shops selling a product (all pages of its card). [] on failure. */
+export async function getSellerPhonesForProduct(productId: string): Promise<string[]> {
+  try {
+    return (await getProductIndex()).byId.get(productId)?.storePhones ?? [];
+  } catch {
+    return [];
+  }
+}
+
+export type OnlineProductRow = {
+  id: string;
+  name: string;
+  category: string;
+  slug: string;
+  image: string;
+  onlineSellers: number;
+  /** Words the seller's own listing puts on the page (description + spec fields). */
+  listingWords: number;
+};
+
+/**
+ * Products that can be ordered online with delivery, one per card (its
+ * primary page), busiest first: the list the admin page-content editor works
+ * from. Throws when the index cannot be read, so the admin sees an error
+ * instead of an empty list.
+ */
+export async function listOnlineDeliveryProducts(): Promise<OnlineProductRow[]> {
+  const index = await getProductIndex();
+  const words = (v: unknown) => String(v ?? "").split(/\s+/).filter((w) => /[A-Za-z0-9ऀ-ॿ]/.test(w)).length;
+  return index.cards
+    .filter((c) => c.onlineSellerCount > 0)
+    .map((c) => ({
+      id: c.product.id,
+      name: c.product.name,
+      category: c.product.category,
+      slug: buildProductSlug(c.product.name, c.product.id),
+      image: c.product.image,
+      onlineSellers: c.onlineSellerCount,
+      listingWords:
+        words(c.product.description) +
+        Object.values(c.product.categoryInfo).reduce<number>((s, v) => s + words(Array.isArray(v) ? v.join(" ") : v), 0),
+    }));
+}
+
+/** The busiest products across the market, one per card, for site-wide link lists. [] on failure. */
+export async function getPopularProducts(max = 60): Promise<SeoProduct[]> {
+  try {
+    return (await getProductIndex()).cards.slice(0, max).map((c) => c.product);
+  } catch (err) {
+    console.warn("[seo/products-server] getPopularProducts failed:", err);
+    return [];
+  }
+}
+
+/**
+ * Product pages for the sitemap: each card's primary page only. Returns [] on
+ * failure.
  *
  * Read from marketplaceCards rather than every products doc: each card lists
  * the member docs that pass isListable() (functions/src/marketplace/cards.ts
- * mirrors it), so this reads one doc per product name instead of ~32.
+ * mirrors it), so this reads one doc per product name instead of ~32. The
+ * card's other listable pages canonicalize to the primary, and a sitemap
+ * should list canonical URLs only.
  */
 export async function getAllListableProductsForSitemap(
   max = 5000,
@@ -345,8 +590,8 @@ export async function getAllListableProductsForSitemap(
     const snap = await getDocs(collection(db, "marketplaceCards"));
     const out: { id: string; name: string; updatedAt: unknown }[] = [];
     for (const card of snap.docs) {
-      const listable = (card.data().listable ?? []) as { id: string; name: string; updatedAtMs?: number }[];
-      for (const p of listable) out.push({ id: p.id, name: p.name, updatedAt: p.updatedAtMs || null });
+      const p = primaryListable(card.data() as Record<string, unknown>);
+      if (p) out.push({ id: p.id, name: p.name, updatedAt: p.updatedAtMs || null });
     }
     return out.slice(0, max);
   } catch (err) {

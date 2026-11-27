@@ -5,7 +5,7 @@ import {
   getProductsByCategory,
   buildProductSlug,
 } from "../../lib/seo/products-server";
-import { getCategoryBySlug, SEO_CATEGORIES } from "../../lib/seo/category-meta";
+import { categoryStoredNames, getCategoryBySlug, SEO_CATEGORIES } from "../../lib/seo/category-meta";
 import { displayPrice } from "../../lib/price-display";
 import { PriceTag } from "../../../components/shared/price-tag";
 import { DeliveredPriceLine } from "../../components/shared/delivered-price-line";
@@ -66,7 +66,9 @@ export default async function CategoryPage({ params }: PageProps) {
   const meta = getCategoryBySlug(category);
   if (!meta) notFound();
 
-  const products = await getProductsByCategory(meta.name);
+  // Every product page in this category and its aliases, one per product
+  // (see getProductsByCategory), as plain server-rendered links.
+  const products = await getProductsByCategory(categoryStoredNames(meta));
 
   // ── JSON-LD: BreadcrumbList ──
   const breadcrumbLd = {

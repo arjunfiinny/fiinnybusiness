@@ -2174,13 +2174,11 @@ export default function ProductDetailView({
         })()}
 
         {/* Product description — moved below the pricing & action section.
-            Capped at 300 chars by the add/edit forms, so it's shown in full
-            with no clamp/toggle. */}
+            The add/edit forms allow up to 3,000 characters, so a long one is
+            clamped with a Read more toggle. */}
         {product.description && (
           <div className="pt-4 border-t border-surface-container">
-            <p className="text-on-surface-variant leading-relaxed text-sm">
-              {product.description}
-            </p>
+            <ProductDescriptionText text={String(product.description)} />
           </div>
         )}
       </div>
@@ -2418,6 +2416,31 @@ export default function ProductDetailView({
         type="success"
         onDismiss={() => setShareToast(null)}
       />
+    </div>
+  );
+}
+
+/** Seller's description: line breaks kept; past ~320 characters it starts clamped with a Read more toggle. */
+function ProductDescriptionText({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const long = text.trim().length > 320;
+  return (
+    <div>
+      <p
+        className={`text-on-surface-variant leading-relaxed text-sm whitespace-pre-line ${long && !open ? "line-clamp-5" : ""}`}
+      >
+        {text.trim()}
+      </p>
+      {long ? (
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="mt-1.5 text-sm font-bold text-primary"
+          aria-expanded={open}
+        >
+          {open ? "Show less" : "Read more"}
+        </button>
+      ) : null}
     </div>
   );
 }

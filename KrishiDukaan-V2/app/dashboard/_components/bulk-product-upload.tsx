@@ -324,8 +324,8 @@ async function parseAndValidate(
 
     if (!description)
       err("Description is required");
-    else if (description.length < 20 || description.length > 300)
-      err(`Description must be between 20 and 300 characters (row ${rowNum} has ${description.length})`);
+    else if (description.length < 20 || description.length > 3000)
+      err(`Description must be between 20 and 3000 characters (row ${rowNum} has ${description.length})`);
 
     // imageFileName — required, must carry a supported extension. The actual
     // image match against the uploaded files happens after both are selected.
